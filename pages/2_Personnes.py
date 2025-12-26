@@ -14,6 +14,7 @@ from ui.revenus_scanner import onglet_revenus
 from ui.sankey import afficher_sankey
 from services.sankey import months_range, year_to_date_months
 from services.credits import list_credits_by_person
+from ui.credits_overview import afficher_credit_overview
 
 
 st.set_page_config(page_title="Personnes", layout="wide")
@@ -45,21 +46,7 @@ def main():
         onglet_revenus(conn, person_id=person_id, key_prefix=f"p{person_id}_rev")
 
     with tabs_fixes[3]:
-        st.subheader("Crédit")
-        dfc = list_credits_by_person(conn, person_id=person_id, only_active=True)
-
-        if dfc.empty:
-            st.info("Aucun crédit actif. Crée un sous-compte CREDIT puis configure-le dans Import → Crédit.")
-        else:
-            # KPIs agrégés simples
-            total_mensu = float(dfc["mensualite_theorique"].fillna(0).sum())
-            total_ass = float(dfc["assurance_mensuelle_theorique"].fillna(0).sum())
-            st.metric("Mensualités théoriques totales", f"{(total_mensu + total_ass):,.2f} €".replace(",", " "))
-
-            st.markdown("### Crédits actifs")
-            show = dfc[["nom", "banque", "type_credit", "mensualite_theorique", "assurance_mensuelle_theorique", "account_id"]].copy()
-            st.dataframe(show, use_container_width=True)
-            st.caption("Modifie les paramètres et l’amortissement dans Import → Crédit.")
+        afficher_credit_overview(conn, person_id=person_id)
 
 
     # --- Comptes dynamiques ---
