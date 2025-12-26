@@ -65,3 +65,16 @@ CREATE TABLE IF NOT EXISTS depenses (
 CREATE INDEX IF NOT EXISTS idx_depenses_person_mois
 ON depenses(person_id, mois);
 
+-- Revenus (module indépendant)
+CREATE TABLE IF NOT EXISTS revenus (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id INTEGER NOT NULL,
+    mois TEXT NOT NULL,          -- YYYY-MM-01 (on stocke le mois)
+    categorie TEXT NOT NULL,
+    montant REAL NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_revenus_person_mois
+ON revenus(person_id, mois);

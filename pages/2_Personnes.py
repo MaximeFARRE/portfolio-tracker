@@ -10,6 +10,9 @@ from ui.compte_saisie import bloc_saisie_operation
 from ui.compte_vue import tableau_operations
 from ui.barre_navigation import sidebar_personnes
 from ui.depenses_scanner import onglet_depenses
+from ui.revenus_scanner import onglet_revenus
+from ui.sankey import afficher_sankey
+
 
 
 st.set_page_config(page_title="Personnes", layout="wide")
@@ -38,8 +41,8 @@ def main():
         onglet_depenses(conn, person_id=person_id, key_prefix=f"p{person_id}_dep")
 
     with tabs_fixes[2]:
-        st.subheader("Revenus")
-        st.caption("On le code juste après (copie de Dépenses avec catégories revenus)")
+        onglet_revenus(conn, person_id=person_id, key_prefix=f"p{person_id}_rev")
+
 
     # --- Comptes dynamiques ---
     comptes = repo.list_accounts(conn, person_id=person_id)
@@ -102,6 +105,10 @@ def main():
             with col_d:
                 st.markdown("### Ajouter une opération (dans ce compte)")
                 bloc_saisie_operation(conn, person_id=person_id, account_id=account_id, account_type=account_type, key_prefix=f"p{person_id}_a{account_id}")
+                
+
+            afficher_sankey(conn, person_id=person_id, mois=mois, titre="Sankey — Cashflow du mois")
+
 
     st.divider()
     st.caption("Note V1 : les soldes sont calculés à partir des opérations (flux). La valorisation automatique (cours) viendra plus tard.")
