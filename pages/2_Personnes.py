@@ -13,6 +13,7 @@ from ui.depenses_scanner import onglet_depenses
 from ui.revenus_scanner import onglet_revenus
 from ui.sankey import afficher_sankey
 from services.sankey import months_range, year_to_date_months
+from services.credits import list_credits_by_person
 
 
 st.set_page_config(page_title="Personnes", layout="wide")
@@ -31,7 +32,7 @@ def main():
     nom_personne = st.selectbox("Choisir une personne", noms)
     person_id = int(people.loc[people["name"] == nom_personne, "id"].iloc[0])
 
-    tabs_fixes = st.tabs(["Vue d’ensemble", "Dépenses", "Revenus"])
+    tabs_fixes = st.tabs(["Vue d’ensemble", "Dépenses", "Revenus", "Crédit"])
 
     with tabs_fixes[0]:
         st.subheader("Vue d’ensemble")
@@ -42,6 +43,23 @@ def main():
 
     with tabs_fixes[2]:
         onglet_revenus(conn, person_id=person_id, key_prefix=f"p{person_id}_rev")
+
+    with tabs_fixes[3]:
+        st.subheader("Crédit")
+        dfc = list_credits_by_person(conn, person_id=person_id, only_active=True)
+
+        if dfc.empty:
+            st.info("Aucun crédit actif. Crée un sous-compte CREDIT puis configure-le dans Import → Crédit.")
+        else:
+            # KPIs agrégés simples
+            total_mensu = float(dfc["mensualite_theorique"].fillna(0).sum())
+            total_ass = float(dfc["assurance_mensuelle_theorique"].fillna(0).sum())
+            st.metric("Mensualités théoriques totales", f"{(total_mensu + total_ass):,.2f} €".replace(",", " "))
+
+            st.markdown("### Crédits actifs")
+            show = dfc[["nom", "banque", "type_credit", "mensualite_theorique", "assurance_mensuelle_theorique", "account_id"]].copy()
+            st.dataframe(show, use_container_width=True)
+            st.caption("Modifie les paramètres et l’amortissement dans Import → Crédit.")
 
 
     # --- Comptes dynamiques ---
@@ -100,17 +118,39 @@ def main():
 
             col_g, col_d = st.columns([2, 1], gap="large")
 
-            with col_g:
-                st.markdown("### Historique")
-                tableau_operations(tx_acc)
+            if account_type == "CREDIT":
+                from ui.credit_dashboard import afficher_dashboard_credit
 
-            with col_d:
-                st.markdown("### Ajouter une opération (dans ce compte)")
-                bloc_saisie_operation(conn,person_id=person_id,account_id=account_id,account_type=account_type,key_prefix=f"p{person_id}_a{account_id}",)
+                with col_g:
+                    st.markdown("### Crédit")
+                    afficher_dashboard_credit(conn, person_id=person_id, account_id=account_id)
 
-          
-          
-          
+                with col_d:
+                    st.markdown("### Import / Modification")
+                    st.info("Les paramètres du crédit se modifient dans Import → Crédit.")
+                    st.caption("Les coûts mensuels réels viennent des transactions Bankin (catégorie échéance prêt / emprunt).")
+
+                    # (optionnel) afficher quand même l’historique brut du compte CREDIT si tu en as
+                    st.markdown("### Historique (compte)")
+                    tableau_operations(tx_acc)
+
+            else:
+                with col_g:
+                    st.markdown("### Historique")
+                    tableau_operations(tx_acc)
+
+                with col_d:
+                    st.markdown("### Ajouter une opération (dans ce compte)")
+                    bloc_saisie_operation(
+                        conn,
+                        person_id=person_id,
+                        account_id=account_id,
+                        account_type=account_type,
+                        key_prefix=f"p{person_id}_a{account_id}",
+                    )
+
+                    
+                    
           
  
 

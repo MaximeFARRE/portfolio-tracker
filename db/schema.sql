@@ -78,3 +78,46 @@ CREATE TABLE IF NOT EXISTS revenus (
 
 CREATE INDEX IF NOT EXISTS idx_revenus_person_mois
 ON revenus(person_id, mois);
+
+-- =========================================================
+-- CREDITS
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS credits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id INTEGER NOT NULL,
+  account_id INTEGER NOT NULL,           -- le sous-compte de type CREDIT
+  nom TEXT NOT NULL,
+  banque TEXT,
+  type_credit TEXT,                     -- immo / conso / auto / etudiant / autre
+  capital_emprunte REAL,
+  taux_nominal REAL,
+  taeg REAL,
+  duree_mois INTEGER,
+  mensualite_theorique REAL,
+  assurance_mensuelle_theorique REAL,
+  date_debut TEXT,                      -- YYYY-MM-DD
+  actif INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE,
+  FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+  UNIQUE(account_id)                    -- 1 fiche crédit par sous-compte crédit
+);
+
+CREATE TABLE IF NOT EXISTS credit_amortissements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  credit_id INTEGER NOT NULL,
+  date_echeance TEXT,                   -- YYYY-MM-DD (ou YYYY-MM-01)
+  mensualite REAL,
+  capital_amorti REAL,
+  interets REAL,
+  assurance REAL,
+  crd REAL,                             -- capital restant dû (estimé)
+  annee INTEGER,                        -- pour totaux annuels rapides
+  mois INTEGER,                         -- optionnel, utile si tu veux
+  FOREIGN KEY(credit_id) REFERENCES credits(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_credit_person ON credits(person_id);
+CREATE INDEX IF NOT EXISTS idx_amort_credit_date ON credit_amortissements(credit_id, date_echeance);
+CREATE INDEX IF NOT EXISTS idx_amort_credit_annee ON credit_amortissements(credit_id, annee);
