@@ -63,16 +63,20 @@ def afficher_credit_overview(conn, person_id: int):
         # Coût réel mois courant (Bankin) par crédit
         cout_reel = float(cout_reel_mois_credit_via_bankin(conn, credit_id=credit_id, mois_yyyy_mm_01=mois_courant))
 
-        # Temps restant (depuis amortissement)
-        amort = get_amortissements(conn, credit_id=credit_id)
-        if not amort.empty:
-            amort["date_echeance"] = pd.to_datetime(amort["date_echeance"], errors="coerce")
-            amort = amort.dropna(subset=["date_echeance"]).sort_values("date_echeance")
-            date_fin = amort["date_echeance"].max().date()
+        # Dates crédit (début remboursement + fin) -> gère le différé
+        dates = get_credit_dates(conn, credit_id=credit_id)
+        date_debut_remb = dates.get("date_debut_remboursement")
+        date_fin = dates.get("date_fin")
+
+        # Temps restant (mois) basé sur la date de fin
+        if date_fin is not None:
             mois_restants = max(0, (date_fin.year - today.year) * 12 + (date_fin.month - today.month))
         else:
-            date_fin = None
             mois_restants = None
+
+        # Amortissement (on le garde pour le graphe global plus bas)
+        amort = get_amortissements(conn, credit_id=credit_id)
+
 
         # Aggreg KPI
         total_crd += crd_today
@@ -97,6 +101,8 @@ def afficher_credit_overview(conn, person_id: int):
             "Capital remboursé": capital_rembourse,
             "Mensualité théorique": mensu_theo,
             "Coût réel (mois)": cout_reel,
+            "Début remboursement": date_debut_remb.isoformat() if date_debut_remb else "—",
+            "Fin": date_fin.isoformat() if date_fin else "—",
             "Temps restant (mois)": mois_restants,
             "% remboursé": prog,
         })
