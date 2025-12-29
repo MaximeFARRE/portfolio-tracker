@@ -18,6 +18,7 @@ from ui.credits_overview import afficher_credit_overview
 from ui.private_equity_overview import afficher_private_equity_overview
 from ui.compte_bourse import afficher_compte_bourse
 from ui.entreprises_overview import afficher_entreprises_overview
+from ui.liquidites_overview import afficher_liquidites_overview 
 from utils.format_monnaie import money
 
 
@@ -37,7 +38,7 @@ def main():
     nom_personne = st.selectbox("Choisir une personne", noms)
     person_id = int(people.loc[people["name"] == nom_personne, "id"].iloc[0])
 
-    tabs_fixes = st.tabs(["Vue d’ensemble", "Dépenses", "Revenus", "Crédit", "Private Equity", "Entreprises"])
+    tabs_fixes = st.tabs(["Vue d’ensemble", "Dépenses", "Revenus", "Crédit", "Private Equity", "Entreprises", "Liquidités"])
 
     with tabs_fixes[0]:
         st.subheader("Vue d’ensemble")
@@ -57,7 +58,9 @@ def main():
     
     with tabs_fixes[5]:
         afficher_entreprises_overview(conn, person_id=person_id)
-
+        
+    with tabs_fixes[6]:
+        afficher_liquidites_overview(conn, person_id=person_id)
 
     # --- Comptes dynamiques ---
     comptes = repo.list_accounts(conn, person_id=person_id)

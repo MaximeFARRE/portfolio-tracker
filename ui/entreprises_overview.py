@@ -12,9 +12,51 @@ def _fmt_eur(x: float) -> str:
     except Exception:
         return "0,00 €"
 
+def _kpi_card(title: str, value: str, subtitle: str = "", emoji: str = "", tone: str = "neutral"):
+    import html  # <-- important : échappe les caractères HTML
+
+    tones = {
+        "primary": ("#111827", "#E5E7EB"),
+        "green": ("#0B3B2E", "#D1FAE5"),
+        "blue": ("#1E3A8A", "#DBEAFE"),
+        "purple": ("#4C1D95", "#EDE9FE"),
+        "neutral": ("#111827", "#F3F4F6"),
+    }
+    bg, fg = tones.get(tone, tones["neutral"])
+
+    # 🔒 On échappe pour éviter qu'un texte contienne </div> ou autre
+    title = html.escape(str(title))
+    value = html.escape(str(value))
+    subtitle = html.escape(str(subtitle))
+    emoji = html.escape(str(emoji))
+
+    st.markdown(
+        f"""
+        <div style="
+            background:{bg};
+            color:{fg};
+            border-radius:16px;
+            padding:14px 16px;
+            box-shadow:0 6px 18px rgba(0,0,0,0.08);
+            min-height:96px;
+        ">
+            <div style="font-size:14px; opacity:0.9; font-weight:600;">
+                {emoji} {title}
+            </div>
+            <div style="font-size:26px; font-weight:800; margin-top:6px;">
+                {value}
+            </div>
+            <div style="font-size:13px; opacity:0.85; margin-top:4px;">
+                {subtitle if subtitle else "&nbsp;"}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
 
 def afficher_entreprises_overview(conn, person_id: int, key_prefix: str = "ent"):
-    st.subheader("🏢 Entreprises (non cotées)")
+    st.subheader("🏢 Entreprises ")
     st.caption("Valorisation partagée : si quelqu’un modifie la valo, tout le monde voit la mise à jour.")
 
     people = repo.list_people(conn)
@@ -51,49 +93,137 @@ def afficher_entreprises_overview(conn, person_id: int, key_prefix: str = "ent")
             if years > 0:
                 cagr_port = (value_total / initial_total) ** (1 / years) - 1
 
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Valeur actuelle totale", _fmt_eur(value_total))
-        k2.metric("Investissement initial total", _fmt_eur(initial_total))
-        if perf_total_pct is None:
-            k3.metric("Perf totale (sur initial)", "—")
-        else:
-            k3.metric("Perf totale (sur initial)", f"{_fmt_eur(perf_total_eur)} ({perf_total_pct:.1f}%)")
+        # ─────────────────────────────────────────────
+        # KPI V2 (cards + % + micro-visualisation)
+        # ─────────────────────────────────────────────
+        total = value_total if abs(value_total) > 1e-9 else 0.0
 
-        k4, k5, k6 = st.columns(3)
-        k4.metric("CCA total", _fmt_eur(cca_total))
-        if cagr_port is None:
-            k5.metric("CAGR portefeuille", "—")
-        else:
-            k5.metric("CAGR portefeuille", f"{cagr_port*100:.1f}% / an")
-        k6.metric("Nombre d’entreprises", str(len(positions)))
+        def _pct(x: float) -> float:
+            if total == 0:
+                return 0.0
+            return (x / total) * 100.0
+
+        perf_str = "—" if perf_total_pct is None else f"{_fmt_eur(perf_total_eur)} ({perf_total_pct:.1f}%)"
+        cagr_str = "—" if cagr_port is None else f"{cagr_port*100:.1f}% / an"
+
+        c1, c2, c3, c4 = st.columns([1.6, 1, 1, 1])
+        with c1:
+            _kpi_card(
+                "Valeur actuelle totale",
+                _fmt_eur(value_total),
+                f"Perf : {perf_str} • CAGR : {cagr_str}",
+                emoji="🏢",
+                tone="primary",
+            )
+        with c2:
+            _kpi_card("Invest initial total", _fmt_eur(initial_total), "Base de perf", "💶", "blue")
+        with c3:
+            _kpi_card("CCA total", _fmt_eur(cca_total), "Non inclus dans perf", "🏦", "purple")
+        with c4:
+            _kpi_card("Nombre d’entreprises", str(len(positions)), "", "📌", "green")
 
         st.caption("Perf et CAGR calculés uniquement sur l’investissement initial (CCA ignoré).")
 
-        # Répartition (allocation)
+        # Micro-visualisation : concentration Top1 / Top3
+        top_sorted = positions.sort_values("value_now", ascending=False)
+        top1 = float(top_sorted["value_now"].head(1).sum())
+        top3 = float(top_sorted["value_now"].head(3).sum())
+
+        st.caption("Concentration du portefeuille (valeur actuelle)")
+
+        top_sorted = positions.sort_values("value_now", ascending=False)
+        total_val = float(top_sorted["value_now"].sum())
+
+        top1 = float(top_sorted["value_now"].head(1).sum())
+        top3 = float(top_sorted["value_now"].head(3).sum())
+        top2_3 = max(top3 - top1, 0.0)
+        rest = max(total_val - top3, 0.0)
+
+        def _pct(x: float) -> float:
+            return 0.0 if total_val <= 0 else (x / total_val) * 100.0
+
+        conc_df = pd.DataFrame([
+            {"segment": "Top 1", "pct": _pct(top1)},
+            {"segment": "Top 2–3", "pct": _pct(top2_3)},
+            {"segment": "Reste", "pct": _pct(rest)},
+        ])
+
+        # Mini infos lisibles
+        st.write(f"Top 1 : **{_pct(top1):.0f}%**  •  Top 3 : **{_pct(top3):.0f}%**")
+
+        conc_df["row"] = "Concentration"  # <- une ligne unique pour afficher une seule barre
+
+        conc_bar = (
+            alt.Chart(conc_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("pct:Q", stack="zero", title=""),
+                y=alt.Y("row:N", title="", axis=None),  # <- pas d'axe, juste 1 barre
+                color=alt.Color("segment:N", title=""),
+                tooltip=[
+                    alt.Tooltip("segment:N", title="Segment"),
+                    alt.Tooltip("pct:Q", title="Part (%)", format=".1f"),
+                ],
+            )
+            .properties(height=50)
+        )
+        st.altair_chart(conc_bar, use_container_width=True)
+
+
+        st.divider()
+        
+        # ─────────────────────────────────────────────
+        # Répartition V2 : Donut + Top + tableau (expander)
+        # ─────────────────────────────────────────────
         st.markdown("### Répartition (par valeur actuelle)")
+
         alloc = positions[["enterprise_name", "value_now", "initial", "cca"]].copy()
-        total = float(alloc["value_now"].sum())
-        alloc["allocation_%"] = (alloc["value_now"] / total * 100.0) if total > 0 else 0.0
+        total_val = float(alloc["value_now"].sum())
+        alloc["allocation_%"] = (alloc["value_now"] / total_val * 100.0) if total_val > 0 else 0.0
         alloc = alloc.sort_values("value_now", ascending=False)
 
-        # Petit graphe barres + tableau recap
-        st.bar_chart(data=alloc.set_index("enterprise_name")["allocation_%"], use_container_width=True)
+        # Donut chart (Altair)
+        donut_df = alloc.copy()
+        donut_df["allocation_%"] = donut_df["allocation_%"].round(2)
 
+        donut = (
+            alt.Chart(donut_df)
+            .mark_arc(innerRadius=55)
+            .encode(
+                theta=alt.Theta(field="allocation_%", type="quantitative"),
+                color=alt.Color("enterprise_name:N", title="Entreprise"),  # ✅ couleur différente
+                tooltip=[
+                    alt.Tooltip("enterprise_name:N", title="Entreprise"),
+                    alt.Tooltip("allocation_%:Q", title="Allocation (%)"),
+                    alt.Tooltip("value_now:Q", title="Valeur (€)", format=",.0f"),
+                ],
+            )
+            .properties(height=260)
+        )
+
+        st.altair_chart(donut, use_container_width=True)
+
+        # Perf (fix V1 : calcul correct)
         alloc["Perf initial (€)"] = alloc["value_now"] - alloc["initial"]
-        alloc["Perf initial (%)"] = alloc.apply(lambda r: (r["Perf initial (€)"] / r["initial"] * 100.0) if r["initial"] > 0 else None, axis=1)
+        alloc["Perf initial (%)"] = alloc.apply(
+            lambda r: ((r["value_now"] - r["initial"]) / r["initial"] * 100.0) if r["initial"] > 0 else None,
+            axis=1
+        )
 
-        st.dataframe(
-            alloc.rename(
+        # Tableau en expander (clean)
+        with st.expander("Voir le détail (allocation + perf)", expanded=False):
+            df_view = alloc.rename(
                 columns={
                     "enterprise_name": "Entreprise",
                     "value_now": "Valeur actuelle (€)",
                     "initial": "Invest initial (€)",
                     "cca": "CCA (€)",
+                    "allocation_%": "Allocation (%)",
                 }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+            ).copy()
+            st.dataframe(df_view, use_container_width=True, hide_index=True)
+
+        
 
     st.divider()
 
@@ -138,28 +268,50 @@ def afficher_entreprises_overview(conn, person_id: int, key_prefix: str = "ent")
             perf_eur = my_net - my_initial
             perf_pct = (perf_eur / my_initial) * 100.0
 
+        # ─────────────────────────────────────────────
+        # KPI V2 (perso + globaux)
+        # ─────────────────────────────────────────────
         st.markdown("### Mes KPIs (personnels)")
-        p1, p2, p3 = st.columns(3)
-        p1.metric("Ma valorisation", _fmt_eur(my_gross))
-        p2.metric("Ma dette (quote-part)", _fmt_eur(my_debt))
-        p3.metric("Ma valeur nette", _fmt_eur(my_net))
 
-        p4, p5, p6 = st.columns(3)
-        p4.metric("Investissement initial", _fmt_eur(my_initial))
-        p5.metric("Apport CCA", _fmt_eur(my_cca))
-        if perf_eur is None:
-            p6.metric("Perf (sur initial)", "—")
-        else:
-            p6.metric("Perf (sur initial)", f"{_fmt_eur(perf_eur)} ({perf_pct:.1f}%)")
+        perf_str = "—" if perf_eur is None else f"{_fmt_eur(perf_eur)} ({perf_pct:.1f}%)"
+
+        a1, a2, a3, a4 = st.columns([1.6, 1, 1, 1])
+        with a1:
+            _kpi_card("Ma valeur nette", _fmt_eur(my_net), f"Perf : {perf_str}", "👤", "primary")
+        with a2:
+            _kpi_card("Ma valorisation", _fmt_eur(my_gross), "", "📈", "blue")
+        with a3:
+            _kpi_card("Ma dette (quote-part)", _fmt_eur(my_debt), "", "🏦", "purple")
+        with a4:
+            _kpi_card("Invest initial", _fmt_eur(my_initial), "Base perf", "💶", "green")
+
+        # Micro-visuels (ratios)
+        st.caption("Ratios")
+        colR1, colR2 = st.columns(2)
+        with colR1:
+            st.write("Dette / Valorisation (moi)")
+            ratio = (my_debt / my_gross) if my_gross > 0 else 0.0
+            st.progress(min(max(ratio, 0.0), 1.0))
+        with colR2:
+            st.write("Ma part de la valeur nette entreprise")
+            share = (my_net / net) if net > 0 else 0.0
+            st.progress(min(max(share, 0.0), 1.0))
 
         st.caption("Perf = (valeur nette - investissement initial). Les apports en CCA ne sont pas pris en compte.")
-        # --- KPIs globaux ---
 
         st.markdown("### KPIs globaux (entreprise)")
-        g1, g2, g3 = st.columns(3)
-        g1.metric("Valorisation totale", _fmt_eur(valo))
-        g2.metric("Dette totale", _fmt_eur(debt))
-        g3.metric("Valeur nette totale", _fmt_eur(net))
+        b1, b2, b3 = st.columns([1.6, 1, 1])
+        with b1:
+            _kpi_card("Valeur nette totale", _fmt_eur(net), "", "🏢", "primary")
+        with b2:
+            _kpi_card("Valorisation totale", _fmt_eur(valo), "", "📌", "blue")
+        with b3:
+            _kpi_card("Dette totale", _fmt_eur(debt), "", "⚓", "purple")
+
+        st.caption("Dette / Valorisation (entreprise)")
+        ratio_ent = (debt / valo) if valo > 0 else 0.0
+        st.progress(min(max(ratio_ent, 0.0), 1.0))
+        
 
 
     # --- Ajouter ---
