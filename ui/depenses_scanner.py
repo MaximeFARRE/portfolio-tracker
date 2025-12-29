@@ -2,7 +2,9 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 import matplotlib.pyplot as plt
-
+import html
+import numpy as np
+import altair as alt
 
 from services.depenses_repository import (
     ajouter_depense,
@@ -187,57 +189,137 @@ def onglet_depenses(conn, person_id: int, key_prefix: str = "depenses"):
     st.divider()
     st.subheader("Graphiques")
 
-    # --- Choix période ---
-    periode = st.radio(
-        "Période",
-        ["Total", "12 derniers mois", "Dernier mois"],
-        horizontal=True,
-        key=f"{key_prefix}_periode",
+    # --- Data du mois sélectionné
+    df_detail = depenses_du_mois(conn, person_id, mois)
+    df_detail["montant"] = pd.to_numeric(df_detail["montant"], errors="coerce").fillna(0.0)
+
+    total_mois = float(df_detail["montant"].sum())
+    nb_lignes = int(len(df_detail))
+
+    # --- Répartition catégories (mois)
+    df_cat = (
+        df_detail.groupby("categorie", as_index=False)["montant"]
+        .sum()
+        .sort_values("montant", ascending=False)
     )
 
-    # --- Courbe : total par mois ---
-    df_mois = depenses_par_mois(conn, person_id).copy()
-    if df_mois.empty:
-        st.info("Pas assez de données pour afficher une courbe.")
-        return
+    top_cat = None
+    top_cat_pct = 0.0
+    if not df_cat.empty and total_mois > 0:
+        top_cat = str(df_cat.iloc[0]["categorie"])
+        top_cat_pct = float(df_cat.iloc[0]["montant"]) / total_mois * 100.0
 
-    df_mois["mois"] = pd.to_datetime(df_mois["mois"])
-    df_mois = df_mois.sort_values("mois")
+    # --- Moyenne mensuelle (sur 12 derniers mois) : on calcule sur depenses_par_mois()
+    df_mois_all = depenses_par_mois(conn, person_id)
+    df_mois_all["total"] = pd.to_numeric(df_mois_all["total"], errors="coerce").fillna(0.0)
+    df_last12 = df_mois_all.tail(12).copy()
+    moy_12 = float(df_last12["total"].mean()) if not df_last12.empty else 0.0
 
-    if periode == "12 derniers mois":
-        df_mois = df_mois.tail(12)
-    elif periode == "Dernier mois":
-        df_mois = df_mois.tail(1)
-
-    df_courbe = df_mois.set_index("mois")[["total"]]
-    df_courbe = df_courbe.rename(columns={"total": "Dépenses"})
-
-    st.line_chart(df_courbe, height=260)
-
-    # --- Camembert : répartition du mois sélectionné ---
-    st.markdown("### Répartition du mois sélectionné")
-    df_mois_detail = depenses_du_mois(conn, person_id, mois)
-
-    if df_mois_detail.empty:
-        st.info("Aucune dépense ce mois-ci.")
-    else:
-        repartition = (
-            df_mois_detail.groupby("categorie")["montant"]
-            .sum()
-            .reindex(CATEGORIES_DEPENSES, fill_value=0.0)
-            .reset_index()
-        )
-        repartition.columns = ["Catégorie", "Montant"]
-
-        # On supprime les catégories à 0 pour un camembert propre
-        repartition = repartition[repartition["Montant"] > 0]
-
-        if repartition.empty:
-            st.info("Aucune dépense ce mois-ci.")
+    # ─────────────────────────────────────────────
+    # KPI V2
+    # ─────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns([1.6, 1, 1, 1])
+    with c1:
+        _kpi_card("Dépenses (mois sélectionné)", f"{total_mois:,.2f} €".replace(",", " "), f"{mois}", "💸", "primary")
+    with c2:
+        _kpi_card("Moyenne (12 mois)", f"{moy_12:,.2f} €".replace(",", " "), "moyenne mensuelle", "📊", "blue")
+    with c3:
+        _kpi_card("Nb de lignes", str(nb_lignes), "transactions du mois", "🧾", "green")
+    with c4:
+        if top_cat:
+            _kpi_card("Top catégorie", top_cat, f"{top_cat_pct:.0f}% du mois", "🏷️", "purple")
         else:
-            st.pyplot(_camembert(repartition))
-            
-            
+            _kpi_card("Top catégorie", "—", "", "🏷️", "purple")
+
+    st.divider()
+
+    # ─────────────────────────────────────────────
+    # Évolution mensuelle (12 derniers mois)
+    # ─────────────────────────────────────────────
+    st.caption("Évolution des dépenses (12 derniers mois)")
+
+    df_plot = df_last12.copy()
+    df_plot["mois"] = df_plot["mois"].astype(str)
+    df_plot["total"] = pd.to_numeric(df_plot["total"], errors="coerce").fillna(0.0)
+
+    chart_mois = (
+        alt.Chart(df_plot)
+        .mark_bar()
+        .encode(
+            x=alt.X("mois:N", title="", axis=alt.Axis(labelAngle=-45)),
+            y=alt.Y("total:Q", title="€"),
+            tooltip=[
+                alt.Tooltip("mois:N", title="Mois"),
+                alt.Tooltip("total:Q", title="Dépenses", format=",.2f"),
+            ],
+        )
+        .properties(height=260)
+    )
+
+    st.altair_chart(chart_mois, use_container_width=True)
+
+    st.divider()
+
+    # ─────────────────────────────────────────────
+    # Répartition par catégories
+    # ─────────────────────────────────────────────
+    st.caption("Répartition par catégories (mois sélectionné)")
+
+    left, right = st.columns([1.2, 1])
+
+    # Préparation des données
+    df_pie = df_cat.copy()
+    df_pie["montant"] = pd.to_numeric(df_pie["montant"], errors="coerce").fillna(0.0)
+    df_pie = df_pie.sort_values("montant", ascending=False).head(10)
+
+    total_cat = float(df_pie["montant"].sum())
+    df_pie["pct"] = (df_pie["montant"] / total_cat * 100.0) if total_cat > 0 else 0.0
+
+    with left:
+        st.caption("Top catégories (part %)")
+        donut = (
+            alt.Chart(df_pie)
+            .mark_arc(innerRadius=55)
+            .encode(
+                theta=alt.Theta("montant:Q"),
+                color=alt.Color("categorie:N", legend=None),  # couleurs différentes auto
+                tooltip=[
+                    alt.Tooltip("categorie:N", title="Catégorie"),
+                    alt.Tooltip("montant:Q", title="Montant", format=",.2f"),
+                    alt.Tooltip("pct:Q", title="Part", format=".1f"),
+                ],
+            )
+            .properties(height=260)
+        )
+        st.altair_chart(donut, use_container_width=True)
+
+    with right:
+        st.caption("Top 8 catégories (€)")
+        df_bar = df_cat.copy()
+        df_bar["montant"] = pd.to_numeric(df_bar["montant"], errors="coerce").fillna(0.0)
+        df_bar = df_bar.sort_values("montant", ascending=False).head(8)
+
+        bar = (
+            alt.Chart(df_bar)
+            .mark_bar()
+            .encode(
+                x=alt.X("montant:Q", title="€"),
+                y=alt.Y("categorie:N", sort="-x", title=""),
+                color=alt.Color("categorie:N", legend=None),
+                tooltip=[
+                    alt.Tooltip("categorie:N", title="Catégorie"),
+                    alt.Tooltip("montant:Q", title="Montant", format=",.2f"),
+                ],
+            )
+            .properties(height=280)
+        )
+        st.altair_chart(bar, use_container_width=True)
+
+    # Détails cachés
+    with st.expander("Voir le détail des catégories", expanded=False):
+        st.dataframe(df_cat, use_container_width=True, hide_index=True)
+
+                
 
 def _camembert(df_repartition: pd.DataFrame):
 
@@ -249,4 +331,119 @@ def _camembert(df_repartition: pd.DataFrame):
         startangle=90,
     )
     ax.axis("equal")
+    return fig
+
+import html
+import numpy as np
+
+def _kpi_card(title: str, value: str, subtitle: str = "", emoji: str = "", tone: str = "neutral"):
+    tones = {
+        "primary": ("#111827", "#E5E7EB"),
+        "blue": ("#1E3A8A", "#DBEAFE"),
+        "green": ("#0B3B2E", "#D1FAE5"),
+        "purple": ("#4C1D95", "#EDE9FE"),
+        "neutral": ("#111827", "#F3F4F6"),
+    }
+    bg, fg = tones.get(tone, tones["neutral"])
+
+    title = html.escape(str(title))
+    value = html.escape(str(value))
+    subtitle = html.escape(str(subtitle))
+    emoji = html.escape(str(emoji))
+
+    st.markdown(
+        f"""
+        <div style="
+            background:{bg};
+            color:{fg};
+            border-radius:16px;
+            padding:14px 16px;
+            box-shadow:0 6px 18px rgba(0,0,0,0.08);
+            min-height:96px;
+        ">
+            <div style="font-size:14px; opacity:0.9; font-weight:600;">
+                {emoji} {title}
+            </div>
+            <div style="font-size:26px; font-weight:800; margin-top:6px;">
+                {value}
+            </div>
+            <div style="font-size:13px; opacity:0.85; margin-top:4px;">
+                {subtitle if subtitle else "&nbsp;"}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def _pie_categories(df_cat: pd.DataFrame, title: str = ""):
+    """df_cat: colonnes ['categorie','montant'] triées desc."""
+    fig, ax = plt.subplots()
+    if df_cat is None or df_cat.empty:
+        ax.text(0.5, 0.5, "Aucune donnée", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    labels = df_cat["categorie"].astype(str).tolist()
+    values = df_cat["montant"].astype(float).tolist()
+
+    # Couleurs auto (différentes)
+    colors = plt.cm.tab20(np.linspace(0, 1, len(values)))
+
+    ax.pie(
+        values,
+        labels=None,              # on évite le bazar des labels dans le pie
+        autopct="%1.0f%%",
+        startangle=90,
+        colors=colors,
+        pctdistance=0.75
+    )
+    # Donut
+    centre = plt.Circle((0, 0), 0.50, fc="white")
+    ax.add_artist(centre)
+    ax.axis("equal")
+
+    if title:
+        ax.set_title(title)
+
+    # Légende à droite (plus clean)
+    ax.legend(labels, loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+    return fig
+
+
+def _barh_top_categories(df_cat: pd.DataFrame, title: str = ""):
+    fig, ax = plt.subplots()
+    if df_cat is None or df_cat.empty:
+        ax.text(0.5, 0.5, "Aucune donnée", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    df = df_cat.copy()
+    df = df.sort_values("montant", ascending=True)  # barh: ascending pour joli
+    ax.barh(df["categorie"].astype(str), df["montant"].astype(float))
+    ax.set_xlabel("€")
+    ax.set_ylabel("")
+    if title:
+        ax.set_title(title)
+    return fig
+
+
+def _bar_mensuel(df_mois: pd.DataFrame, title: str = ""):
+    """df_mois: colonnes ['mois','total'] (mois au format YYYY-MM)."""
+    fig, ax = plt.subplots()
+    if df_mois is None or df_mois.empty:
+        ax.text(0.5, 0.5, "Aucune donnée", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    df = df_mois.copy()
+    df["mois"] = df["mois"].astype(str)
+    df["total"] = pd.to_numeric(df["total"], errors="coerce").fillna(0.0)
+
+    ax.bar(df["mois"], df["total"])
+    ax.set_ylabel("€")
+    ax.set_xlabel("")
+    ax.tick_params(axis="x", rotation=45)
+    if title:
+        ax.set_title(title)
     return fig

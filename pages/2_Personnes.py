@@ -85,13 +85,6 @@ def main():
     # Mois courant au format DB (YYYY-MM-01) pour le Sankey
     mois = f"{int(aujourd_hui.year):04d}-{int(aujourd_hui.month):02d}-01"
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Solde global (flux)", f"{solde_global:,.2f} €".replace(",", " "))
-    c2.metric("Cashflow du mois (flux)", f"{cashflow_mois:,.2f} €".replace(",", " "))
-    c3.metric("Nombre d’opérations", str(len(tx_person)))
-
-    st.divider()
-
     # --- Ajouter un compte ---
     bloc_ajout_compte(conn, person_id)
 
