@@ -16,6 +16,7 @@ from services.sankey import months_range, year_to_date_months
 from services.credits import list_credits_by_person
 from ui.credits_overview import afficher_credit_overview
 from ui.private_equity_overview import afficher_private_equity_overview
+from ui.compte_bourse import afficher_compte_bourse
 
 
 st.set_page_config(page_title="Personnes", layout="wide")
@@ -126,21 +127,30 @@ def main():
                     tableau_operations(tx_acc)
 
             else:
-                with col_g:
-                    st.markdown("### Historique")
-                    tableau_operations(tx_acc)
-
-                with col_d:
-                    st.markdown("### Ajouter une opération (dans ce compte)")
-                    bloc_saisie_operation(
+                if account_type in {"PEA", "CTO", "CRYPTO"}:
+                    afficher_compte_bourse(
                         conn,
                         person_id=person_id,
                         account_id=account_id,
                         account_type=account_type,
+                        tx_acc=tx_acc,
                         key_prefix=f"p{person_id}_a{account_id}",
                     )
+                else:
+                    with col_g:
+                        st.markdown("### Historique")
+                        tableau_operations(tx_acc)
 
-                    
+                    with col_d:
+                        st.markdown("### Ajouter une opération (dans ce compte)")
+                        bloc_saisie_operation(
+                            conn,
+                            person_id=person_id,
+                            account_id=account_id,
+                            account_type=account_type,
+                            key_prefix=f"p{person_id}_a{account_id}",
+                        )
+
                     
           
  

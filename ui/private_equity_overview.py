@@ -288,8 +288,10 @@ def afficher_private_equity_overview(conn, person_id: int):
 
 
     st.markdown("**Répartition de la valeur par plateforme**")
+    
+    col_value = "value_used" if "value_used" in positions.columns else ("value" if "value" in positions.columns else None)
+    by_plat = positions.groupby("platform")[col_value].sum().sort_values(ascending=False) if col_value else positions.groupby("platform").size().sort_values(ascending=False)
 
-    by_plat = positions.groupby("platform")["value_used"].sum().sort_values(ascending=False)
     if by_plat.empty:
         st.info("Aucune donnée plateforme.")
     else:

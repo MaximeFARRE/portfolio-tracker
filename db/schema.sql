@@ -1,5 +1,6 @@
 PRAGMA foreign_keys = ON;
 
+
 -- People
 CREATE TABLE IF NOT EXISTS people (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,3 +173,45 @@ CREATE TABLE IF NOT EXISTS pe_cash_transactions (
 
 CREATE INDEX IF NOT EXISTS idx_pe_cash_person_platform_date
 ON pe_cash_transactions(person_id, platform, date);
+
+
+-- =========================================
+-- BOURSE / PRICING (V1)
+-- =========================================
+
+-- Métadonnées d’actifs (sans toucher la table assets existante)
+CREATE TABLE IF NOT EXISTS asset_meta (
+  asset_id INTEGER PRIMARY KEY,
+  exchange TEXT,
+  isin TEXT,
+  price_source TEXT DEFAULT 'AUTO',  -- AUTO | MANUAL
+  status TEXT DEFAULT 'OK',          -- OK | NOT_FOUND
+  FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+);
+
+-- Prix cachés (dernier prix connu, stocké par date)
+CREATE TABLE IF NOT EXISTS prices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id INTEGER NOT NULL,
+  date TEXT NOT NULL,               -- YYYY-MM-DD
+  price REAL NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'EUR',
+  source TEXT NOT NULL DEFAULT 'AUTO', -- AUTO | MANUAL
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+  UNIQUE(asset_id, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prices_asset_date ON prices(asset_id, date);
+
+CREATE TABLE IF NOT EXISTS fx_rates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  base_ccy TEXT NOT NULL,
+  quote_ccy TEXT NOT NULL,
+  asof TEXT NOT NULL,
+  rate REAL NOT NULL,
+  UNIQUE(base_ccy, quote_ccy, asof)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fx_pair_date
+ON fx_rates(base_ccy, quote_ccy, asof);
