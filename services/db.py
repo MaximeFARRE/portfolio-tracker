@@ -34,6 +34,27 @@ class SyncedLibsqlConn:
         except Exception:
             pass
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # si pas d'erreur, on commit+sync
+        if exc_type is None:
+            try:
+                self.commit()
+            except Exception:
+                pass
+        # on ferme toujours
+        try:
+            self.close()
+        except Exception:
+            pass
+        # False = ne pas masquer les exceptions
+        return False
+
+
+
+
 def get_conn():
     # 1) Lire les secrets Streamlit (Cloud) ou env vars (local)
     url = None
@@ -126,6 +147,16 @@ def ensure_snapshots_table(conn: sqlite3.Connection) -> None:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_person_date ON patrimoine_snapshots(person_id, snapshot_date);")
 
+def _row_value(row, key: str, idx: int = 0):
+    """
+    Compat sqlite3.Row (row["c"]) ET tuples libsql (row[0]).
+    """
+    if row is None:
+        return None
+    try:
+        return row[key]
+    except Exception:
+        return row[idx]
 
 
 def seed_minimal() -> None:
@@ -137,7 +168,8 @@ def seed_minimal() -> None:
     init_db()
     with get_conn() as conn:
         # People
-        c = conn.execute("SELECT COUNT(*) AS c FROM people;").fetchone()["c"]
+        row = conn.execute("SELECT COUNT(*) AS c FROM people;").fetchone()
+        c = _row_value(row, "c", 0)
         if c == 0:
             for name in ["Papa", "Maman", "Maxime", "Valentin"]:
                 conn.execute("INSERT INTO people(name) VALUES (?);", (name,))
@@ -238,40 +270,3 @@ def ensure_weekly_tables(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_psfw_family_week ON patrimoine_snapshots_family_weekly(family_id, week_date);")
     conn.commit()
 
-class SyncedLibsqlConn:
-    def __init__(self, conn):
-        self._conn = conn
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        # si pas d'erreur, on commit+sync
-        if exc_type is None:
-            try:
-                self.commit()
-            except Exception:
-                pass
-        # on ferme toujours
-        try:
-            self.close()
-        except Exception:
-            pass
-        # False = ne pas masquer les exceptions
-        return False
-
-    def commit(self):
-        self._conn.commit()
-        try:
-            self._conn.sync()
-        except Exception:
-            pass
-
-    def close(self):
-        try:
-            self._conn.close()
-        except Exception:
-            pass
