@@ -238,3 +238,40 @@ def ensure_weekly_tables(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_psfw_family_week ON patrimoine_snapshots_family_weekly(family_id, week_date);")
     conn.commit()
 
+class SyncedLibsqlConn:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # si pas d'erreur, on commit+sync
+        if exc_type is None:
+            try:
+                self.commit()
+            except Exception:
+                pass
+        # on ferme toujours
+        try:
+            self.close()
+        except Exception:
+            pass
+        # False = ne pas masquer les exceptions
+        return False
+
+    def commit(self):
+        self._conn.commit()
+        try:
+            self._conn.sync()
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            self._conn.close()
+        except Exception:
+            pass
