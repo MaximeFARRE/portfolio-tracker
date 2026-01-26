@@ -581,3 +581,182 @@ def rebuild_snapshots_person_from_last(
         "n_weeks": len(weeks),
         "n_ok": n_ok,
     }
+
+
+def _ensure_rebuild_watermarks(conn) -> None:
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS rebuild_watermarks (
+      scope TEXT NOT NULL,          -- ex: 'WEEKLY_PERSON'
+      entity_id INTEGER NOT NULL,   -- person_id
+      last_tx_id INTEGER,
+      last_tx_created_at TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(scope, entity_id)
+    );
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rw_scope_entity ON rebuild_watermarks(scope, entity_id);")
+    conn.commit()
+
+
+def _get_person_watermark(conn, person_id: int) -> dict:
+    _ensure_rebuild_watermarks(conn)
+    row = conn.execute(
+        "SELECT last_tx_id, last_tx_created_at FROM rebuild_watermarks WHERE scope=? AND entity_id=?",
+        ("WEEKLY_PERSON", int(person_id)),
+    ).fetchone()
+    if not row:
+        return {"last_tx_id": None, "last_tx_created_at": None}
+    return {"last_tx_id": row["last_tx_id"], "last_tx_created_at": row["last_tx_created_at"]}
+
+
+def _set_person_watermark(conn, person_id: int, last_tx_id: int | None, last_tx_created_at: str | None) -> None:
+    _ensure_rebuild_watermarks(conn)
+    now = pd.Timestamp.now(tz="Europe/Paris").replace(microsecond=0).isoformat()
+    conn.execute(
+        """
+        INSERT INTO rebuild_watermarks(scope, entity_id, last_tx_id, last_tx_created_at, updated_at)
+        VALUES (?,?,?,?,?)
+        ON CONFLICT(scope, entity_id) DO UPDATE SET
+          last_tx_id = excluded.last_tx_id,
+          last_tx_created_at = excluded.last_tx_created_at,
+          updated_at = excluded.updated_at
+        """,
+        ("WEEKLY_PERSON", int(person_id), last_tx_id, last_tx_created_at, now),
+    )
+    conn.commit()
+
+
+def rebuild_snapshots_person_backdated_aware(
+    conn,
+    person_id: int,
+    safety_weeks: int = 4,
+    fallback_lookback_days: int = 365,
+) -> dict:
+    """
+    B4: Rebuild backdated-aware (transactions ajoutées récemment mais avec date ancienne)
+    - Detecte les NOUVELLES transactions depuis le dernier run (via id/created_at)
+    - Trouve la date métier la plus ancienne parmi ces nouvelles transactions
+    - Rebuild de la semaine correspondante (moins safety_weeks) jusqu'à aujourd'hui
+    - Met à jour un watermark (last_tx_id / last_tx_created_at)
+
+    Limite: si tu EDITES une transaction existante, on ne la détecte pas (pas d'updated_at).
+    """
+    _ensure_rebuild_watermarks(conn)
+
+    # Seuil "aujourd'hui" en weekly
+    end = market_history.week_start(_today_paris_date())
+
+    # 1) watermark actuel
+    wm = _get_person_watermark(conn, person_id)
+    last_tx_id = wm.get("last_tx_id")
+
+    # 2) récupérer les transactions "nouvelles"
+    #    V1: basé sur ID (simple et fiable si tu n'update pas les IDs)
+    if last_tx_id is None:
+        df_new = pd.read_sql_query(
+            """
+            SELECT id, date, created_at, asset_symbol, asset_id
+            FROM transactions
+            WHERE person_id=?
+            ORDER BY id ASC
+            """,
+            conn,
+            params=(int(person_id),),
+        )
+    else:
+        df_new = pd.read_sql_query(
+            """
+            SELECT id, date, created_at, asset_symbol, asset_id
+            FROM transactions
+            WHERE person_id=? AND id > ?
+            ORDER BY id ASC
+            """,
+            conn,
+            params=(int(person_id), int(last_tx_id)),
+        )
+
+    if df_new is None or df_new.empty:
+        # Rien de nouveau => à jour
+        return {"did_run": False, "mode": "BACKDATED_AWARE", "reason": "no_new_transactions", "person_id": int(person_id)}
+
+    # 3) date métier la plus ancienne parmi les nouvelles tx
+    df_new["date"] = pd.to_datetime(df_new["date"], errors="coerce")
+    df_new = df_new.dropna(subset=["date"])
+    if df_new.empty:
+        return {"did_run": False, "mode": "BACKDATED_AWARE", "reason": "new_transactions_no_valid_date", "person_id": int(person_id)}
+
+    min_date = df_new["date"].min().date()
+
+    # 4) start = semaine(min_date) - safety_weeks
+    start = market_history.week_start(min_date - dt.timedelta(days=int(safety_weeks) * 7))
+
+    # garde-fou : si ça remonte trop loin, on limite (mais on te le dit)
+    floor = end - dt.timedelta(days=int(fallback_lookback_days))
+    floor = market_history.week_start(floor)
+    truncated = False
+    if start < floor:
+        start = floor
+        truncated = True
+
+    weeks = _list_weeks(start, end)
+    if not weeks:
+        return {"did_run": False, "mode": "BACKDATED_AWARE", "reason": "no_weeks", "person_id": int(person_id)}
+
+    # 5) Import marché sur l'intervalle utile (même logique que tes autres rebuild)
+    tx_all = repo.list_transactions(conn, person_id=person_id, limit=300000)
+    symbols = []
+    pairs = set()
+
+    if tx_all is not None and not tx_all.empty:
+        tx2 = tx_all[tx_all["asset_symbol"].notna()].copy()
+        symbols = sorted(set([str(s).strip() for s in tx2["asset_symbol"].tolist() if str(s).strip()]))
+
+        asset_ids = sorted(set([int(x) for x in tx2["asset_id"].dropna().astype(int).tolist()]))
+        if asset_ids:
+            q = ",".join(["?"] * len(asset_ids))
+            rows = conn.execute(f"SELECT id, currency FROM assets WHERE id IN ({q})", tuple(asset_ids)).fetchall()
+            for r in rows:
+                ccy = (r["currency"] or "EUR").upper()
+                if ccy != "EUR":
+                    pairs.add((ccy, "EUR"))
+
+    if symbols:
+        market_history.sync_asset_prices_weekly(conn, symbols, weeks[0], weeks[-1])
+    if pairs:
+        market_history.sync_fx_weekly(conn, sorted(list(pairs)), weeks[0], weeks[-1])
+
+    # 6) Recalc weeks
+    n_ok = 0
+    for wd in weeks:
+        payload = compute_weekly_snapshot_person(conn, person_id, wd)
+        upsert_weekly_snapshot(conn, person_id, wd, mode="REBUILD", payload=payload)
+        n_ok += 1
+
+    conn.commit()
+
+    # 7) Update watermark vers le MAX ID existant
+    max_row = conn.execute(
+        "SELECT MAX(id) AS max_id, MAX(created_at) AS max_created FROM transactions WHERE person_id=?",
+        (int(person_id),),
+    ).fetchone()
+    _set_person_watermark(
+        conn,
+        person_id,
+        int(max_row["max_id"]) if max_row and max_row["max_id"] is not None else None,
+        str(max_row["max_created"]) if max_row and max_row["max_created"] is not None else None,
+    )
+
+    return {
+        "did_run": True,
+        "mode": "BACKDATED_AWARE",
+        "person_id": int(person_id),
+        "min_new_tx_date": min_date.strftime("%Y-%m-%d"),
+        "start": weeks[0],
+        "end": weeks[-1],
+        "safety_weeks": int(safety_weeks),
+        "fallback_lookback_days": int(fallback_lookback_days),
+        "truncated_to_floor": bool(truncated),
+        "n_new_tx": int(len(df_new)),
+        "n_weeks": int(len(weeks)),
+        "n_ok": int(n_ok),
+    }

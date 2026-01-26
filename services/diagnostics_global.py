@@ -144,3 +144,89 @@ def tickers_missing_weekly_prices(conn, max_show: int = 30) -> pd.DataFrame:
     if df.empty:
         return df
     return df.head(int(max_show))
+
+
+def person_weekly_status(conn, person_id: int, safety_weeks: int = 4) -> dict:
+    """
+    Retourne un statut simple :
+    - last_week_in_db
+    - target_week (semaine courante)
+    - missing_weeks_count (depuis last_week -> target_week)
+    - suggested_action
+    """
+    end = _week_monday(_paris_today())
+    row = conn.execute(
+        "SELECT MAX(week_date) AS d FROM patrimoine_snapshots_weekly WHERE person_id=?",
+        (int(person_id),),
+    ).fetchone()
+
+    last = None
+    if row and row["d"]:
+        last = pd.to_datetime(row["d"], errors="coerce")
+        if pd.isna(last):
+            last = None
+
+    if last is None:
+        return {
+            "ok": False,
+            "reason": "no_snapshot",
+            "last_week": None,
+            "target_week": end.strftime("%Y-%m-%d"),
+            "missing_weeks": None,
+            "suggested": "FROM_LAST_FALLBACK",
+        }
+
+    # semaines manquantes strictes depuis last -> end
+    # (si last == end => 0)
+    missing = pd.date_range(start=last, end=end, freq="W-MON")
+    missing_count = max(0, len(missing) - 1)
+
+    # si tu as des trous anciens, ce statut ne les voit pas : c'est voulu (B3 = quotidien)
+    return {
+        "ok": True,
+        "reason": "ok",
+        "last_week": last.strftime("%Y-%m-%d"),
+        "target_week": end.strftime("%Y-%m-%d"),
+        "missing_weeks": int(missing_count),
+        "suggested": "UP_TO_DATE" if missing_count == 0 else "FROM_LAST",
+        "safety_weeks": int(safety_weeks),
+    }
+
+
+def family_weekly_status(conn, safety_weeks: int = 4) -> dict:
+    """
+    Statut famille basé sur la table famille weekly si elle existe.
+    """
+    end = _week_monday(_paris_today())
+    last = None
+    try:
+        row = conn.execute("SELECT MAX(week_date) AS d FROM patrimoine_snapshots_family_weekly").fetchone()
+        if row and row["d"]:
+            last = pd.to_datetime(row["d"], errors="coerce")
+            if pd.isna(last):
+                last = None
+    except Exception:
+        last = None
+
+    if last is None:
+        return {
+            "ok": False,
+            "reason": "no_family_snapshot",
+            "last_week": None,
+            "target_week": end.strftime("%Y-%m-%d"),
+            "missing_weeks": None,
+            "suggested": "FAMILY_FROM_LAST_FALLBACK",
+        }
+
+    missing = pd.date_range(start=last, end=end, freq="W-MON")
+    missing_count = max(0, len(missing) - 1)
+
+    return {
+        "ok": True,
+        "reason": "ok",
+        "last_week": last.strftime("%Y-%m-%d"),
+        "target_week": end.strftime("%Y-%m-%d"),
+        "missing_weeks": int(missing_count),
+        "suggested": "UP_TO_DATE" if missing_count == 0 else "FAMILY_FROM_LAST",
+        "safety_weeks": int(safety_weeks),
+    }

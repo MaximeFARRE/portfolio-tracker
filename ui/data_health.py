@@ -13,6 +13,74 @@ from services import repositories as repo
 def afficher_data_health(conn):
     st.subheader("🛠️ Diagnostic — Data Health")
 
+    st.markdown("### ✅ Check-up rapide (quotidien)")
+
+    safety_weeks = st.selectbox("Fenêtre sécurité (recalc)", [2, 4, 8], index=1, key="chk_safety_weeks")
+
+    people = repo.list_people(conn)
+    person_ids = [int(x) for x in people["id"].tolist()] if people is not None and not people.empty else []
+
+    col1, col2 = st.columns([2.2, 1.2])
+
+    with col1:
+        # Résumé statut
+        rows = []
+        for pid in person_ids:
+            name = str(people.loc[people["id"] == pid, "name"].iloc[0])
+            stt = dg.person_weekly_status(conn, person_id=pid, safety_weeks=int(safety_weeks))
+            rows.append({
+                "Personne": name,
+                "Dernière semaine": stt.get("last_week") or "—",
+                "Cible": stt.get("target_week"),
+                "Manquantes (depuis dernière)": stt.get("missing_weeks") if stt.get("missing_weeks") is not None else "—",
+                "Statut": "✅ À jour" if stt.get("suggested") == "UP_TO_DATE" else "⚠️ À rebuild",
+            })
+
+        df_status = pd.DataFrame(rows)
+        if not df_status.empty:
+            st.dataframe(df_status, use_container_width=True, hide_index=True)
+
+    with col2:
+        if st.button("🚀 Rebuild nécessaire (tout)", use_container_width=True, key="chk_rebuild_all"):
+            # 1) rebuild personnes depuis dernière snapshot
+            for pid in person_ids:
+                wk_snap.rebuild_snapshots_person_from_last(conn, person_id=int(pid), safety_weeks=int(safety_weeks), fallback_lookback_days=90)
+
+            # 2) rebuild famille depuis dernière snapshot (si dispo)
+            try:
+                fs.rebuild_family_weekly_from_last(conn, person_ids=person_ids, safety_weeks=int(safety_weeks), fallback_lookback_days=90, family_id=1)
+            except Exception:
+                pass
+
+            st.success("Rebuild quotidien terminé ✅")
+            st.rerun()
+            
+            if st.button("🧠 Backdated-aware (tout)", use_container_width=True, key="chk_backdated_all"):
+            # Rebuild backdated-aware pour chaque personne
+                for pid in person_ids:
+                    wk_snap.rebuild_snapshots_person_backdated_aware(
+                        conn,
+                        person_id=int(pid),
+                        safety_weeks=int(safety_weeks),
+                        fallback_lookback_days=365
+                    )
+
+                # Rebuild famille backdated-aware
+                try:
+                    fs.rebuild_family_weekly_backdated_aware(
+                        conn,
+                        person_ids=person_ids,
+                        safety_weeks=int(safety_weeks),
+                        fallback_lookback_days=365,
+                        family_id=1
+                    )
+                except Exception:
+                    pass
+
+                st.success("Backdated-aware rebuild terminé ✅")
+                st.rerun()
+
+    
     # --- Marché
     st.markdown("### 📡 Marché (weekly)")
     dates = dg.last_market_dates(conn)

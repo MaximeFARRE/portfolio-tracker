@@ -215,3 +215,67 @@ def rebuild_family_weekly_from_last(
 
     conn.commit()
     return {"did_run": True, "family_id": family_id, "n_weeks": int(n), "n_people": len(person_ids), "mode": "FROM_LAST"}
+
+
+def rebuild_family_weekly_backdated_aware(
+    conn,
+    person_ids: list[int],
+    safety_weeks: int = 4,
+    fallback_lookback_days: int = 365,
+    family_id: int = 1,
+) -> dict:
+    """
+    B4 famille :
+    - rebuild backdated-aware pour chaque personne
+    - puis agrégation famille
+    """
+    if not person_ids:
+        return {"did_run": False, "reason": "no_person_ids"}
+
+    from services import snapshots as wk_snap
+
+    # rebuild personnes
+    res_people = []
+    for pid in person_ids:
+        res_people.append(
+            wk_snap.rebuild_snapshots_person_backdated_aware(
+                conn,
+                person_id=int(pid),
+                safety_weeks=int(safety_weeks),
+                fallback_lookback_days=int(fallback_lookback_days),
+            )
+        )
+
+    # agrégation famille (comme tes autres rebuild)
+    q = ",".join(["?"] * len(person_ids))
+    df = pd.read_sql_query(
+        f"""
+        SELECT week_date,
+               SUM(patrimoine_net) AS patrimoine_net,
+               SUM(patrimoine_brut) AS patrimoine_brut,
+               SUM(liquidites_total) AS liquidites_total,
+               SUM(bourse_holdings) AS bourse_holdings,
+               SUM(pe_value) AS pe_value,
+               SUM(ent_value) AS ent_value,
+               SUM(credits_remaining) AS credits_remaining
+        FROM patrimoine_snapshots_weekly
+        WHERE person_id IN ({q})
+        GROUP BY week_date
+        ORDER BY week_date ASC
+        """,
+        conn,
+        params=tuple([int(x) for x in person_ids]),
+    )
+
+    if df.empty:
+        return {"did_run": False, "reason": "no_weekly_person_snapshots", "people": res_people}
+
+    n = 0
+    for _, r in df.iterrows():
+        payload = dict(r)
+        payload["notes"] = f"Agrégé sur {len(person_ids)} personnes"
+        upsert_family_snapshot(conn, family_id=family_id, week_date=str(r["week_date"]), mode="REBUILD", payload=payload)
+        n += 1
+
+    conn.commit()
+    return {"did_run": True, "mode": "FAMILY_BACKDATED_AWARE", "n_weeks": int(n), "people": res_people}
