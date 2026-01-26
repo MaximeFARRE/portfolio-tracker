@@ -1,16 +1,86 @@
 import os
 import sqlite3
+import libsql 
+import streamlit as st
 from pathlib import Path
 
 DB_PATH = Path("patrimoine.db")
 SCHEMA_PATH = Path("db") / "schema.sql"
 
+class SyncedLibsqlConn:
+    """
+    Wrapper minimal:
+    - commit() => sync() (pour pousser sur Turso)
+    - close() safe
+    - délègue tout le reste
+    """
+    def __init__(self, conn):
+        self._conn = conn
 
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def commit(self):
+        self._conn.commit()
+        # très important avec embedded replicas
+        try:
+            self._conn.sync()
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+def get_conn():
+    # 1) Lire les secrets Streamlit (Cloud) ou env vars (local)
+    url = None
+    token = None
+
+    # Streamlit Cloud: st.secrets
+    try:
+        url = st.secrets.get("TURSO_DATABASE_URL")
+        token = st.secrets.get("TURSO_AUTH_TOKEN")
+    except Exception:
+        url = None
+        token = None
+
+    # fallback env vars (utile en local)
+    url = url or os.getenv("TURSO_DATABASE_URL")
+    token = token or os.getenv("TURSO_AUTH_TOKEN")
+
+    # 2) Si pas de secrets => fallback sqlite local (utile pour dev)
+    if not url or not token:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON;")
+        return conn
+
+    # 3) Embedded replica: fichier local + sync_url vers Turso
+    # NB: le fichier local peut être perdu sur Streamlit, mais sync() le rehydrate
+    conn = libsql.connect(str(DB_PATH), sync_url=url, auth_token=token)
+
+    # Sync au démarrage pour récupérer l'état Turso
+    try:
+        conn.sync()
+    except Exception:
+        pass
+
+    # Compat (certaines impl libsql n'ont pas row_factory, on tente sans casser)
+    try:
+        conn.row_factory = sqlite3.Row
+    except Exception:
+        pass
+
+    try:
+        conn.execute("PRAGMA foreign_keys = ON;")
+    except Exception:
+        pass
+
+    return SyncedLibsqlConn(conn)
+
 
 
 def init_db() -> None:
