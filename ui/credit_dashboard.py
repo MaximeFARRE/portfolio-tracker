@@ -6,7 +6,11 @@ from datetime import datetime
 from services.credits import get_credit_dates
 
 import pytz
-from services.credits import get_credit_by_account, get_credit_kpis,cout_reel_mois_via_bankin, cout_reel_mois_credit_via_bankin, get_crd_a_date
+from services.credits import (
+    get_credit_by_account, get_credit_kpis, cout_reel_mois_via_bankin,
+    cout_reel_mois_credit_via_bankin, get_crd_a_date,
+    build_amortissement, CreditParams, replace_amortissement,
+)
 
 
 def afficher_dashboard_credit(conn, person_id: int, account_id: int):
@@ -153,3 +157,52 @@ def afficher_dashboard_credit(conn, person_id: int, account_id: int):
     else:
         tot_plot = tot.set_index("annee")[["capital_amorti", "interets", "assurance"]]
         st.bar_chart(tot_plot)
+
+    st.divider()
+
+    # --- Génération automatique du tableau d'amortissement ---
+    st.markdown("### ⚙️ Générer le tableau d'amortissement automatiquement")
+    credit_id = int(credit["id"])
+    preview_key = f"amort_preview_{credit_id}"
+
+    capital = float(credit.get("capital_emprunte") or 0.0)
+    taux = float(credit.get("taux_nominal") or 0.0)
+    duree = int(credit.get("duree_mois") or 0)
+    date_debut = str(credit.get("date_debut") or "")
+    assurance = float(credit.get("assurance_mensuelle_theorique") or 0.0)
+
+    params_ok = capital > 0 and duree > 0 and date_debut
+
+    if not params_ok:
+        st.info("Renseigne le capital, la durée et la date de début dans la fiche crédit pour générer automatiquement.")
+    else:
+        if st.button("⚙️ Calculer l'amortissement", key=f"gen_amort_{credit_id}"):
+            params = CreditParams(
+                capital=capital,
+                taux_annuel=taux,
+                duree_mois=duree,
+                date_debut=date_debut,
+                assurance_mensuelle=assurance,
+            )
+            st.session_state[preview_key] = build_amortissement(params)
+
+        if preview_key in st.session_state:
+            rows = st.session_state[preview_key]
+            df_preview = pd.DataFrame(rows)
+            mensualite = float(df_preview["mensualite"].iloc[0]) if len(df_preview) > 0 else 0.0
+            cout_total = float(df_preview["mensualite"].sum())
+            cout_interets = float(df_preview["interets"].sum())
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Mensualité calculée", f"{mensualite:,.2f} €".replace(",", " "))
+            c2.metric("Coût total estimé", f"{cout_total:,.2f} €".replace(",", " "))
+            c3.metric("Coût des intérêts", f"{cout_interets:,.2f} €".replace(",", " "))
+
+            st.caption(f"Aperçu des 5 premières lignes sur {len(df_preview)} échéances :")
+            st.dataframe(df_preview.head(5), use_container_width=True)
+
+            if st.button("✅ Confirmer et sauvegarder", key=f"save_amort_{credit_id}"):
+                replace_amortissement(conn, credit_id, rows)
+                del st.session_state[preview_key]
+                st.success("Tableau d'amortissement sauvegardé !")
+                st.rerun()

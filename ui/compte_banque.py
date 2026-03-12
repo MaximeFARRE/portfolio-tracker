@@ -6,7 +6,8 @@ from utils.cache import reset_cache
 from ui.compte_vue import tableau_operations
 from ui.compte_saisie import bloc_saisie_operation
 from utils.validators import sens_flux
-from utils.format_monnaie import money  # adapte si ton helper est ailleurs
+from utils.format_monnaie import money
+from utils.pagination import paginate_df
 
 
 SUBTYPES = {
@@ -316,7 +317,14 @@ def afficher_compte_banque(conn, person_id: int, bank_account_id: int, key_prefi
     col_g, col_d = st.columns([2, 1], gap="large")
     with col_g:
         st.markdown("#### Historique")
-        tableau_operations(tx_sub)
+        if tx_sub is not None and not tx_sub.empty:
+            tx_sub_page = paginate_df(
+                tx_sub.sort_values("date", ascending=False) if "date" in tx_sub.columns else tx_sub,
+                key=f"{key_prefix}_sub{sid}_tx",
+            )
+            tableau_operations(tx_sub_page)
+        else:
+            tableau_operations(tx_sub)
 
     with col_d:
         st.markdown("#### Ajouter une opération")

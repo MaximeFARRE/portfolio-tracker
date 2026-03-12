@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS idx_tx_person_date ON transactions(person_id, date);
 CREATE INDEX IF NOT EXISTS idx_tx_account_date ON transactions(account_id, date);
 CREATE INDEX IF NOT EXISTS idx_tx_type ON transactions(type);
+CREATE INDEX IF NOT EXISTS idx_tx_person_account_date ON transactions(person_id, account_id, date);
 
 -- Dépenses (module indépendant)
 CREATE TABLE IF NOT EXISTS depenses (
@@ -315,3 +316,12 @@ CREATE TABLE IF NOT EXISTS patrimoine_snapshots_family_weekly (
 
 CREATE INDEX IF NOT EXISTS idx_psfw_family_week
 ON patrimoine_snapshots_family_weekly(family_id, week_date);
+
+-- =========================================
+-- SCHEMA VERSIONING
+-- =========================================
+CREATE TABLE IF NOT EXISTS schema_version (
+  version INTEGER PRIMARY KEY,
+  applied_at TEXT DEFAULT (datetime('now')),
+  description TEXT
+);

@@ -875,3 +875,47 @@ def afficher_vue_ensemble_overview(conn, person_id: int):
     a.metric("Banque", _fmt_eur(bank_cash))
     b.metric("Bourse (cash)", _fmt_eur(bourse_cash))
     c.metric("PE (cash)", _fmt_eur(pe_cash))
+
+    st.divider()
+
+    # ─────────────────────────────────────────────
+    # Export PDF
+    # ─────────────────────────────────────────────
+    st.markdown("### 📄 Export PDF")
+    with st.expander("Générer un bilan PDF", expanded=False):
+        period_pdf = st.selectbox(
+            "Fenêtre historique",
+            [30, 60, 90, 180],
+            index=2,
+            format_func=lambda x: f"{x} jours",
+            key=f"pdf_period_{person_id}",
+        )
+        if st.button("📄 Générer et télécharger le bilan", key=f"pdf_btn_{person_id}"):
+            try:
+                from services.pdf_export import generate_patrimoine_pdf
+                # Récupère le nom de la personne
+                try:
+                    row = conn.execute("SELECT name FROM people WHERE id=?", (int(person_id),)).fetchone()
+                    pname = row["name"] if row else f"Personne {person_id}"
+                except Exception:
+                    try:
+                        pname = row[0] if row else f"Personne {person_id}"
+                    except Exception:
+                        pname = f"Personne {person_id}"
+                pdf_bytes = generate_patrimoine_pdf(
+                    conn,
+                    person_id=person_id,
+                    person_name=pname,
+                    period_days=int(period_pdf),
+                )
+                st.download_button(
+                    label="⬇️ Télécharger le PDF",
+                    data=pdf_bytes,
+                    file_name=f"bilan_{pname.lower().replace(‘ ‘, ‘_’)}.pdf",
+                    mime="application/pdf",
+                    key=f"pdf_dl_{person_id}",
+                )
+            except ImportError:
+                st.error("fpdf2 n’est pas installé. Lance : pip install fpdf2")
+            except Exception as e:
+                st.error(f"Erreur lors de la génération du PDF : {e}")
