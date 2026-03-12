@@ -4,9 +4,14 @@ from typing import Optional
 
 
 def df_from_rows(rows, columns=None) -> pd.DataFrame:
-    if rows:
+    if not rows:
+        return pd.DataFrame(columns=columns or [])
+    try:
+        # sqlite3.Row : dict(r) fonctionne car r.keys() est défini
         return pd.DataFrame([dict(r) for r in rows])
-    return pd.DataFrame(columns=columns or [])
+    except (TypeError, KeyError):
+        # libsql retourne des tuples sans clés — on reconstruit avec la liste de colonnes
+        return pd.DataFrame(list(rows), columns=columns)
 
 
 # -------- People --------
