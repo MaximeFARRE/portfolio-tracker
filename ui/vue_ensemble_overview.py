@@ -203,7 +203,7 @@ def _milestone_status(value: float, milestones: list[tuple[float, str]]):
 
 
 def _loan_principal_from_monthly_payment(monthly_payment: float, annual_rate_pct: float, duration_years: int) -> float:
-    """Capacité d’emprunt simple via annuité : P = M * (1 - (1+r)^-n) / r."""
+    """Capacité d'emprunt simple via annuité : P = M * (1 - (1+r)^-n) / r."""
     m = float(monthly_payment or 0.0)
     if m <= 0:
         return 0.0
@@ -593,12 +593,12 @@ def _get_cashflow_last12(conn, person_id: int):
 
 
 def afficher_vue_ensemble_overview(conn, person_id: int):
-    st.subheader("Vue d’ensemble")
+    st.subheader("Vue d'ensemble")
 
     # ─────────────────────────────────────────────
     # Agrégations
     # ─────────────────────────────────────────────
-    # Liquidités : même logique que l’onglet « Liquidités »
+    # Liquidités : même logique que l'onglet « Liquidités »
     bank_cash, bourse_cash, pe_cash, liquidites_total = _compute_liquidites_like_overview(conn, person_id)
 
     # Bourse : on garde la valo titres (holdings)
@@ -737,9 +737,9 @@ def afficher_vue_ensemble_overview(conn, person_id: int):
     with m2:
         st.metric("Patrimoine brut (période)", _fmt_eur(last_brut), f"{_fmt_eur(delta_brut)} ({pct_brut:+.1f}%)")
 
-    # Si une seule snapshot -> tu n’auras qu’un point, c’est normal
+    # Si une seule snapshot -> tu n'auras qu'un point, c'est normal
     if len(df_h) < 2:
-        st.info("Tu n’as qu’une seule snapshot : le graphe affiche un point. Dès demain (ou après plusieurs snapshots), tu auras une courbe.")
+        st.info("Tu n'as qu'une seule snapshot : le graphe affiche un point. Dès demain (ou après plusieurs snapshots), tu auras une courbe.")
         return
 
     # Graphe
@@ -868,7 +868,7 @@ def afficher_vue_ensemble_overview(conn, person_id: int):
     st.divider()
 
     # ─────────────────────────────────────────────
-    # Mini détail liquidités (sans refaire l’onglet dédié)
+    # Mini détail liquidités (sans refaire l'onglet dédié)
     # ─────────────────────────────────────────────
     st.markdown("### Résumé liquidités")
     a, b, c = st.columns(3)
@@ -911,11 +911,11 @@ def afficher_vue_ensemble_overview(conn, person_id: int):
                 st.download_button(
                     label="⬇️ Télécharger le PDF",
                     data=pdf_bytes,
-                    file_name=f"bilan_{pname.lower().replace(‘ ‘, ‘_’)}.pdf",
+                    file_name=f"bilan_{pname.lower().replace(' ', '_')}.pdf",
                     mime="application/pdf",
                     key=f"pdf_dl_{person_id}",
                 )
             except ImportError:
-                st.error("fpdf2 n’est pas installé. Lance : pip install fpdf2")
+                st.error("fpdf2 n'est pas installé. Lance : pip install fpdf2")
             except Exception as e:
                 st.error(f"Erreur lors de la génération du PDF : {e}")
