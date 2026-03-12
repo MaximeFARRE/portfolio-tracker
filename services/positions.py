@@ -34,7 +34,11 @@ def compute_positions_asof(conn: sqlite3.Connection, person_id: int, asof_date: 
     if not rows:
         return pd.DataFrame(columns=["account_id","asset_id","symbol","asset_ccy","quantity"])
 
-    df = pd.DataFrame([dict(r) for r in rows])
+    _cols_pos = ["account_id", "asset_id", "symbol", "asset_ccy", "type", "quantity"]
+    try:
+        df = pd.DataFrame([dict(r) for r in rows])
+    except (TypeError, KeyError):
+        df = pd.DataFrame(list(rows), columns=_cols_pos)
     df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0.0)
     df["q_signed"] = df["quantity"]
     df.loc[df["type"] == "VENTE", "q_signed"] = -df.loc[df["type"] == "VENTE", "quantity"]

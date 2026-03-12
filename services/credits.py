@@ -24,14 +24,15 @@ def upsert_credit(conn, data: Dict[str, Any]) -> int:
         "capital_emprunte", "taux_nominal", "taeg", "duree_mois",
         "mensualite_theorique", "assurance_mensuelle_theorique",
         "date_debut", "actif",
-        "payer_account_id",
     ]
-
 
     values = [data.get(f) for f in fields]
 
     if row:
-        credit_id = int(row["id"])
+        try:
+            credit_id = int(row["id"])
+        except (TypeError, KeyError):
+            credit_id = int(row[0])
         set_clause = ", ".join([f"{f} = ?" for f in fields] + ["updated_at = datetime('now')"])
         conn.execute(
             f"UPDATE credits SET {set_clause} WHERE id = ?",
@@ -51,11 +52,14 @@ def upsert_credit(conn, data: Dict[str, Any]) -> int:
 
 
 def get_credit_by_account(conn, account_id: int) -> Optional[dict]:
-    row = conn.execute(
+    df = pd.read_sql_query(
         "SELECT * FROM credits WHERE account_id = ?",
-        (int(account_id),)
-    ).fetchone()
-    return dict(row) if row else None
+        conn,
+        params=(int(account_id),),
+    )
+    if df.empty:
+        return None
+    return df.iloc[0].to_dict()
 
 
 def list_credits_by_person(conn, person_id: int, only_active: bool = True) -> pd.DataFrame:
