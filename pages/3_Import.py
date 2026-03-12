@@ -81,7 +81,10 @@ if mode == "Crédit (config + génération)":
     if not rowp:
         st.error("Personne introuvable dans la table people.")
         st.stop()
-    person_id = int(rowp["id"])
+    try:
+        person_id = int(rowp["id"])
+    except (TypeError, KeyError):
+        person_id = int(rowp[0])
 
     # Sélection sous-compte CREDIT
     df_credit = pd.read_sql_query(
