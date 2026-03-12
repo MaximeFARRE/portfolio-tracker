@@ -1,32 +1,38 @@
 from enum import Enum
 
+
 class AccountType(str, Enum):
+    BANQUE = "BANQUE"
     PEA = "PEA"
     CTO = "CTO"
-    CASH = "CASH"
-    PE = "PE"
     CRYPTO = "CRYPTO"
-    REAL_ESTATE = "REAL_ESTATE"
-    LOAN = "LOAN"
+    PE = "PE"
+    IMMOBILIER = "IMMOBILIER"
+    CREDIT = "CREDIT"
+
 
 class AssetType(str, Enum):
-    stock = "stock"
-    etf = "etf"
-    crypto = "crypto"
-    private_equity = "private_equity"
-    cash_equivalent = "cash_equivalent"
-    real_estate = "real_estate"
-    other = "other"
+    STOCK = "stock"
+    ETF = "etf"
+    CRYPTO = "crypto"
+    PRIVATE_EQUITY = "private_equity"
+    CASH_EQUIVALENT = "cash_equivalent"
+    REAL_ESTATE = "real_estate"
+    OTHER = "other"
+
 
 class TxType(str, Enum):
-    BUY = "BUY"
-    SELL = "SELL"
-    DIVIDEND = "DIVIDEND"
-    DEPOSIT = "DEPOSIT"
-    WITHDRAW = "WITHDRAW"
-    EXPENSE = "EXPENSE"
-    FEE = "FEE"
-    INTEREST = "INTEREST"
-    LOAN_PAYMENT = "LOAN_PAYMENT"
-    RENT_INCOME = "RENT_INCOME"
-    TAX = "TAX"
+    # Types utilisés en base de données (valeurs réelles)
+    ACHAT = "ACHAT"
+    VENTE = "VENTE"
+    DIVIDENDE = "DIVIDENDE"
+    DEPOT = "DEPOT"
+    RETRAIT = "RETRAIT"
+    DEPENSE = "DEPENSE"
+    FRAIS = "FRAIS"
+    INTERETS = "INTERETS"
+    REMBOURSEMENT_CREDIT = "REMBOURSEMENT_CREDIT"
+    LOYER = "LOYER"
+    IMPOT = "IMPOT"
+    ENTREE = "ENTREE"
+    SORTIE = "SORTIE"

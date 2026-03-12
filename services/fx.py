@@ -20,8 +20,11 @@ def fetch_fx_rate(base_ccy: str, quote_ccy: str) -> float | None:
     if r.status_code != 200:
         return None
 
-    data = r.json()
-    return float(data["rates"][quote_ccy])
+    try:
+        data = r.json()
+        return float(data["rates"][quote_ccy])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def ensure_fx_rate(conn, base_ccy: str, quote_ccy: str) -> float | None:

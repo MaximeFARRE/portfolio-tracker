@@ -6,6 +6,7 @@ import requests
 def today_str() -> str:
     return dt.date.today().isoformat()
 
+
 def fetch_last_price_auto(symbol: str) -> tuple[float | None, str]:
     """
     Retourne (prix, devise).
@@ -20,8 +21,8 @@ def fetch_last_price_auto(symbol: str) -> tuple[float | None, str]:
 
         t = yf.Ticker(symbol)
         info = t.fast_info  # + rapide que info
-        px = info.get("last_price", None)
-        ccy = info.get("currency", "EUR")
+        px = info.get("last_price", None) if info is not None else None
+        ccy = info.get("currency", "EUR") if info is not None else "EUR"
 
         if px is None:
             # fallback
@@ -36,8 +37,3 @@ def fetch_last_price_auto(symbol: str) -> tuple[float | None, str]:
         pass
 
     return None, "EUR"
-
-
-
-def today_str() -> str:
-    return dt.date.today().isoformat()
