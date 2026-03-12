@@ -4,6 +4,19 @@ from datetime import datetime
 import pytz
 
 
+def _get_val(row, key: str, idx: int = 0):
+    """Compat sqlite3.Row (accès par clé) et tuples libsql (accès par index)."""
+    if row is None:
+        return None
+    try:
+        return row[key]
+    except Exception:
+        try:
+            return row[idx]
+        except Exception:
+            return None
+
+
 def _paris_today() -> pd.Timestamp:
     tz = pytz.timezone("Europe/Paris")
     return pd.Timestamp(datetime.now(tz).date())
@@ -161,8 +174,9 @@ def person_weekly_status(conn, person_id: int, safety_weeks: int = 4) -> dict:
     ).fetchone()
 
     last = None
-    if row and row["d"]:
-        last = pd.to_datetime(row["d"], errors="coerce")
+    d_val = _get_val(row, "d", 0)
+    if row and d_val:
+        last = pd.to_datetime(d_val, errors="coerce")
         if pd.isna(last):
             last = None
 
