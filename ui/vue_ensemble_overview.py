@@ -60,7 +60,10 @@ def _refresh_all_bourse_prices(conn) -> tuple[int, int]:
                 a = conn.execute("SELECT * FROM assets WHERE id = ?;", (aid,)).fetchone()
                 if not a:
                     continue
-                sym = a["symbol"]
+                try:
+                    sym = a["symbol"]
+                except (TypeError, KeyError):
+                    sym = a[1]
                 px, ccy = pricing.fetch_last_price_auto(sym)
                 if px is None:
                     n_fail += 1

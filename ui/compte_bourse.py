@@ -29,7 +29,10 @@ def afficher_compte_bourse(conn, person_id: int, account_id: int, account_type: 
             a = conn.execute("SELECT * FROM assets WHERE id = ?;", (aid,)).fetchone()
             if not a:
                 continue
-            sym = a["symbol"]
+            try:
+                sym = a["symbol"]
+            except (TypeError, KeyError):
+                sym = a[1]
             px, ccy = pricing.fetch_last_price_auto(sym)
             if px is not None:
                 repo.upsert_price(conn, asset_id=aid, date=pricing.today_str(), price=px, currency=ccy, source="AUTO")

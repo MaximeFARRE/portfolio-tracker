@@ -365,15 +365,26 @@ def cout_reel_mois_credit_via_bankin(conn, credit_id: int, mois_yyyy_mm_01: str)
     Somme des transactions du mois sur le compte payeur du crédit,
     filtrées sur catégorie "échéance prêt / emprunt".
     """
-    row = conn.execute(
-        "SELECT person_id, payer_account_id FROM credits WHERE id = ?",
-        (int(credit_id),)
-    ).fetchone()
-    if not row or row["payer_account_id"] is None:
+    try:
+        row = conn.execute(
+            "SELECT person_id, payer_account_id FROM credits WHERE id = ?",
+            (int(credit_id),)
+        ).fetchone()
+    except Exception:
         return 0.0
-
-    person_id = int(row["person_id"])
-    payer_account_id = int(row["payer_account_id"])
+    if not row:
+        return 0.0
+    try:
+        payer_val = row["payer_account_id"]
+    except (TypeError, KeyError):
+        payer_val = row[1] if len(row) > 1 else None
+    if payer_val is None:
+        return 0.0
+    try:
+        person_id = int(row["person_id"])
+    except (TypeError, KeyError):
+        person_id = int(row[0])
+    payer_account_id = int(payer_val)
 
     start = pd.to_datetime(mois_yyyy_mm_01)
     end = (start + pd.offsets.MonthBegin(1))

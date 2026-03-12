@@ -42,13 +42,21 @@ def create_account(conn: sqlite3.Connection, person_id: int, name: str, account_
     conn.commit()
     return int(cur.lastrowid)
 
-def get_account(conn: sqlite3.Connection, account_id: int):
-    return conn.execute("SELECT * FROM accounts WHERE id = ?;", (account_id,)).fetchone()
+def get_account(conn: sqlite3.Connection, account_id: int) -> Optional[dict]:
+    df = pd.read_sql_query(
+        "SELECT * FROM accounts WHERE id = ?", conn, params=(int(account_id),)
+    )
+    return df.iloc[0].to_dict() if not df.empty else None
 
 
 def get_account_currency(conn: sqlite3.Connection, account_id: int) -> str:
-    row = conn.execute("SELECT currency FROM accounts WHERE id = ?;", (account_id,)).fetchone()
-    return (row["currency"] if row and row["currency"] else "EUR").upper()
+    df = pd.read_sql_query(
+        "SELECT currency FROM accounts WHERE id = ?", conn, params=(int(account_id),)
+    )
+    if df.empty:
+        return "EUR"
+    val = df.iloc[0]["currency"]
+    return (val if val else "EUR").upper()
 
 
 # -------- Assets --------
