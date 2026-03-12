@@ -36,7 +36,8 @@ def main():
     
     try:
         from ui.vue_ensemble_overview import ensure_daily_snapshots_for_all_people
-        ensure_daily_snapshots_for_all_people(conn, mode="AUTO", force_refresh_prices=True)
+        # force_refresh_prices=False : ne pas appeler les APIs externes à chaque rerun
+        ensure_daily_snapshots_for_all_people(conn, mode="AUTO", force_refresh_prices=False)
     except Exception:
         pass
 
@@ -50,8 +51,21 @@ def main():
 
     tabs_fixes = st.tabs(["Vue d’ensemble", "Dépenses", "Revenus", "Crédit", "Private Equity", "Entreprises", "Liquidités", "Bourse", "📈 Projections"])
 
+    # Fragments : les sliders/widgets internes ne relancent que leur section
+    @st.fragment
+    def _frag_vue_ensemble(conn, pid):
+        afficher_vue_ensemble_overview(conn, person_id=pid)
+
+    @st.fragment
+    def _frag_projections(conn, pid):
+        afficher_projections_overview(conn, person_id=pid)
+
+    @st.fragment
+    def _frag_bourse(conn, pid):
+        afficher_bourse_global_overview(conn, person_id=pid)
+
     with tabs_fixes[0]:
-        afficher_vue_ensemble_overview(conn, person_id=person_id)
+        _frag_vue_ensemble(conn, person_id)
 
     with tabs_fixes[1]:
         onglet_depenses(conn, person_id=person_id, key_prefix=f"p{person_id}_dep")
@@ -64,18 +78,18 @@ def main():
 
     with tabs_fixes[4]:
         afficher_private_equity_overview(conn, person_id=person_id)
-    
+
     with tabs_fixes[5]:
         afficher_entreprises_overview(conn, person_id=person_id)
-        
+
     with tabs_fixes[6]:
         afficher_liquidites_overview(conn, person_id=person_id)
-    
+
     with tabs_fixes[7]:
-        afficher_bourse_global_overview(conn, person_id=person_id)
+        _frag_bourse(conn, person_id)
 
     with tabs_fixes[8]:
-        afficher_projections_overview(conn, person_id=person_id)
+        _frag_projections(conn, person_id)
 
     # --- Comptes dynamiques ---
     comptes = repo.list_accounts(conn, person_id=person_id)

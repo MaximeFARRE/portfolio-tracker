@@ -26,12 +26,13 @@ def _delta_str(val: float, ref: float) -> str:
     return f"{sign}{_fmt(d)}"
 
 
-def _load_family_snapshots(conn) -> pd.DataFrame:
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_family_snapshots(_conn) -> pd.DataFrame:
     try:
         df = pd.read_sql_query(
             "SELECT week_date, patrimoine_net, patrimoine_brut, credits_remaining "
             "FROM patrimoine_snapshots_family_weekly ORDER BY week_date ASC",
-            conn,
+            _conn,
         )
         df["week_date"] = pd.to_datetime(df["week_date"], errors="coerce")
         return df.dropna(subset=["week_date"])
@@ -39,7 +40,8 @@ def _load_family_snapshots(conn) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _load_person_last_snapshot(conn, person_id: int) -> dict:
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_person_last_snapshot(_conn, person_id: int) -> dict:
     try:
         row = conn.execute(
             "SELECT patrimoine_net, patrimoine_brut, week_date "
@@ -64,6 +66,20 @@ def _load_person_last_snapshot(conn, person_id: int) -> dict:
         return {}
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_person_patrimoine_history(_conn, person_id: int) -> pd.DataFrame:
+    try:
+        df = pd.read_sql_query(
+            "SELECT week_date, patrimoine_net FROM patrimoine_snapshots_weekly "
+            "WHERE person_id=? ORDER BY week_date ASC",
+            _conn, params=(person_id,),
+        )
+        df["week_date"] = pd.to_datetime(df["week_date"], errors="coerce")
+        return df.dropna(subset=["week_date"])
+    except Exception:
+        return pd.DataFrame()
+
+
 # ─────────────────────────────────────────────
 # Page header
 # ─────────────────────────────────────────────
@@ -76,7 +92,7 @@ people = repo.list_people(conn)
 # ─────────────────────────────────────────────
 # Données famille
 # ─────────────────────────────────────────────
-df_fam = _load_family_snapshots(conn)
+df_fam = _load_family_snapshots(conn)  # conn ignoré dans le cache key (préfixe _)
 
 if df_fam.empty:
     pat_net_fam = 0.0
@@ -168,15 +184,9 @@ if people is not None and not people.empty:
         snap = _load_person_last_snapshot(conn, pid)
         if snap:
             net = snap["patrimoine_net"]
-            # variation : chercher snapshot 4 semaines avant
+            # variation : chercher snapshot 4 semaines avant (résultat mis en cache)
             try:
-                df_p = pd.read_sql_query(
-                    "SELECT week_date, patrimoine_net FROM patrimoine_snapshots_weekly "
-                    "WHERE person_id=? ORDER BY week_date ASC",
-                    conn, params=(pid,),
-                )
-                df_p["week_date"] = pd.to_datetime(df_p["week_date"], errors="coerce")
-                df_p = df_p.dropna(subset=["week_date"])
+                df_p = _load_person_patrimoine_history(conn, pid)
                 last_date = df_p["week_date"].max()
                 cutoff_p = last_date - pd.Timedelta(days=28)
                 prev_p = df_p[df_p["week_date"] <= cutoff_p]
