@@ -100,7 +100,13 @@ def compute_positions_v2_fx(conn, tx_df: pd.DataFrame, latest_prices: pd.DataFra
             f"SELECT id as asset_id, currency FROM assets WHERE id IN ({qmarks});",
             tuple(asset_ids),
         ).fetchall()
-        cur_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame(columns=["asset_id", "currency"])
+        if not rows:
+            cur_df = pd.DataFrame(columns=["asset_id", "currency"])
+        else:
+            try:
+                cur_df = pd.DataFrame([dict(r) for r in rows])
+            except (TypeError, KeyError):
+                cur_df = pd.DataFrame(list(rows), columns=["asset_id", "currency"])
         out = out.merge(cur_df, on="asset_id", how="left", suffixes=("", "_asset"))
     else:
         out["currency"] = None
