@@ -194,7 +194,6 @@ def add_portfolio_value(series: pd.DataFrame) -> pd.DataFrame:
 
     return s
 
-import pandas as pd
 
 def build_pe_portfolio_value_series(projects: pd.DataFrame, tx: pd.DataFrame) -> pd.DataFrame:
     """

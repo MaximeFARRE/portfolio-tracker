@@ -131,7 +131,7 @@ def tickers_missing_weekly_prices(conn, max_show: int = 30) -> pd.DataFrame:
     for t in tickers:
         try:
             r = conn.execute(
-                "SELECT 1 FROM asset_prices_weekly WHERE ticker=? LIMIT 1",
+                "SELECT 1 FROM asset_prices_weekly WHERE symbol=? LIMIT 1",
                 (t,),
             ).fetchone()
             has = True if r else False

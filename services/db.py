@@ -1,11 +1,12 @@
 import os
 import sqlite3
-import libsql 
+import libsql
 import streamlit as st
 from pathlib import Path
 
 DB_PATH = Path("patrimoine.db")
 SCHEMA_PATH = Path("db") / "schema.sql"
+MIGRATIONS_PATH = Path("db") / "migrations"
 
 class SyncedLibsqlConn:
     """
@@ -81,7 +82,8 @@ def get_conn():
 
     # 3) Embedded replica: fichier local + sync_url vers Turso
     # NB: le fichier local peut être perdu sur Streamlit, mais sync() le rehydrate
-    conn = libsql.connect(str(DB_PATH), sync_url=url, auth_token=token)
+    replica_path = str(DB_PATH).replace(".db", "_turso.db")
+    conn = libsql.connect(replica_path, sync_url=url, auth_token=token)
 
     # Sync au démarrage pour récupérer l'état Turso
     try:
@@ -102,6 +104,69 @@ def get_conn():
 
     return SyncedLibsqlConn(conn)
 
+def _row_get(row, key: str, idx: int = 0):
+    if row is None:
+        return None
+    try:
+        return row[key]
+    except Exception:
+        return row[idx]
+
+
+def run_migrations(conn) -> list:
+    """
+    Applique les migrations SQL manquantes dans l'ordre numérique.
+    Retourne la liste des versions appliquées.
+    """
+    # Crée la table si absente (pour les DBs avant l'ajout du versioning)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS schema_version (
+      version INTEGER PRIMARY KEY,
+      applied_at TEXT DEFAULT (datetime('now')),
+      description TEXT
+    )
+    """)
+
+    # Numéro de version courant
+    row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
+    current = 0
+    if row:
+        try:
+            v = row["v"]
+        except Exception:
+            v = row[0]
+        if v is not None:
+            current = int(v)
+
+    if not MIGRATIONS_PATH.exists():
+        return []
+
+    applied = []
+    migration_files = sorted(MIGRATIONS_PATH.glob("*.sql"))
+    for mf in migration_files:
+        # extrait le numéro depuis le nom de fichier (ex: 001_initial.sql -> 1)
+        try:
+            num = int(mf.stem.split("_")[0])
+        except (ValueError, IndexError):
+            continue
+
+        if num <= current:
+            continue
+
+        sql = mf.read_text(encoding="utf-8")
+        statements = [s.strip() for s in sql.split(";") if s.strip()]
+        for stmt in statements:
+            try:
+                conn.execute(stmt)
+            except Exception:
+                pass  # index déjà présent etc.
+
+        applied.append(num)
+
+    if applied:
+        conn.commit()
+
+    return applied
 
 
 def init_db() -> None:
@@ -119,6 +184,7 @@ def init_db() -> None:
 
         ensure_snapshots_table(conn)
         ensure_weekly_tables(conn)
+        run_migrations(conn)
 
         conn.commit()
 
@@ -182,16 +248,18 @@ def seed_minimal() -> None:
             conn.commit()
 
         # Accounts
-        c2 = conn.execute("SELECT COUNT(*) AS c FROM accounts;").fetchone()["c"]
+        row = conn.execute("SELECT COUNT(*) AS c FROM accounts;").fetchone()
+        c2 = _row_value(row, "c", 0)
         if c2 == 0:
             people = conn.execute("SELECT id, name FROM people ORDER BY id;").fetchall()
             for p in people:
+                person_id = _row_value(p, "id", 0)
                 conn.execute(
                     """
                     INSERT INTO accounts(person_id, name, account_type, institution, currency)
                     VALUES (?,?,?,?,?)
                     """,
-                    (p["id"], "Banque principale", "BANQUE", None, "EUR"),
+                    (person_id, "Banque principale", "BANQUE", None, "EUR"),
                 )
             conn.commit()
 
@@ -274,5 +342,7 @@ def ensure_weekly_tables(conn):
     );
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_psfw_family_week ON patrimoine_snapshots_family_weekly(family_id, week_date);")
+    # Composite index pour les queries filtrées sur person + account
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tx_person_account_date ON transactions(person_id, account_id, date);")
     conn.commit()
 

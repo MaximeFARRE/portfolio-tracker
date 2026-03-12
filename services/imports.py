@@ -50,7 +50,7 @@ def _month_key_from_date(date_value) -> str:
     if s == "":
         raise ValueError("Date vide")
 
-    # format attendu: 30/09/2025 (dd/mm/yyyy)
+    # format attendu: 30/09/2025 (dd/mm/yyyy) ou YYYY-MM-DD (Bankin)
     d = pd.to_datetime(s, dayfirst=True, errors="coerce")
     if pd.isna(d):
         raise ValueError(f"Date invalide: {s}")
@@ -103,13 +103,11 @@ def import_wide_csv_to_monthly_table(
 
     long["mois"] = long[date_col].apply(_month_key_from_date)
 
-    # Option : on supprime l’existant pour cette personne (plus simple et safe)
+    rows = [(person_id, r["mois"], r["categorie"], float(r["montant"])) for _, r in long.iterrows()]
+
+    # DELETE + INSERT dans la même transaction pour éviter la perte de données en cas d'erreur
     if delete_existing:
         conn.execute(f"DELETE FROM {table} WHERE person_id = ?", (person_id,))
-        conn.commit()
-
-    # Insert en masse
-    rows = [(person_id, r["mois"], r["categorie"], float(r["montant"])) for _, r in long.iterrows()]
 
     conn.executemany(
         f"INSERT INTO {table} (person_id, mois, categorie, montant) VALUES (?, ?, ?, ?)",
@@ -219,16 +217,6 @@ def map_bankin_to_final(parent_cat: str, cat: str, amount: float) -> str:
     return "Dépenses courantes"
 
 
-def _ensure_person(conn: sqlite3.Connection, name: str) -> int:
-    row = conn.execute("SELECT id FROM people WHERE name = ?", (name,)).fetchone()
-    if row:
-        return int(row[0] if not hasattr(row, "keys") else row["id"])
-    conn.execute("INSERT INTO people(name) VALUES (?)", (name,))
-    conn.commit()
-    row = conn.execute("SELECT id FROM people WHERE name = ?", (name,)).fetchone()
-    return int(row[0] if not hasattr(row, "keys") else row["id"])
-
-
 def _ensure_account(conn: sqlite3.Connection, person_id: int, account_name: str) -> int:
     row = conn.execute(
         "SELECT id FROM accounts WHERE person_id = ? AND name = ?",
@@ -281,7 +269,7 @@ def import_bankin_csv(
         conn.execute("DELETE FROM transactions WHERE person_id = ?", (person_id,))
         conn.commit()
 
-    # Pour alimenter depenses/revenus en “mensuel par catégorie”
+    # Pour alimenter depenses/revenus en "mensuel par catégorie"
     monthly_dep = {}  # (mois, categorie_finale) -> sum
     monthly_rev = {}
 
@@ -330,7 +318,13 @@ def import_bankin_csv(
 
     # Option : remplir depenses/revenus (mensuel)
     if also_fill_monthly_tables:
-        # On ne purge pas tout : on “merge” par (person_id, mois, categorie)
+        # Supprimer les mois concernés avant ré-insert pour éviter les doublons
+        # lors de ré-importations successives du même fichier Bankin.
+        for mois in set(m for (m, _) in monthly_dep.keys()):
+            conn.execute("DELETE FROM depenses WHERE person_id = ? AND mois = ?", (person_id, mois))
+        for mois in set(m for (m, _) in monthly_rev.keys()):
+            conn.execute("DELETE FROM revenus WHERE person_id = ? AND mois = ?", (person_id, mois))
+
         for (mois, cat), total in monthly_dep.items():
             conn.execute(
                 """

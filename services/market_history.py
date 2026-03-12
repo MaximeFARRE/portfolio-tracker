@@ -3,6 +3,15 @@ import datetime as dt
 from typing import Iterable
 from services import market_repository as mrepo
 
+
+def _row_val(row, key: str, idx: int):
+    """Compat sqlite3.Row (accès par clé) et libsql (accès par index tuple)."""
+    try:
+        return row[key]
+    except Exception:
+        return row[idx]
+
+
 def _to_date(d) -> dt.date:
     if isinstance(d, dt.date):
         return d
@@ -103,7 +112,10 @@ def sync_fx_weekly(conn, pairs: list[tuple[str, str]], start_date: str, end_date
         ).fetchall()
 
         for r in rows:
-            mrepo.upsert_fx_rate_weekly(conn, base, quote, r["week_date"], float(r["adj_close"]))
+            # compat sqlite3.Row (clé) ET libsql (tuple index)
+            week_date = _row_val(r, "week_date", 0)
+            adj_close = _row_val(r, "adj_close", 1)
+            mrepo.upsert_fx_rate_weekly(conn, base, quote, week_date, float(adj_close))
             n_fx += 1
 
     conn.commit()
@@ -111,7 +123,10 @@ def sync_fx_weekly(conn, pairs: list[tuple[str, str]], start_date: str, end_date
 
 def get_price_asof(conn, symbol: str, week_date: str) -> float | None:
     row = mrepo.get_asset_price_asof(conn, symbol, week_date)
-    return float(row["adj_close"]) if row else None
+    if not row:
+        return None
+    # SELECT symbol(0), week_date(1), adj_close(2), currency(3), source(4)
+    return float(_row_val(row, "adj_close", 2))
 
 def get_fx_asof(conn, base_ccy: str, quote_ccy: str, week_date: str) -> float | None:
     base_ccy = base_ccy.upper()
@@ -119,13 +134,16 @@ def get_fx_asof(conn, base_ccy: str, quote_ccy: str, week_date: str) -> float | 
     if base_ccy == quote_ccy:
         return 1.0
 
+    # SELECT base_ccy(0), quote_ccy(1), week_date(2), rate(3), source(4)
     row = mrepo.get_fx_rate_asof(conn, base_ccy, quote_ccy, week_date)
     if row:
-        return float(row["rate"])
+        return float(_row_val(row, "rate", 3))
 
     inv = mrepo.get_fx_rate_asof(conn, quote_ccy, base_ccy, week_date)
-    if inv and float(inv["rate"]) != 0:
-        return 1.0 / float(inv["rate"])
+    if inv:
+        rate_inv = float(_row_val(inv, "rate", 3))
+        if rate_inv != 0:
+            return 1.0 / rate_inv
 
     return None
 

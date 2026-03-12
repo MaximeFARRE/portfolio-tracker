@@ -56,9 +56,20 @@ def last_market_dates(conn) -> dict:
     """
     Dernières dates en base pour prix et fx (utile debug)
     """
+    def _get_d(row):
+        if not row:
+            return None
+        try:
+            return row["d"]
+        except Exception:
+            try:
+                return row[0]
+            except Exception:
+                return None
+
     row_p = conn.execute("SELECT MAX(week_date) AS d FROM asset_prices_weekly").fetchone()
     row_f = conn.execute("SELECT MAX(week_date) AS d FROM fx_rates_weekly").fetchone()
     return {
-        "last_price_week": row_p["d"] if row_p else None,
-        "last_fx_week": row_f["d"] if row_f else None,
+        "last_price_week": _get_d(row_p),
+        "last_fx_week": _get_d(row_f),
     }

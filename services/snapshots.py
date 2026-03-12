@@ -81,7 +81,7 @@ def _bank_cash_asof_eur(conn, person_id: int, week_date: str) -> float:
                     df = df[df["date"] <= pd.to_datetime(week_date)]
                     if df.empty:
                         continue
-                    df["amount"] = pd.to_numeric(df.get("amount", 0.0), errors="coerce").fillna(0.0)
+                    df["amount"] = pd.to_numeric(df["amount"] if "amount" in df.columns else 0.0, errors="coerce").fillna(0.0)
                     df["type"] = df["type"].astype(str)
                     total_native += float(df.apply(lambda r: float(r["amount"]) * _sens_flux(r["type"]), axis=1).sum())
         else:
@@ -92,7 +92,7 @@ def _bank_cash_asof_eur(conn, person_id: int, week_date: str) -> float:
                 df = df.dropna(subset=["date"])
                 df = df[df["date"] <= pd.to_datetime(week_date)]
                 if not df.empty:
-                    df["amount"] = pd.to_numeric(df.get("amount", 0.0), errors="coerce").fillna(0.0)
+                    df["amount"] = pd.to_numeric(df["amount"] if "amount" in df.columns else 0.0, errors="coerce").fillna(0.0)
                     df["type"] = df["type"].astype(str)
                     total_native += float(df.apply(lambda r: float(r["amount"]) * _sens_flux(r["type"]), axis=1).sum())
 
@@ -108,8 +108,8 @@ def _broker_cash_asof_native(tx: pd.DataFrame) -> float:
         return 0.0
     df = tx.copy()
     df["type"] = df["type"].astype(str)
-    df["amount"] = pd.to_numeric(df.get("amount", 0.0), errors="coerce").fillna(0.0)
-    df["fees"] = pd.to_numeric(df.get("fees", 0.0), errors="coerce").fillna(0.0)
+    df["amount"] = pd.to_numeric(df["amount"] if "amount" in df.columns else 0.0, errors="coerce").fillna(0.0)
+    df["fees"] = pd.to_numeric(df["fees"] if "fees" in df.columns else 0.0, errors="coerce").fillna(0.0)
 
     cash = 0.0
     cash += float(df.loc[df["type"] == "DEPOT", "amount"].sum())
@@ -174,13 +174,13 @@ def _pe_cash_asof_eur(conn, person_id: int, week_date: str) -> float:
     if df is None or df.empty:
         return 0.0
     d = df.copy()
-    d["date"] = pd.to_datetime(d.get("date"), errors="coerce")
+    d["date"] = pd.to_datetime(d["date"] if "date" in d.columns else None, errors="coerce")
     d = d.dropna(subset=["date"])
     d = d[d["date"] <= pd.to_datetime(week_date)]
     if d.empty:
         return 0.0
     d["tx_type"] = d["tx_type"].astype(str).str.upper()
-    d["amount"] = pd.to_numeric(d.get("amount", 0.0), errors="coerce").fillna(0.0)
+    d["amount"] = pd.to_numeric(d["amount"] if "amount" in d.columns else 0.0, errors="coerce").fillna(0.0)
 
     def sign(t: str) -> float:
         if t == "DEPOSIT":

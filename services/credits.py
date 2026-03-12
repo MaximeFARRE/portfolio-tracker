@@ -83,6 +83,18 @@ def replace_amortissement(conn, credit_id: int, rows: List[Dict[str, Any]]) -> i
         conn.commit()
         return 0
 
+    def _safe_float(val, default=0.0) -> float:
+        try:
+            return float(val) if val is not None and val != "" else default
+        except (ValueError, TypeError):
+            return default
+
+    def _safe_int(val) -> int | None:
+        try:
+            return int(val) if val is not None and val != "" else None
+        except (ValueError, TypeError):
+            return None
+
     conn.executemany(
         """
         INSERT INTO credit_amortissements
@@ -93,13 +105,13 @@ def replace_amortissement(conn, credit_id: int, rows: List[Dict[str, Any]]) -> i
             (
                 credit_id,
                 r.get("date_echeance"),
-                float(r.get("mensualite") or 0),
-                float(r.get("capital_amorti") or 0),
-                float(r.get("interets") or 0),
-                float(r.get("assurance") or 0),
-                float(r.get("crd") or 0),
-                int(r.get("annee") or 0) if r.get("annee") else None,
-                int(r.get("mois") or 0) if r.get("mois") else None,
+                _safe_float(r.get("mensualite")),
+                _safe_float(r.get("capital_amorti")),
+                _safe_float(r.get("interets")),
+                _safe_float(r.get("assurance")),
+                _safe_float(r.get("crd")),
+                _safe_int(r.get("annee")),
+                _safe_int(r.get("mois")),
             )
             for r in rows
         ]
