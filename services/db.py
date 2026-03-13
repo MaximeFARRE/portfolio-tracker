@@ -8,11 +8,93 @@ DB_PATH = Path("patrimoine.db")
 SCHEMA_PATH = Path("db") / "schema.sql"
 MIGRATIONS_PATH = Path("db") / "migrations"
 
+# ──────────────────────────────────────────────────────────────
+# Compat libsql ↔ sqlite3 : DictRow + WrappedCursor
+# libsql retourne des tuples, sqlite3.Row supporte row["col"].
+# Ce wrapper rend les deux transparents pour tout le codebase.
+# ──────────────────────────────────────────────────────────────
+
+class DictRow:
+    """Simule sqlite3.Row : accès par clé ET par index."""
+
+    __slots__ = ("_values", "_columns", "_map")
+
+    def __init__(self, values, columns: list[str]):
+        self._values = tuple(values)
+        self._columns = columns
+        self._map = {c: i for i, c in enumerate(columns)}
+
+    # --- accès par clé ("col") ou par index (0) ---
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return self._values[self._map[key]]
+
+    # --- dict(row) fonctionne grâce à keys() + __getitem__ ---
+    def keys(self):
+        return list(self._columns)
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+    def __repr__(self):
+        pairs = ", ".join(f"{c}={v!r}" for c, v in zip(self._columns, self._values))
+        return f"DictRow({pairs})"
+
+    def __bool__(self):
+        return True
+
+
+class WrappedCursor:
+    """Intercepte fetchone/fetchall pour retourner des DictRow."""
+
+    def __init__(self, real_cursor):
+        self._cursor = real_cursor
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+    def _columns(self) -> list[str]:
+        desc = self._cursor.description
+        return [d[0] for d in desc] if desc else []
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        if row is None:
+            return None
+        # sqlite3.Row a déjà keys() → pas besoin de wrapper
+        if hasattr(row, "keys"):
+            return row
+        return DictRow(row, self._columns())
+
+    def fetchall(self):
+        rows = self._cursor.fetchall()
+        if not rows:
+            return rows
+        if hasattr(rows[0], "keys"):
+            return rows
+        cols = self._columns()
+        return [DictRow(r, cols) for r in rows]
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        row = self.fetchone()
+        if row is None:
+            raise StopIteration
+        return row
+
+
 class SyncedLibsqlConn:
     """
-    Wrapper minimal:
-    - commit() => sync() (pour pousser sur Turso)
-    - close() safe
+    Wrapper complet pour les connexions libsql :
+    - execute() → retourne un WrappedCursor (DictRow compat)
+    - commit()  → sync() vers Turso
+    - close()   → safe
     - délègue tout le reste
     """
     def __init__(self, conn):
@@ -20,6 +102,18 @@ class SyncedLibsqlConn:
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
+
+    # --- Curseur wrappé : chaque execute retourne un WrappedCursor ---
+    def execute(self, sql, params=None):
+        if params is not None:
+            cursor = self._conn.execute(sql, params)
+        else:
+            cursor = self._conn.execute(sql)
+        return WrappedCursor(cursor)
+
+    def executemany(self, sql, params_list):
+        cursor = self._conn.executemany(sql, params_list)
+        return WrappedCursor(cursor)
 
     def commit(self):
         self._conn.commit()
