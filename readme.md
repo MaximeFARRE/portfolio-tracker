@@ -18,3 +18,8 @@ ot getattr(self, "_person_signal_connected"). J'ai certifié ce correctif et clo
 
 ###  Tâche 4 : Migration de Schéma Crédit (BUG-05) (Terminé)
 - Ajout pur et dur de la colonne payer_account_id à la table credits dans db/schema.sql (évitant les crashs lors d'une reconstruction from scratch, la migration dynamique était une rustine mais le schéma racine était erroné).
+###  Tâche 5 : Nettoyage Code Mort (BUG-06) (Terminé)
+- Transfert de l'intégralité du socle Streamlit (pp.py, dossiers ui/ et pages/) dans un dossier d'archive claire legacy_streamlit/ afin que le projet PyQt soit désormais la surface principale non ambiguë et d'éviter que ces vieux scripts bloquent des refactorisations globales avec leurs imports obsolètes.
+
+###  Tâche 6 : Démarrage DB Optimisé (BUG-07) (Terminé)
+- J'ai procédé à l'audit du fichier services/db.py ainsi que core/db_connection.py. La logique de seeding initial limitait bien les redondances et l'appel cyclique à init_db() n'est plus présent dans le code actuel. 
