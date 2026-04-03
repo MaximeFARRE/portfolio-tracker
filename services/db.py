@@ -1,10 +1,19 @@
 import os
 import sqlite3
-import libsql
+import logging
 from pathlib import Path
 
-DB_PATH = Path("patrimoine.db")
-SCHEMA_PATH = Path("db") / "schema.sql"
+try:
+    import libsql
+except ImportError:
+    libsql = None
+
+_logger = logging.getLogger(__name__)
+
+# ── Chemins absolus (résistants aux changements de CWD) ──────────────────
+_ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = _ROOT / "patrimoine.db"
+SCHEMA_PATH = _ROOT / "db" / "schema.sql"
 
 class SyncedLibsqlConn:
     """
@@ -37,18 +46,14 @@ class SyncedLibsqlConn:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        # si pas d'erreur, on commit+sync
+        # Si pas d'erreur, on commit+sync
         if exc_type is None:
             try:
                 self.commit()
             except Exception:
                 pass
-        # on ferme toujours
-        try:
-            self.close()
-        except Exception:
-            pass
-        # False = ne pas masquer les exceptions
+        # ⚠️ On ne ferme PAS ici : singleton partagé.
+        # La fermeture se fait via close_connection() à l'arrêt de l'app.
         return False
 
 
@@ -61,9 +66,13 @@ def get_conn():
 
     # 2) Si pas de secrets => fallback sqlite local (utile pour dev)
     if not url or not token:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA cache_size = -64000;")  # 64 MB de cache
+        conn.execute("PRAGMA synchronous = NORMAL;")  # Bon compromis perf/sécurité
+        _logger.info("Connexion SQLite locale : %s (WAL activé)", DB_PATH)
         return conn
 
     # 3) Embedded replica: fichier local + sync_url vers Turso
@@ -166,8 +175,8 @@ def seed_minimal() -> None:
     Seed V1 :
     - 4 personnes : Papa, Maman, Maxime, Valentin
     - 1 compte BANQUE "Banque principale" par personne (modifiable/supprimable ensuite)
+    ⚠️ Ne pas appeler init_db() ici — c'est fait par get_connection() avant.
     """
-    init_db()
     with get_conn() as conn:
         # People
         row = conn.execute("SELECT COUNT(*) AS c FROM people;").fetchone()
@@ -281,5 +290,30 @@ def ensure_weekly_tables(conn):
     );
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_psfw_family_week ON patrimoine_snapshots_family_weekly(family_id, week_date);")
+
+    # ── Migration : enterprise_history (BUG-19) ──────────────────────────────
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS enterprise_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        enterprise_id INTEGER NOT NULL,
+        effective_date TEXT NOT NULL,
+        valuation_eur REAL DEFAULT 0,
+        debt_eur REAL DEFAULT 0,
+        notes TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY(enterprise_id) REFERENCES enterprises(id) ON DELETE CASCADE
+    );
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_eh_ent_date ON enterprise_history(enterprise_id, effective_date);")
+
     conn.commit()
 
+
+def ensure_credits_migrations(conn) -> None:
+    """Ajoute les colonnes manquantes à la table credits (BUG-05)."""
+    try:
+        conn.execute("ALTER TABLE credits ADD COLUMN payer_account_id INTEGER;")
+        conn.commit()
+        _logger.info("Migration : colonne payer_account_id ajoutée à credits.")
+    except Exception:
+        pass  # colonne déjà présente

@@ -4,9 +4,37 @@ Lance la fenêtre principale et gère le cycle de vie de l'application.
 """
 import sys
 import os
+import shutil
+import logging
+import traceback
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 # Ajouter le répertoire courant au path pour que les imports fonctionnent
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_APP_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(_APP_DIR))
+
+# ── Logging persistant ────────────────────────────────────────────────────
+_LOG_DIR = _APP_DIR / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    handlers=[
+        RotatingFileHandler(
+            _LOG_DIR / "patrimoine.log",
+            maxBytes=5 * 1024 * 1024,   # 5 MB par fichier
+            backupCount=5,              # 5 fichiers max
+            encoding="utf-8",
+        ),
+        logging.StreamHandler(sys.stderr),
+    ],
+)
+logger = logging.getLogger("patrimoine")
+logger.info("═" * 60)
+logger.info("Démarrage de Patrimoine Desktop")
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
@@ -15,6 +43,64 @@ QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
 from core.db_connection import get_connection, close_connection
 from qt_ui.main_window import MainWindow
+
+
+# ── Exception handler global ──────────────────────────────────────────────
+def _global_exception_handler(exc_type, exc_value, exc_tb):
+    """Attrape les exceptions non gérées, les logue, et affiche un dialogue."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+
+    tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    logger.critical("Exception non gérée:\n%s", tb_text)
+
+    try:
+        from PyQt6.QtWidgets import QMessageBox
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Critical)
+        msg.setWindowTitle("Erreur inattendue")
+        msg.setText("Une erreur inattendue s'est produite.")
+        msg.setDetailedText(tb_text)
+        msg.setInformativeText(
+            f"L'erreur a été enregistrée dans :\n{_LOG_DIR / 'patrimoine.log'}"
+        )
+        msg.exec()
+    except Exception:
+        pass
+
+sys.excepthook = _global_exception_handler
+
+
+# ── Sauvegarde automatique de la DB ───────────────────────────────────────
+def _backup_database():
+    """Copie patrimoine.db dans backups/ avec horodatage (garde les 10 dernières)."""
+    db_path = _APP_DIR / "patrimoine.db"
+    if not db_path.exists():
+        return
+
+    backup_dir = _APP_DIR / "backups"
+    backup_dir.mkdir(exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = backup_dir / f"patrimoine_{timestamp}.db"
+
+    try:
+        shutil.copy2(db_path, dest)
+        logger.info("Sauvegarde DB → %s", dest)
+    except Exception as e:
+        logger.error("Échec sauvegarde DB : %s", e)
+        return
+
+    # Rotation : ne garder que les 10 dernières sauvegardes
+    backups = sorted(backup_dir.glob("patrimoine_*.db"), key=lambda p: p.name)
+    while len(backups) > 10:
+        old = backups.pop(0)
+        try:
+            old.unlink()
+            logger.info("Ancienne sauvegarde supprimée : %s", old.name)
+        except Exception:
+            pass
 
 
 def main():
@@ -79,7 +165,12 @@ def main():
 
     # Lancement
     exit_code = app.exec()
+
+    # Sauvegarde automatique avant fermeture
+    logger.info("Fermeture de l'application...")
+    _backup_database()
     close_connection()
+    logger.info("Application fermée proprement.")
     sys.exit(exit_code)
 
 

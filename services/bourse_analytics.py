@@ -486,7 +486,8 @@ def get_bourse_performance_metrics(conn, person_id: int) -> dict:
         df_snap = pd.DataFrame(columns=["snapshot_date", "bourse_holdings"])
         
     # We delay load since methods are in this very module
-    invested_eur = compute_invested_amount_eur_asof(conn, person_id, "2099-01-01")
+    import datetime as _dt
+    invested_eur = compute_invested_amount_eur_asof(conn, person_id, _dt.date.today().isoformat())
     
     df_income = compute_passive_income_history(conn, person_id)
     tot_div = float(df_income[df_income["type"] == "DIVIDENDE"]["amount_eur"].sum()) if not df_income.empty else 0.0

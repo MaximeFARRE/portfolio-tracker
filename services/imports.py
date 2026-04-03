@@ -3,16 +3,6 @@ import sqlite3
 import pandas as pd
 
 
-def _ensure_person(conn: sqlite3.Connection, person_name: str) -> int:
-    row = conn.execute("SELECT id FROM people WHERE name = ?", (person_name,)).fetchone()
-    if row:
-        return int(row[0] if not hasattr(row, "keys") else row["id"])
-
-    conn.execute("INSERT INTO people(name) VALUES (?)", (person_name,))
-    conn.commit()
-    row2 = conn.execute("SELECT id FROM people WHERE name = ?", (person_name,)).fetchone()
-    return int(row2[0] if not hasattr(row2, "keys") else row2["id"])
-
 
 def _read_clean_wide_csv(file) -> pd.DataFrame:
     # sep=None détecte automatiquement ; ou ,

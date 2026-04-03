@@ -1196,7 +1196,10 @@ class ImportPage(QScrollArea):
         except Exception:
             self._person_combo.addItems(["Papa", "Maman", "Maxime", "Valentin"])
 
-        self._person_combo.currentIndexChanged.connect(self._on_person_changed)
+        # BUG-03 FIX: ne connecter le signal qu'une seule fois
+        if not getattr(self, "_person_signal_connected", False):
+            self._person_combo.currentIndexChanged.connect(self._on_person_changed)
+            self._person_signal_connected = True
         self._on_person_changed()
 
     def _on_person_changed(self) -> None:

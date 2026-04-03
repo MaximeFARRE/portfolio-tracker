@@ -1,5 +1,6 @@
 from __future__ import annotations
 import datetime as dt
+import logging
 from datetime import datetime
 import pandas as pd
 import pytz
@@ -10,6 +11,8 @@ from services import positions
 from services import private_equity_repository as pe_repo
 from services import entreprises_repository as ent_repo
 from services.credits import list_credits_by_person, get_crd_a_date
+
+_logger = logging.getLogger(__name__)
 
 # pe cash tx repo (existe déjà chez toi)
 try:
@@ -39,16 +42,18 @@ def _list_weeks(start: dt.date, end: dt.date) -> list[str]:
 # CASH BANQUE as-of
 # --------------------
 def _sens_flux(t: str) -> int:
-    # Miroir de utils.validators.sens_flux, sans dépendance UI
-    # FIX: liste complète des types positifs ET négatifs (avant: ACHAT/DEPENSE/FRAIS
-    #      tombaient dans le défaut +1, gonflant artificiellement le cash bancaire)
-    t = (t or "").upper()
-    if t in {"DEPOT", "ENTREE", "CREDIT", "VENTE", "DIVIDENDE", "INTERETS", "LOYER"}:
+    """
+    Wrapper safe autour de utils.validators.sens_flux.
+    Ne crashe jamais (retourne +1 pour les types inconnus avec un warning logué).
+    """
+    try:
+        from utils.validators import sens_flux
+        return sens_flux(t)
+    except ValueError:
+        _logger.warning("_sens_flux: type inconnu '%s' — traité comme +1 (neutre)", t)
         return 1
-    if t in {"RETRAIT", "SORTIE", "DEBIT", "ACHAT", "DEPENSE", "FRAIS", "IMPOT", "REMBOURSEMENT_CREDIT"}:
-        return -1
-    # Type inconnu : on ne crashe pas pour ne pas bloquer les snapshots, mais on suppose neutre (+1)
-    return 1
+    except Exception:
+        return 1
 
 def _bank_cash_asof_eur(conn, person_id: int, week_date: str) -> float:
     accounts = repo.list_accounts(conn, person_id=person_id)
