@@ -16,7 +16,10 @@ _APP_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(_APP_DIR))
 
 # ── Logging persistant ────────────────────────────────────────────────────
-_LOG_DIR = _APP_DIR / "logs"
+_USER_DATA_DIR = Path.home() / ".patrimoine"
+_USER_DATA_DIR.mkdir(exist_ok=True)
+
+_LOG_DIR = _USER_DATA_DIR / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
@@ -74,33 +77,61 @@ sys.excepthook = _global_exception_handler
 
 # ── Sauvegarde automatique de la DB ───────────────────────────────────────
 def _backup_database():
-    """Copie patrimoine.db dans backups/ avec horodatage (garde les 10 dernières)."""
-    db_path = _APP_DIR / "patrimoine.db"
-    if not db_path.exists():
-        return
-
-    backup_dir = _APP_DIR / "backups"
+    """Copie patrimoine.db (et sa variante Turso) dans ~/.patrimoine/backups/ avec horodatage."""
+    backup_dir = _USER_DATA_DIR / "backups"
     backup_dir.mkdir(exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dest = backup_dir / f"patrimoine_{timestamp}.db"
+    
+    files_to_backup = [
+        "patrimoine.db",
+        "patrimoine_turso.db",
+        "patrimoine_turso.db-info"
+    ]
+    
+    backed_up = False
+    for filename in files_to_backup:
+        src = _APP_DIR / filename
+        if src.exists():
+            if ".db-info" in filename:
+                dest = backup_dir / f"patrimoine_turso_{timestamp}.db-info"
+            else:
+                dest = backup_dir / filename.replace(".db", f"_{timestamp}.db")
+                
+            try:
+                if src.is_dir():
+                    import shutil
+                    shutil.copytree(src, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(src, dest)
+                logger.info("Sauvegarde DB → %s", dest)
+                backed_up = True
+            except Exception as e:
+                logger.error("Échec sauvegarde %s : %s", filename, e)
 
-    try:
-        shutil.copy2(db_path, dest)
-        logger.info("Sauvegarde DB → %s", dest)
-    except Exception as e:
-        logger.error("Échec sauvegarde DB : %s", e)
+    if not backed_up:
         return
 
-    # Rotation : ne garder que les 10 dernières sauvegardes
-    backups = sorted(backup_dir.glob("patrimoine_*.db"), key=lambda p: p.name)
-    while len(backups) > 10:
-        old = backups.pop(0)
-        try:
-            old.unlink()
-            logger.info("Ancienne sauvegarde supprimée : %s", old.name)
-        except Exception:
-            pass
+    # Rotation : ne garder que les 10 dernières de chaque type principal
+    for prefix in ["patrimoine_", "patrimoine_turso_"]:
+        # Ne cibler que les fichiers .db pour vérifier le quota des 10 backups
+        backups = sorted(backup_dir.glob(f"{prefix}*.db"), key=lambda p: str(p.name))
+        
+        while len(backups) > 10:
+            old = backups.pop(0)
+            try:
+                old.unlink()
+                # Tenter de supprimer le -info associé si présent
+                info_file = backup_dir / f"{old.stem}.db-info"
+                if info_file.exists():
+                    if info_file.is_dir():
+                        shutil.rmtree(info_file)
+                    else:
+                        info_file.unlink()
+                        
+                logger.info("Ancienne sauvegarde supprimée : %s", old.name)
+            except Exception:
+                pass
 
 
 def main():

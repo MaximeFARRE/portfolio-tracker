@@ -637,7 +637,7 @@ def rebuild_snapshots_person_backdated_aware(
     conn,
     person_id: int,
     safety_weeks: int = 4,
-    fallback_lookback_days: int = 365,
+    fallback_lookback_days: int = 3650,
 ) -> dict:
     """
     B4: Rebuild backdated-aware (transactions ajoutées récemment mais avec date ancienne)
