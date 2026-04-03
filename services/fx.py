@@ -8,8 +8,7 @@ logger = logging.getLogger(__name__)
 
 def fetch_fx_rate(base_ccy: str, quote_ccy: str) -> float | None:
     """
-    API simple : Frankfurter.
-    Exemple: https://api.frankfurter.app/latest?from=USD&to=EUR
+    API simple : Frankfurter avec fallback sur yfinance (ex: EURUSD=X).
     """
     base_ccy = (base_ccy or "").upper()
     quote_ccy = (quote_ccy or "").upper()
@@ -19,12 +18,25 @@ def fetch_fx_rate(base_ccy: str, quote_ccy: str) -> float | None:
         return 1.0
 
     url = f"https://api.frankfurter.app/latest?from={base_ccy}&to={quote_ccy}"
-    r = requests.get(url, timeout=10)
-    if r.status_code != 200:
-        return None
+    try:
+        r = requests.get(url, timeout=3)
+        if r.status_code == 200:
+            data = r.json()
+            return float(data["rates"][quote_ccy])
+    except Exception as e:
+        logger.warning("Frankfurter API a échoué pour %s→%s : %s", base_ccy, quote_ccy, e)
 
-    data = r.json()
-    return float(data["rates"][quote_ccy])
+    # Fallback yfinance
+    try:
+        import yfinance as yf
+        ticker = f"{base_ccy}{quote_ccy}=X"
+        df = yf.download(ticker, period="1d", progress=False)
+        if df is not None and not df.empty and "Close" in df.columns:
+            return float(df["Close"].iloc[-1].item() if hasattr(df["Close"].iloc[-1], 'item') else df["Close"].iloc[-1])
+    except Exception as e:
+        logger.warning("yfinance FX fallback a échoué pour %s→%s : %s", base_ccy, quote_ccy, e)
+
+    return None
 
 
 def ensure_fx_rate(conn, base_ccy: str, quote_ccy: str) -> float | None:
