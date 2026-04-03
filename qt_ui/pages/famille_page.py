@@ -33,19 +33,20 @@ class RebuildFamilleThread(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, conn, person_ids: list):
+    def __init__(self, person_ids: list):
         super().__init__()
-        self._conn = conn
         self._person_ids = person_ids
 
     def run(self):
         try:
             self.progress.emit("Rebuild famille en cours...")
             from services import family_snapshots as fs
-            res = fs.rebuild_family_weekly(
-                self._conn, person_ids=self._person_ids,
-                lookback_days=90, family_id=1
-            )
+            from services.db import get_conn
+            with get_conn() as local_conn:
+                res = fs.rebuild_family_weekly(
+                    local_conn, person_ids=self._person_ids,
+                    lookback_days=90, family_id=1
+                )
             self.finished.emit(str(res))
         except Exception as e:
             logger.error("Erreur rebuild famille : %s", e)
@@ -57,9 +58,8 @@ class RebuildAllThread(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, conn, person_ids: list, safety_weeks: int):
+    def __init__(self, person_ids: list, safety_weeks: int):
         super().__init__()
-        self._conn = conn
         self._person_ids = person_ids
         self._safety_weeks = safety_weeks
 
@@ -67,27 +67,29 @@ class RebuildAllThread(QThread):
         try:
             from services import snapshots as wk_snap
             from services import family_snapshots as fs
+            from services.db import get_conn
             msgs = []
             total = len(self._person_ids)
-            for i, pid in enumerate(self._person_ids):
-                self.progress.emit(f"Rebuild personne {i+1}/{total}...")
-                r = wk_snap.rebuild_snapshots_person_from_last(
-                    self._conn, person_id=pid,
-                    safety_weeks=self._safety_weeks,
-                    fallback_lookback_days=90
-                )
-                msgs.append(str(r))
-            try:
-                self.progress.emit("Rebuild famille...")
-                fs.rebuild_family_weekly_from_last(
-                    self._conn, person_ids=self._person_ids,
-                    safety_weeks=self._safety_weeks,
-                    fallback_lookback_days=90, family_id=1
-                )
-                msgs.append("famille OK")
-            except Exception as e:
-                logger.warning("Erreur rebuild famille agrégé : %s", e)
-                msgs.append(f"famille erreur: {e}")
+            with get_conn() as local_conn:
+                for i, pid in enumerate(self._person_ids):
+                    self.progress.emit(f"Rebuild personne {i+1}/{total}...")
+                    r = wk_snap.rebuild_snapshots_person_from_last(
+                        local_conn, person_id=pid,
+                        safety_weeks=self._safety_weeks,
+                        fallback_lookback_days=90
+                    )
+                    msgs.append(str(r))
+                try:
+                    self.progress.emit("Rebuild famille...")
+                    fs.rebuild_family_weekly_from_last(
+                        local_conn, person_ids=self._person_ids,
+                        safety_weeks=self._safety_weeks,
+                        fallback_lookback_days=90, family_id=1
+                    )
+                    msgs.append("famille OK")
+                except Exception as e:
+                    logger.warning("Erreur rebuild famille agrégé : %s", e)
+                    msgs.append(f"famille erreur: {e}")
             self.finished.emit(" | ".join(msgs))
         except Exception as e:
             logger.error("Erreur rebuild all : %s", e)
@@ -296,7 +298,7 @@ class FamilleDashboardPanel(QWidget):
         self._progress_bar.show()
         self._rebuild_status.setText("Rebuild en cours...")
 
-        self._thread = RebuildFamilleThread(self._conn, person_ids)
+        self._thread = RebuildFamilleThread(person_ids)
         self._thread.progress.connect(self._on_rebuild_progress)
         self._thread.finished.connect(self._on_rebuild_done)
         self._thread.error.connect(self._on_rebuild_error)
@@ -457,7 +459,7 @@ class DataHealthPanel(QWidget):
         self._rebuild_progress.show()
         self._rebuild_status.setText("Rebuild en cours...")
 
-        self._thread = RebuildAllThread(self._conn, person_ids, safety_weeks)
+        self._thread = RebuildAllThread(person_ids, safety_weeks)
         self._thread.progress.connect(lambda msg: self._rebuild_status.setText(msg))
         self._thread.finished.connect(self._on_rebuild_done)
         self._thread.error.connect(self._on_rebuild_error)

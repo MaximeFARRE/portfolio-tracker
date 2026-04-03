@@ -676,16 +676,17 @@ class ImportPage(QScrollArea):
             done = pyqtSignal(list)
             error = pyqtSignal(str)
 
-            def __init__(self, conn, filepath, pid):
+            def __init__(self, filepath, pid):
                 super().__init__()
-                self._conn = conn
                 self._filepath = filepath
                 self._pid = pid
 
             def run(self):
                 try:
+                    from services.db import get_conn
                     from services.tr_import import extract_tr_tickers_with_predictions
-                    results = extract_tr_tickers_with_predictions(self._conn, self._filepath, self._pid)
+                    with get_conn() as local_conn:
+                        results = extract_tr_tickers_with_predictions(local_conn, self._filepath, self._pid)
                     self.done.emit(results)
                 except Exception as e:
                     self.error.emit(str(e))
@@ -697,9 +698,8 @@ class ImportPage(QScrollArea):
             done = pyqtSignal(object)   # résultat dict ou Exception
             error = pyqtSignal(str)
 
-            def __init__(self, conn, filepath, pid, acc_id, ticker_map):
+            def __init__(self, filepath, pid, acc_id, ticker_map):
                 super().__init__()
-                self._conn = conn
                 self._filepath = filepath
                 self._pid = pid
                 self._acc_id = acc_id
@@ -707,11 +707,13 @@ class ImportPage(QScrollArea):
 
             def run(self):
                 try:
+                    from services.db import get_conn
                     from services.tr_import import import_tr_transactions
-                    result = import_tr_transactions(
-                        self._conn, self._filepath, self._pid, self._acc_id, 
-                        dry_run=True, ticker_account_map=self._ticker_map
-                    )
+                    with get_conn() as local_conn:
+                        result = import_tr_transactions(
+                            local_conn, self._filepath, self._pid, self._acc_id, 
+                            dry_run=True, ticker_account_map=self._ticker_map
+                        )
                     self.done.emit(result)
                 except Exception as e:
                     self.error.emit(str(e))
@@ -719,7 +721,7 @@ class ImportPage(QScrollArea):
         def _execute_preview(filepath: str) -> None:
             account_id = tr_account_combo.currentData()
             pid = _get_person_id()
-            thread = _PreviewThread(self._conn, filepath, pid, account_id, w._ticker_map)
+            thread = _PreviewThread(filepath, pid, account_id, w._ticker_map)
             w._preview_thread = thread  # garder une référence
 
             def _on_preview_done(result) -> None:
@@ -825,7 +827,7 @@ class ImportPage(QScrollArea):
 
             if chk_multi_account.isChecked():
                 multi_acc_grp.show()
-                pred_thread = _PredictionThread(self._conn, filepath, pid)
+                pred_thread = _PredictionThread(filepath, pid)
                 w._prediction_thread = pred_thread
                 def _on_pred_done(results):
                     while multi_item_layout.count():

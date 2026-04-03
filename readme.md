@@ -9,3 +9,6 @@
 
 ---
 *En attente de la prochaine tâche (BUG-01: Connexion DB).*
+###  Tâche 2 : Accès concurrent DB (BUG-01, BUG-17) (Terminé)
+- **Sécurisation des threads (QThread)** : Tous les processus asynchrones longs (Imports TR, Rebuild snapshots famille, Refresh Bourse) génèrent désormais **leur propre connexion locale (with get_conn() as local_conn:)** lors de leur exécution un().
+- **Prévention de corruption SQLite** : Élimination du passage en paramètre et du partage de l'objet global natif self._conn issu du main thread UI.

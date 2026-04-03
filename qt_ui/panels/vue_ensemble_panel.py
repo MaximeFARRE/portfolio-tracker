@@ -28,18 +28,19 @@ class SnapshotRebuildThread(QThread):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, conn, person_id: int):
+    def __init__(self, person_id: int):
         super().__init__()
-        self._conn = conn
         self._person_id = person_id
 
     def run(self):
         try:
             from services import snapshots as wk_snap
-            res = wk_snap.rebuild_snapshots_person_from_last(
-                self._conn, person_id=self._person_id,
-                safety_weeks=4, fallback_lookback_days=90
-            )
+            from services.db import get_conn
+            with get_conn() as local_conn:
+                res = wk_snap.rebuild_snapshots_person_from_last(
+                    local_conn, person_id=self._person_id,
+                    safety_weeks=4, fallback_lookback_days=90
+                )
             self.finished.emit(str(res))
         except Exception as e:
             self.error.emit(str(e))
@@ -134,7 +135,7 @@ class VueEnsemblePanel(QWidget):
     def _on_rebuild(self) -> None:
         self._btn_rebuild.setEnabled(False)
         self._rebuild_status.setText("Rebuild en cours...")
-        self._thread = SnapshotRebuildThread(self._conn, self._person_id)
+        self._thread = SnapshotRebuildThread(self._person_id)
         self._thread.finished.connect(self._on_rebuild_done)
         self._thread.error.connect(lambda e: self._rebuild_status.setText(f"Erreur : {e}"))
         self._thread.start()

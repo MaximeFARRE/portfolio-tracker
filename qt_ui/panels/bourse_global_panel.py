@@ -21,43 +21,44 @@ logger = logging.getLogger(__name__)
 class RefreshPricesThread(QThread):
     finished = pyqtSignal(str)
 
-    def __init__(self, conn, person_id: int):
+    def __init__(self, person_id: int):
         super().__init__()
-        self._conn = conn
         self._person_id = person_id
 
     def run(self):
         try:
             from services import repositories as repo
             from services import pricing, fx
+            from services.db import get_conn
 
-            df_acc = repo.list_accounts(self._conn, person_id=self._person_id)
-            if df_acc is None or df_acc.empty:
-                self.finished.emit("Aucun compte bourse.")
-                return
+            with get_conn() as local_conn:
+                df_acc = repo.list_accounts(local_conn, person_id=self._person_id)
+                if df_acc is None or df_acc.empty:
+                    self.finished.emit("Aucun compte bourse.")
+                    return
 
-            bourse_types = {"PEA", "CTO", "CRYPTO"}
-            df_b = df_acc[df_acc["account_type"].astype(str).str.upper().isin(bourse_types)]
-            n_ok, n_fail = 0, 0
-            for _, row in df_b.iterrows():
-                account_id = int(row["id"])
-                acc_ccy = str(row.get("currency") or "EUR").upper()
-                asset_ids = repo.list_account_asset_ids(self._conn, account_id=account_id)
-                for aid in asset_ids:
-                    a = self._conn.execute("SELECT symbol FROM assets WHERE id = ?", (aid,)).fetchone()
-                    if not a:
-                        continue
-                    sym = a[0] if not hasattr(a, '__getitem__') else a["symbol"]
-                    px_val, ccy = pricing.fetch_last_price_auto(sym)
-                    if px_val is not None:
-                        repo.upsert_price(self._conn, asset_id=aid, date=pricing.today_str(),
-                                          price=px_val, currency=ccy, source="AUTO")
-                        if ccy and str(ccy).upper() != acc_ccy:
-                            repo.update_asset_currency(self._conn, aid, str(ccy).upper())
-                            fx.ensure_fx_rate(self._conn, str(ccy).upper(), acc_ccy)
-                        n_ok += 1
-                    else:
-                        n_fail += 1
+                bourse_types = {"PEA", "CTO", "CRYPTO"}
+                df_b = df_acc[df_acc["account_type"].astype(str).str.upper().isin(bourse_types)]
+                n_ok, n_fail = 0, 0
+                for _, row in df_b.iterrows():
+                    account_id = int(row["id"])
+                    acc_ccy = str(row.get("currency") or "EUR").upper()
+                    asset_ids = repo.list_account_asset_ids(local_conn, account_id=account_id)
+                    for aid in asset_ids:
+                        a = local_conn.execute("SELECT symbol FROM assets WHERE id = ?", (aid,)).fetchone()
+                        if not a:
+                            continue
+                        sym = a[0] if not hasattr(a, '__getitem__') else a["symbol"]
+                        px_val, ccy = pricing.fetch_last_price_auto(sym)
+                        if px_val is not None:
+                            repo.upsert_price(local_conn, asset_id=aid, date=pricing.today_str(),
+                                              price=px_val, currency=ccy, source="AUTO")
+                            if ccy and str(ccy).upper() != acc_ccy:
+                                repo.update_asset_currency(local_conn, aid, str(ccy).upper())
+                                fx.ensure_fx_rate(local_conn, str(ccy).upper(), acc_ccy)
+                            n_ok += 1
+                        else:
+                            n_fail += 1
             self.finished.emit(f"{n_ok} OK, {n_fail} non trouvés")
         except Exception as e:
             logger.error("RefreshPricesThread error: %s", e, exc_info=True)
@@ -168,7 +169,7 @@ class BourseGlobalPanel(QWidget):
     def _on_refresh(self) -> None:
         self._btn_refresh.setEnabled(False)
         self._refresh_status.setText("Rafraîchissement en cours...")
-        self._thread = RefreshPricesThread(self._conn, self._person_id)
+        self._thread = RefreshPricesThread(self._person_id)
         self._thread.finished.connect(self._on_refresh_done)
         self._thread.start()
 
