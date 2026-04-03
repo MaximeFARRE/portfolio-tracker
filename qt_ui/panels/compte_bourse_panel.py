@@ -24,33 +24,34 @@ logger = logging.getLogger(__name__)
 class PriceRefreshThread(QThread):
     finished = pyqtSignal(int, int)
 
-    def __init__(self, conn, account_id: int, account_ccy: str):
+    def __init__(self, account_id: int, account_ccy: str):
         super().__init__()
-        self._conn = conn
         self._account_id = account_id
         self._account_ccy = account_ccy
 
     def run(self):
         from services import repositories as repo
         from services import pricing, fx
+        from services.db import get_conn
         n_ok, n_fail = 0, 0
-        asset_ids = repo.list_account_asset_ids(self._conn, account_id=self._account_id)
-        for aid in asset_ids:
-            a = self._conn.execute("SELECT symbol FROM assets WHERE id = ?", (aid,)).fetchone()
-            if not a:
-                continue
-            sym = a[0] if not hasattr(a, '__getitem__') else a["symbol"]
-            px_val, ccy = pricing.fetch_last_price_auto(sym)
-            if px_val is not None:
-                repo.upsert_price(self._conn, asset_id=aid, date=pricing.today_str(),
-                                  price=px_val, currency=ccy, source="AUTO")
-                if ccy:
-                    repo.update_asset_currency(self._conn, aid, str(ccy).upper())
-                    if str(ccy).upper() != self._account_ccy:
-                        fx.ensure_fx_rate(self._conn, str(ccy).upper(), self._account_ccy)
-                n_ok += 1
-            else:
-                n_fail += 1
+        with get_conn() as local_conn:
+            asset_ids = repo.list_account_asset_ids(local_conn, account_id=self._account_id)
+            for aid in asset_ids:
+                a = local_conn.execute("SELECT symbol FROM assets WHERE id = ?", (aid,)).fetchone()
+                if not a:
+                    continue
+                sym = a[0] if not hasattr(a, '__getitem__') else a["symbol"]
+                px_val, ccy = pricing.fetch_last_price_auto(sym)
+                if px_val is not None:
+                    repo.upsert_price(local_conn, asset_id=aid, date=pricing.today_str(),
+                                      price=px_val, currency=ccy, source="AUTO")
+                    if ccy:
+                        repo.update_asset_currency(local_conn, aid, str(ccy).upper())
+                        if str(ccy).upper() != self._account_ccy:
+                            fx.ensure_fx_rate(local_conn, str(ccy).upper(), self._account_ccy)
+                    n_ok += 1
+                else:
+                    n_fail += 1
         self.finished.emit(n_ok, n_fail)
 
 
@@ -162,7 +163,7 @@ class CompteBoursePanel(QWidget):
         except Exception as e:
             logger.warning("Could not fetch account currency: %s", e)
             acc_ccy = "EUR"
-        self._thread = PriceRefreshThread(self._conn, self._account_id, acc_ccy)
+        self._thread = PriceRefreshThread(self._account_id, acc_ccy)
         self._thread.finished.connect(self._on_refresh_done)
         self._thread.start()
 
