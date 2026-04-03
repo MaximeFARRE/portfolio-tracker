@@ -96,12 +96,13 @@ def compute_cagr(series: pd.Series, dates: pd.Series) -> float:
 
     d0 = pd.to_datetime(dates.iloc[0])
     d1 = pd.to_datetime(dates.iloc[-1])
-    days = max((d1 - d0).days, 1)
-    years = days / 365.25
-
-    if years <= 0:
+    # FIX: on vérifie raw_days AVANT le calcul de years (le guard "if years <= 0" après
+    # max(...,1) était du code mort — years ne pouvait jamais être <= 0)
+    raw_days = (d1 - d0).days
+    if raw_days <= 0:
         return 0.0
 
+    years = raw_days / 365.25
     return (pow(b / a, 1.0 / years) - 1.0) * 100.0
 
 
@@ -424,3 +425,100 @@ def compute_cagr_since_start(df_series: pd.DataFrame, min_base_eur: float = 200.
 
     years = days / 365.25
     return (pow(b / a, 1.0 / years) - 1.0) * 100.0
+
+def compute_passive_income_history(conn, person_id: int) -> pd.DataFrame:
+    """
+    Renvoie l'historique des revenus passifs (DIVIDENDE, INTERETS) par mois/année pour la bourse.
+    """
+    from services import market_history
+    accounts = repo.list_accounts(conn, person_id=person_id)
+    if accounts is None or accounts.empty:
+        return pd.DataFrame(columns=["date", "type", "amount_eur", "month", "year"])
+        
+    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    if bourse_acc.empty:
+         return pd.DataFrame(columns=["date", "type", "amount_eur", "month", "year"])
+    
+    rows = []
+    for _, a in bourse_acc.iterrows():
+        acc_id = int(a["id"])
+        acc_ccy = str(a.get("currency") or "EUR").upper()
+        
+        tx = repo.list_transactions(conn, person_id=person_id, account_id=acc_id, limit=200000)
+        if tx is None or tx.empty:
+            continue
+            
+        df = tx.copy()
+        df = df[df["type"].isin(["DIVIDENDE", "INTERETS"])]
+        if df.empty:
+            continue
+            
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"])
+        
+        for _, r in df.iterrows():
+            amt_native = float(r.get("amount") or 0.0)
+            if amt_native <= 0:
+                continue
+            
+            date_str = r["date"].strftime("%Y-%m-%d")
+            # Convert API
+            amt_eur = market_history.convert_weekly(conn, amt_native, acc_ccy, "EUR", date_str)
+            rows.append({
+                "date": date_str,
+                "month": r["date"].strftime("%Y-%m"),
+                "year": r["date"].strftime("%Y"),
+                "type": r["type"],
+                "amount_eur": round(float(amt_eur), 2),
+            })
+            
+    if not rows:
+        return pd.DataFrame(columns=["date", "month", "year", "type", "amount_eur"])
+        
+    return pd.DataFrame(rows)
+
+def get_bourse_performance_metrics(conn, person_id: int) -> dict:
+    """
+    Retourne un résumé des métriques boursières globale et YTD ainsi que les DataFrames associées pour l'UI.
+    """
+    df_snap = repo.list_patrimoine_snapshots(conn, person_id=person_id)
+    if df_snap is None or df_snap.empty:
+        df_snap = pd.DataFrame(columns=["snapshot_date", "bourse_holdings"])
+        
+    # We delay load since methods are in this very module
+    invested_eur = compute_invested_amount_eur_asof(conn, person_id, "2099-01-01")
+    
+    df_income = compute_passive_income_history(conn, person_id)
+    tot_div = float(df_income[df_income["type"] == "DIVIDENDE"]["amount_eur"].sum()) if not df_income.empty else 0.0
+    tot_int = float(df_income[df_income["type"] == "INTERETS"]["amount_eur"].sum()) if not df_income.empty else 0.0
+
+    global_perf = 0.0
+    ytd_perf = 0.0
+    
+    if not df_snap.empty:
+        df_snap["date"] = pd.to_datetime(df_snap["snapshot_date"], errors="coerce")
+        df_snap = df_snap.dropna(subset=["date"]).sort_values("date")
+        
+        if len(df_snap) > 0:
+            current_value = float(df_snap.iloc[-1]["bourse_holdings"])
+            
+            if invested_eur > 0:
+                global_perf = (current_value / invested_eur - 1.0) * 100.0
+                
+            current_year = df_snap.iloc[-1]["date"].year
+            df_ytd = df_snap[df_snap["date"].dt.year == current_year]
+            if len(df_ytd) > 1:
+                val_start_ytd = float(df_ytd.iloc[0]["bourse_holdings"])
+                val_end_ytd = float(df_ytd.iloc[-1]["bourse_holdings"])
+                if val_start_ytd > 0:
+                    ytd_perf = (val_end_ytd / val_start_ytd - 1.0) * 100.0
+
+    return {
+        "invested_eur": invested_eur,
+        "global_perf_pct": global_perf,
+        "ytd_perf_pct": ytd_perf,
+        "total_dividends": tot_div,
+        "total_interests": tot_int,
+        "snapshots_df": df_snap,
+        "income_df": df_income
+    }

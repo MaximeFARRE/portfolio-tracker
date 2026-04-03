@@ -1,16 +1,16 @@
-import streamlit as st
+"""
+Compatibilité : utils/cache.py utilise désormais le singleton de core/db_connection.py
+au lieu de st.cache_resource, pour fonctionner sans Streamlit.
+"""
 import sqlite3
-from services.db import get_conn, init_db, seed_minimal
+from core.db_connection import get_connection
 
 
-@st.cache_resource
 def cached_conn() -> sqlite3.Connection:
-    # Initialise DB + seed au premier lancement
-    init_db()
-    seed_minimal()
-    return get_conn()
+    """Retourne la connexion singleton (remplace @st.cache_resource)."""
+    return get_connection()
 
 
 def reset_cache():
-    st.cache_resource.clear()
-    st.cache_data.clear()
+    """No-op : plus de cache Streamlit à vider."""
+    pass

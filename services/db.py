@@ -1,7 +1,6 @@
 import os
 import sqlite3
-import libsql 
-import streamlit as st
+import libsql
 from pathlib import Path
 
 DB_PATH = Path("patrimoine.db")
@@ -56,21 +55,9 @@ class SyncedLibsqlConn:
 
 
 def get_conn():
-    # 1) Lire les secrets Streamlit (Cloud) ou env vars (local)
-    url = None
-    token = None
-
-    # Streamlit Cloud: st.secrets
-    try:
-        url = st.secrets.get("TURSO_DATABASE_URL")
-        token = st.secrets.get("TURSO_AUTH_TOKEN")
-    except Exception:
-        url = None
-        token = None
-
-    # fallback env vars (utile en local)
-    url = url or os.getenv("TURSO_DATABASE_URL")
-    token = token or os.getenv("TURSO_AUTH_TOKEN")
+    # Lire les credentials depuis les variables d'environnement
+    url = os.getenv("TURSO_DATABASE_URL")
+    token = os.getenv("TURSO_AUTH_TOKEN")
 
     # 2) Si pas de secrets => fallback sqlite local (utile pour dev)
     if not url or not token:
@@ -81,7 +68,8 @@ def get_conn():
 
     # 3) Embedded replica: fichier local + sync_url vers Turso
     # NB: le fichier local peut être perdu sur Streamlit, mais sync() le rehydrate
-    conn = libsql.connect(str(DB_PATH), sync_url=url, auth_token=token)
+    replica_path = str(DB_PATH).replace(".db", "_turso.db")
+    conn = libsql.connect(replica_path, sync_url=url, auth_token=token)
 
     # Sync au démarrage pour récupérer l'état Turso
     try:
@@ -102,6 +90,13 @@ def get_conn():
 
     return SyncedLibsqlConn(conn)
 
+def _row_get(row, key: str, idx: int = 0):
+    if row is None:
+        return None
+    try:
+        return row[key]
+    except Exception:
+        return row[idx]
 
 
 def init_db() -> None:
@@ -119,6 +114,7 @@ def init_db() -> None:
 
         ensure_snapshots_table(conn)
         ensure_weekly_tables(conn)
+        ensure_people_columns(conn)
 
         conn.commit()
 
@@ -182,10 +178,12 @@ def seed_minimal() -> None:
             conn.commit()
 
         # Accounts
-        c2 = conn.execute("SELECT COUNT(*) AS c FROM accounts;").fetchone()["c"]
+        row = conn.execute("SELECT COUNT(*) AS c FROM accounts;").fetchone()
+        c2 = row[0]  # compatible tuple + sqlite3.Row
         if c2 == 0:
             people = conn.execute("SELECT id, name FROM people ORDER BY id;").fetchall()
             for p in people:
+
                 conn.execute(
                     """
                     INSERT INTO accounts(person_id, name, account_type, institution, currency)
@@ -194,6 +192,15 @@ def seed_minimal() -> None:
                     (p["id"], "Banque principale", "BANQUE", None, "EUR"),
                 )
             conn.commit()
+
+def ensure_people_columns(conn) -> None:
+    """Migrations additionnelles sur la table people."""
+    try:
+        conn.execute("ALTER TABLE people ADD COLUMN tr_phone TEXT;")
+        conn.commit()
+    except Exception:
+        pass  # colonne déjà présente
+
 
 def ensure_weekly_tables(conn):
     conn.execute("""

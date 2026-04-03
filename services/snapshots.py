@@ -39,13 +39,15 @@ def _list_weeks(start: dt.date, end: dt.date) -> list[str]:
 # CASH BANQUE as-of
 # --------------------
 def _sens_flux(t: str) -> int:
-    # même logique que utils.validators.sens_flux, sans dépendance UI
+    # Miroir de utils.validators.sens_flux, sans dépendance UI
+    # FIX: liste complète des types positifs ET négatifs (avant: ACHAT/DEPENSE/FRAIS
+    #      tombaient dans le défaut +1, gonflant artificiellement le cash bancaire)
     t = (t or "").upper()
-    if t in {"DEPOT", "ENTREE", "CREDIT"}:
+    if t in {"DEPOT", "ENTREE", "CREDIT", "VENTE", "DIVIDENDE", "INTERETS", "LOYER"}:
         return 1
-    if t in {"RETRAIT", "SORTIE", "DEBIT"}:
+    if t in {"RETRAIT", "SORTIE", "DEBIT", "ACHAT", "DEPENSE", "FRAIS", "IMPOT", "REMBOURSEMENT_CREDIT"}:
         return -1
-    # par défaut neutre
+    # Type inconnu : on ne crashe pas pour ne pas bloquer les snapshots, mais on suppose neutre (+1)
     return 1
 
 def _bank_cash_asof_eur(conn, person_id: int, week_date: str) -> float:

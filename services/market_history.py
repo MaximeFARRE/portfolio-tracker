@@ -1,7 +1,10 @@
 from __future__ import annotations
 import datetime as dt
+import logging
 from typing import Iterable
 from services import market_repository as mrepo
+
+_logger = logging.getLogger(__name__)
 
 def _to_date(d) -> dt.date:
     if isinstance(d, dt.date):
@@ -137,5 +140,12 @@ def convert_weekly(conn, amount: float, from_ccy: str, to_ccy: str, week_date: s
 
     rate = get_fx_asof(conn, from_ccy, to_ccy, week_date)
     if rate is None:
-        return float(amount)  # fallback safe
+        # FIX: on loggue explicitement — retourner le montant sans conversion peut fausser
+        # les snapshots (ex: un actif USD serait compté 1-pour-1 en EUR)
+        _logger.warning(
+            "convert_weekly: taux %s→%s introuvable pour la semaine %s. "
+            "Montant %.4f retourné SANS conversion — vérifier la table fx_rates_weekly.",
+            from_ccy, to_ccy, week_date, amount,
+        )
+        return float(amount)  # fallback: montant brut sans conversion (taux manquant)
     return float(amount) * float(rate)
