@@ -286,9 +286,9 @@ def build_amortissement(params: CreditParams) -> List[Dict[str, Any]]:
                     interets = 0.0        # ici on considère qu'ils ne sont pas "payés", donc on les neutralise en flux
                 else:
                     # intérêts payés (mais capital non), CRD stable
-                    mensualite = 0.0 + assurance_mois
-                    # CRD inchangé, intérêts payés mais on ne les met pas dans l'amortissement comme flux "mensualite"
-                    # -> on les garde en colonne interets pour calcul coût, mais mensu=assurance seulement
+                    # FIX: les intérêts sont réellement payés => ils doivent figurer dans la mensualité
+                    mensualite = interets + assurance_mois
+                    # CRD inchangé (capital non amorti), intérêts inclus dans la mensualité
         else:
             # phase amortissement normale
             mensualite = float(mensualite_calc) + assurance_mois

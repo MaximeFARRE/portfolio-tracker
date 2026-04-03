@@ -1,6 +1,9 @@
+import logging
 import requests
 from services import repositories as repo
 from services import pricing
+
+logger = logging.getLogger(__name__)
 
 
 def fetch_fx_rate(base_ccy: str, quote_ccy: str) -> float | None:
@@ -29,6 +32,7 @@ def ensure_fx_rate(conn, base_ccy: str, quote_ccy: str) -> float | None:
     Renvoie un taux base->quote.
     - prend le dernier en base si dispo
     - sinon fetch web + insert en DB
+    - retourne None si aucune source n'a pu fournir le taux (loggué)
     """
     base_ccy = (base_ccy or "").upper()
     quote_ccy = (quote_ccy or "").upper()
@@ -43,13 +47,24 @@ def ensure_fx_rate(conn, base_ccy: str, quote_ccy: str) -> float | None:
     rate = fetch_fx_rate(base_ccy, quote_ccy)
     if rate is not None:
         repo.insert_fx_rate(conn, base_ccy, quote_ccy, pricing.today_str(), rate)
+    else:
+        logger.warning(
+            "FX: impossible de récupérer le taux %s→%s (DB vide + API en échec). "
+            "Aucune conversion ne sera appliquée.",
+            base_ccy,
+            quote_ccy,
+        )
     return rate
 
 
-def convert(conn, amount: float, from_ccy: str, to_ccy: str) -> float:
+def convert(conn, amount: float, from_ccy: str, to_ccy: str) -> float | None:
     """
     Convertit amount de from_ccy vers to_ccy.
-    Si le taux n'est pas dispo => retourne amount (fallback).
+
+    Retourne None si le taux de change est introuvable, afin que l'appelant
+    puisse détecter l'échec et ne pas utiliser un montant non converti.
+    Les appelants qui tolèrent un fallback à 0 peuvent écrire :
+        result = convert(...) or 0.0
     """
     from_ccy = (from_ccy or "").upper()
     to_ccy = (to_ccy or "").upper()
@@ -58,5 +73,12 @@ def convert(conn, amount: float, from_ccy: str, to_ccy: str) -> float:
 
     rate = ensure_fx_rate(conn, from_ccy, to_ccy)
     if rate is None:
-        return float(amount)
+        logger.error(
+            "FX.convert: taux %s→%s indisponible. "
+            "Montant %.4f NON converti — retourne None pour forcer la détection par l'appelant.",
+            from_ccy,
+            to_ccy,
+            amount,
+        )
+        return None
     return float(amount) * float(rate)

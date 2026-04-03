@@ -36,8 +36,3 @@ def fetch_last_price_auto(symbol: str) -> tuple[float | None, str]:
         pass
 
     return None, "EUR"
-
-
-
-def today_str() -> str:
-    return dt.date.today().isoformat()
