@@ -9,9 +9,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QScrollArea,
+    QFrame, QScrollArea, QDateEdit,
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QDate
 
 from qt_ui.widgets import PlotlyView, DataTableWidget, KpiCard, LoadingOverlay
 from qt_ui.theme import (
@@ -171,6 +171,7 @@ class BourseGlobalPanel(QWidget):
         self._person_id = person_id
         self._thread = None
         self._thread_rebuild = None
+        self._selected_date = None  # None = Live
 
         self.setStyleSheet(f"background: {BG_PRIMARY};")
 
@@ -293,6 +294,38 @@ class BourseGlobalPanel(QWidget):
         lbl_pos_section.setStyleSheet(STYLE_SECTION)
         layout.addWidget(lbl_pos_section)
 
+        # ── Sélecteur de date (Historique) ───────────────────────────────────
+        self._diag_header = QHBoxLayout()
+        self._diag_header.setSpacing(10)
+        self._lbl_mode = QLabel("🕒 Mode : Live")
+        self._lbl_mode.setStyleSheet(f"color: {COLOR_SUCCESS}; font-weight: bold;")
+        self._diag_header.addWidget(self._lbl_mode)
+        
+        self._diag_header.addStretch()
+        
+        self._lbl_date_picker = QLabel("Analyser à la date :")
+        self._lbl_date_picker.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        self._diag_header.addWidget(self._lbl_date_picker)
+        
+        self._date_picker = QDateEdit()
+        self._date_picker.setCalendarPopup(True)
+        self._date_picker.setDate(QDate.currentDate())
+        self._date_picker.setStyleSheet(f"background: #1e2538; color: white; padding: 4px; border-radius: 4px;")
+        self._diag_header.addWidget(self._date_picker)
+        
+        self._btn_set_date = QPushButton("Appliquer")
+        self._btn_set_date.setStyleSheet(STYLE_BTN_PRIMARY)
+        self._btn_set_date.clicked.connect(self._on_date_applied)
+        self._diag_header.addWidget(self._btn_set_date)
+        
+        self._btn_reset_live = QPushButton("Revenir au Live")
+        self._btn_reset_live.setStyleSheet("background: #374151; color: white; padding: 6px 12px; border: none; border-radius: 4px;")
+        self._btn_reset_live.setVisible(False)
+        self._btn_reset_live.clicked.connect(self._on_reset_live)
+        self._diag_header.addWidget(self._btn_reset_live)
+        
+        layout.addLayout(self._diag_header)
+
         table_area = QHBoxLayout()
         table_area.setSpacing(12)
 
@@ -310,6 +343,16 @@ class BourseGlobalPanel(QWidget):
         table_area.addLayout(vbox_alloc, stretch=2)
 
         layout.addLayout(table_area)
+        layout.addWidget(_sep())
+
+        # ── Diagnostic Tickers (Debug) ────────────────────────────────────────
+        lbl_diag = QLabel("🛠  Diagnostic — Statut des Tickers")
+        lbl_diag.setStyleSheet(STYLE_SECTION)
+        layout.addWidget(lbl_diag)
+
+        self._table_diag = DataTableWidget()
+        self._table_diag.setMinimumHeight(240)
+        layout.addWidget(self._table_diag)
 
         # ── Overlay de chargement (sur le widget externe, pas le scroll) ───
         self._overlay = LoadingOverlay(self)
@@ -339,6 +382,28 @@ class BourseGlobalPanel(QWidget):
         self._refresh_status.setText(f"✅ {msg}")
         self._load_data()
 
+    def _on_date_applied(self) -> None:
+        qdt = self._date_picker.date()
+        date_str = qdt.toString("yyyy-MM-dd")
+        # Si c'est aujourd'hui, on reste en live
+        if date_str == datetime.date.today().isoformat():
+            self._on_reset_live()
+            return
+        
+        self._selected_date = date_str
+        self._lbl_mode.setText(f"🕒 Historique : {qdt.toString('dd/MM/yyyy')}")
+        self._lbl_mode.setStyleSheet(f"color: #f97316; font-weight: bold;") # Orange
+        self._btn_reset_live.setVisible(True)
+        self._load_data()
+
+    def _on_reset_live(self) -> None:
+        self._selected_date = None
+        self._lbl_mode.setText("🕒 Mode : Live")
+        self._lbl_mode.setStyleSheet(f"color: {COLOR_SUCCESS}; font-weight: bold;")
+        self._btn_reset_live.setVisible(False)
+        self._date_picker.setDate(QDate.currentDate())
+        self._load_data()
+
     def _on_rebuild(self) -> None:
         self._btn_rebuild.setEnabled(False)
         self._btn_refresh.setEnabled(False)
@@ -361,7 +426,10 @@ class BourseGlobalPanel(QWidget):
         try:
             from services import repositories as repo
             from services import portfolio
-            from services.bourse_analytics import get_bourse_performance_metrics, compute_invested_series
+            from services.bourse_analytics import (
+                get_bourse_performance_metrics, compute_invested_series,
+                get_tickers_diagnostic_df, get_bourse_state_asof
+            )
 
             # ── Comptes bourse ──────────────────────────────────────────────
             df_acc = repo.list_accounts(self._conn, person_id=self._person_id)
@@ -374,39 +442,52 @@ class BourseGlobalPanel(QWidget):
                 self._table_pos.set_dataframe(pd.DataFrame([{"Info": "Aucun compte bourse."}]))
                 return
 
-            # ── Positions live ──────────────────────────────────────────────
-            all_pos = []
-            for _, row in df_b.iterrows():
-                account_id = int(row["id"])
-                acc_ccy    = str(row.get("currency") or "EUR").upper()
-                tx_acc     = repo.list_transactions(self._conn, account_id=account_id, limit=10000)
-                asset_ids  = repo.list_account_asset_ids(self._conn, account_id=account_id)
-                prices     = repo.get_latest_prices(self._conn, asset_ids)
-                pos        = portfolio.compute_positions_v2_fx(self._conn, tx_acc, prices, acc_ccy)
-                if not pos.empty:
-                    pos["compte"] = str(row["name"])
-                    pos["type"]   = str(row["account_type"])
-                    all_pos.append(pos)
+            if self._selected_date:
+                # ── MODE HISTORIQUE ──
+                state = get_bourse_state_asof(self._conn, self._person_id, self._selected_date)
+                df_all = state.get("df", pd.DataFrame())
+                total_val = float(state.get("total_val", 0.0))
+                nb_pos = len(df_all[df_all["quantity"] > 0]) if not df_all.empty else 0
+                nb_acc = len(df_b)
+                inv_eur = float(state.get("total_invested", 0.0))
+                total_pnl = float(state.get("total_pnl", 0.0))
+                g_perf = (total_val / inv_eur - 1.0) * 100.0 if inv_eur > 0 else 0.0
+                y_perf = 0.0 # pas calculé en historique simple
+                t_div = 0.0 # pas filtré par date ici
+                t_int = 0.0
+                
+            else:
+                # ── MODE LIVE ──
+                all_pos = []
+                for _, row in df_b.iterrows():
+                    account_id = int(row["id"])
+                    acc_ccy    = str(row.get("currency") or "EUR").upper()
+                    tx_acc     = repo.list_transactions(self._conn, account_id=account_id, limit=10000)
+                    asset_ids  = repo.list_account_asset_ids(self._conn, account_id=account_id)
+                    prices     = repo.get_latest_prices(self._conn, asset_ids)
+                    pos        = portfolio.compute_positions_v2_fx(self._conn, tx_acc, prices, acc_ccy)
+                    if not pos.empty:
+                        pos["compte"] = str(row["name"])
+                        pos["type"]   = str(row["account_type"])
+                        all_pos.append(pos)
 
-            if not all_pos:
-                self._table_pos.set_dataframe(pd.DataFrame([{"Info": "Aucune position ouverte."}]))
-                return
+                if not all_pos:
+                    self._table_pos.set_dataframe(pd.DataFrame([{"Info": "Aucune position ouverte."}]))
+                    return
 
-            df_all    = pd.concat(all_pos, ignore_index=True)
-            total_val = float(df_all["value"].sum())       if "value"      in df_all.columns else 0.0
-            total_pnl = float(df_all["pnl_latent"].sum())  if "pnl_latent" in df_all.columns else 0.0
-            nb_pos    = len(df_all[df_all["quantity"] > 0]) if "quantity"  in df_all.columns else len(df_all)
-            nb_acc    = len(df_b)
+                df_all    = pd.concat(all_pos, ignore_index=True)
+                total_val = float(df_all["value"].sum())       if "value"      in df_all.columns else 0.0
+                total_pnl = float(df_all["pnl_latent"].sum())  if "pnl_latent" in df_all.columns else 0.0
+                nb_pos    = len(df_all[df_all["quantity"] > 0]) if "quantity"  in df_all.columns else len(df_all)
+                nb_acc    = len(df_b)
 
-            # ── Métriques analytiques ────────────────────────────────────────
-            metrics = get_bourse_performance_metrics(
-                self._conn, self._person_id, current_live_value=total_val
-            )
-            inv_eur = metrics.get("invested_eur",    0.0)
-            g_perf  = metrics.get("global_perf_pct", 0.0)
-            y_perf  = metrics.get("ytd_perf_pct",    0.0)
-            t_div   = metrics.get("total_dividends",  0.0)
-            t_int   = metrics.get("total_interests",  0.0)
+                # ── Métriques analytiques ──
+                metrics = get_bourse_performance_metrics(self._conn, self._person_id, current_live_value=total_val)
+                inv_eur = metrics.get("invested_eur",    0.0)
+                g_perf  = metrics.get("global_perf_pct", 0.0)
+                y_perf  = metrics.get("ytd_perf_pct",    0.0)
+                t_div   = metrics.get("total_dividends",  0.0)
+                t_int   = metrics.get("total_interests",  0.0)
 
             # ── Sous-titre dynamique ─────────────────────────────────────────
             today_str = datetime.date.today().strftime("%d/%m/%Y")
@@ -432,126 +513,193 @@ class BourseGlobalPanel(QWidget):
                 emoji="📈",
                 tone="success" if g_perf >= 0 else "alert",
             )
-            self._kpi_pnl.set_content(
-                "PnL Latent",
-                f"{'+'  if total_pnl >= 0 else ''}{_fmt_eur(total_pnl)}",
-                emoji="⚡",
-                tone="success" if total_pnl >= 0 else "alert",
-            )
-
             # ── KPI — ligne 2 ────────────────────────────────────────────────
             self._kpi_nb.set_content(
                 "Positions", str(nb_pos),
                 subtitle=f"{nb_acc} compte(s)",
                 emoji="🎯", tone="neutral",
             )
+
+            # ── Sous-métriques Dividendes / Intérêts / PnL ───────────────────
+            # Calculées uniquement en mode live depuis income_df + snapshots_df
+            div_details: list[tuple[str, str]] = []
+            int_details: list[tuple[str, str]] = []
+            pnl_details: list[tuple[str, str]] = []
+
+            if not self._selected_date:
+                _today = datetime.date.today()
+                _date_12m = _today - datetime.timedelta(days=365)
+
+                df_inc: pd.DataFrame | None = metrics.get("income_df")
+                if df_inc is not None and not df_inc.empty and "date" in df_inc.columns:
+                    # Normalise la colonne date en datetime pour le filtre
+                    df_inc = df_inc.copy()
+                    df_inc["_dt"] = pd.to_datetime(df_inc["date"], errors="coerce")
+
+                    for (income_type, alltime_total, details_list) in [
+                        ("DIVIDENDE", t_div, div_details),
+                        ("INTERETS",  t_int, int_details),
+                    ]:
+                        sub = df_inc[df_inc["type"].str.upper() == income_type]
+                        # All-time est déjà dans t_div / t_int ; on l'utilise comme valeur principale
+                        # 12 derniers mois
+                        m12 = sub[sub["_dt"] >= pd.Timestamp(_date_12m)]["amount_eur"].sum()
+                        # Moyenne mensuelle sur les 12 derniers mois
+                        avg_m = m12 / 12.0
+                        details_list.extend([
+                            ("12 derniers mois",     _fmt_eur(m12)),
+                            ("Moy. / mois (12 m)",   _fmt_eur(avg_m)),
+                        ])
+
+                # PnL : variation sur 12 mois via les snapshots
+                df_snap_m: pd.DataFrame | None = metrics.get("snapshots_df")
+                if df_snap_m is not None and not df_snap_m.empty and "date" in df_snap_m.columns:
+                    df_snap_m = df_snap_m.copy()
+                    df_snap_m["_dt"] = pd.to_datetime(df_snap_m["date"], errors="coerce")
+                    older = df_snap_m[df_snap_m["_dt"] <= pd.Timestamp(_date_12m)]
+                    if not older.empty:
+                        val_12m_ago = float(older.iloc[-1]["bourse_holdings"])
+                        pnl_delta_12m = total_val - val_12m_ago
+                        sign = "+" if pnl_delta_12m >= 0 else ""
+                        pnl_12m_pct = ((total_val / val_12m_ago) - 1.0) * 100.0 if val_12m_ago > 0 else 0.0
+                        s_pct = "+" if pnl_12m_pct >= 0 else ""
+                        pnl_details.extend([
+                            ("Δ 12 derniers mois",  f"{sign}{_fmt_eur(pnl_delta_12m)}"),
+                            ("Perf 12 m",           f"{s_pct}{pnl_12m_pct:.2f} %"),
+                        ])
+
+            # Valeur principale des cartes de revenus = all-time
             self._kpi_div.set_content(
-                "Dividendes", _fmt_eur(t_div),
+                "Dividendes (all time)", _fmt_eur(t_div),
                 emoji="💵", tone="success",
+                details=div_details or None,
             )
             self._kpi_int.set_content(
-                "Intérêts", _fmt_eur(t_int),
+                "Intérêts (all time)", _fmt_eur(t_int),
                 emoji="🏦", tone="success",
+                details=int_details or None,
+            )
+            self._kpi_pnl.set_content(
+                "PnL Latent",
+                f"{'+'  if total_pnl >= 0 else ''}{_fmt_eur(total_pnl)}",
+                emoji="⚡",
+                tone="success" if total_pnl >= 0 else "alert",
+                details=pnl_details or None,
             )
 
             # ── Table des positions (U5) ──────────────────────────────────────
-            display_cols = ["symbol", "name", "quantity", "pru", "last_price",
-                            "value", "pnl_latent", "compte", "type"]
+            # On adapte les colonnes selon le mode
+            if self._selected_date:
+                display_cols = ["symbol", "quantity", "last_price", "currency", "fx_rate", "value", "compte"]
+                _LABELS = {**_COL_LABELS, "last_price": "Prix (Date)", "fx_rate": "Taux FX"}
+            else:
+                display_cols = ["symbol", "name", "quantity", "pru", "last_price",
+                                "value", "pnl_latent", "compte", "type"]
+                _LABELS = _COL_LABELS
+
             display_cols = [c for c in display_cols if c in df_all.columns]
             if total_val > 0 and "value" in df_all.columns:
                 df_all["poids_%"] = (df_all["value"] / total_val * 100.0).round(2)
-                idx = display_cols.index("pnl_latent") if "pnl_latent" in display_cols else len(display_cols)
-                display_cols.insert(idx, "poids_%")
+                if "value" in display_cols:
+                    idx = display_cols.index("value")
+                    display_cols.insert(idx + 1, "poids_%")
 
             df_display = df_all[display_cols].copy().sort_values("value", ascending=False)
-            df_display.rename(columns=_COL_LABELS, inplace=True)
+            df_display.rename(columns=_LABELS, inplace=True)
 
-            pnl_col = _COL_LABELS.get("pnl_latent", "PnL (€)")
+            pnl_col = _LABELS.get("pnl_latent", "PnL (€)")
             self._table_pos.set_dataframe(df_display)
-            self._table_pos.set_column_colors({
-                pnl_col: lambda v: COLOR_SUCCESS if _safe_float(v) >= 0 else COLOR_ERROR
-            })
+            if not self._selected_date:
+                self._table_pos.set_column_colors({
+                    pnl_col: lambda v: COLOR_SUCCESS if _safe_float(v) >= 0 else COLOR_ERROR
+                })
+            
+            if not self._selected_date:
+                # ── Graphe historique (U3) ──
+                # metrics est déjà calculé plus haut dans le bloc live
+                df_snap = metrics.get("snapshots_df")
+                if df_snap is not None and not df_snap.empty and "date" in df_snap.columns:
+                    fig_hist = go.Figure()
 
-            # ── Graphe historique (U3) ────────────────────────────────────────
-            df_snap = metrics.get("snapshots_df")
-            if df_snap is not None and not df_snap.empty and "date" in df_snap.columns:
-                fig_hist = go.Figure()
-
-                # Courbe principale
-                fig_hist.add_trace(go.Scatter(
-                    x=df_snap["date"], y=df_snap["bourse_holdings"],
-                    mode="lines", name="Portefeuille",
-                    line=dict(color="#4ade80", width=2),
-                    fill="tozeroy", fillcolor="rgba(74,222,128,0.07)",
-                    hovertemplate="<b>%{x|%d %b %Y}</b><br>%{y:,.0f} €<extra>Portefeuille</extra>",
-                ))
-
-                # Point live mis en évidence
-                last_row = df_snap.iloc[-1]
-                live_val = float(last_row["bourse_holdings"])
-                fig_hist.add_trace(go.Scatter(
-                    x=[last_row["date"]], y=[live_val],
-                    mode="markers", name="Valeur actuelle",
-                    marker=dict(color="#4ade80", size=10, symbol="circle",
-                                line=dict(color="#ffffff", width=2)),
-                    hovertemplate=f"<b>Aujourd'hui</b><br>{_fmt_eur(live_val)}<extra></extra>",
-                    showlegend=False,
-                ))
-
-                # Courbe montant investi cumulé
-                df_invested = compute_invested_series(self._conn, self._person_id)
-                if not df_invested.empty:
+                    # Courbe principale
                     fig_hist.add_trace(go.Scatter(
-                        x=df_invested["date"], y=df_invested["invested_eur"],
-                        mode="lines", name="Montant investi",
-                        line=dict(color="#94a3b8", width=1.5, dash="dot"),
-                        hovertemplate="<b>%{x|%d %b %Y}</b><br>%{y:,.0f} €<extra>Investi</extra>",
+                        x=df_snap["date"], y=df_snap["bourse_holdings"],
+                        mode="lines", name="Portefeuille",
+                        line=dict(color="#4ade80", width=2),
+                        fill="tozeroy", fillcolor="rgba(74,222,128,0.07)",
+                        hovertemplate="<b>%{x|%d %b %Y}</b><br>%{y:,.0f} €<extra>Portefeuille</extra>",
                     ))
 
-                fig_hist.update_layout(
-                    **plotly_layout(margin=dict(l=10, r=10, t=36, b=10)),
-                    xaxis=dict(
-                        title="", showgrid=True, gridcolor="#1e2538", gridwidth=1,
-                        tickformat="%b %Y",
-                    ),
-                    yaxis=dict(
-                        title="", showgrid=True, gridcolor="#1e2538", gridwidth=1,
-                        tickformat=",.0f", ticksuffix=" €",
-                    ),
-                    legend=dict(
-                        orientation="h", yanchor="bottom", y=1.02,
-                        xanchor="right", x=1, font=dict(size=11),
-                    ),
-                    hovermode="x unified",
-                )
-                self._chart_history.set_figure(fig_hist)
+                    # Point live mis en évidence
+                    last_row = df_snap.iloc[-1]
+                    live_val = float(last_row["bourse_holdings"])
+                    fig_hist.add_trace(go.Scatter(
+                        x=[last_row["date"]], y=[live_val],
+                        mode="markers", name="Valeur actuelle",
+                        marker=dict(color="#4ade80", size=10, symbol="circle",
+                                    line=dict(color="#ffffff", width=2)),
+                        hovertemplate=f"<b>Aujourd'hui</b><br>{_fmt_eur(live_val)}<extra></extra>",
+                        showlegend=False,
+                    ))
 
-            # ── Graphe revenus (U4) ───────────────────────────────────────────
-            df_inc = metrics.get("income_df")
-            if df_inc is not None and not df_inc.empty:
-                df_inc_grp = df_inc.groupby(["month", "type"], as_index=False)["amount_eur"].sum()
-                fig_inc = px.bar(
-                    df_inc_grp, x="month", y="amount_eur", color="type",
-                    barmode="stack", template="plotly_dark",
-                    color_discrete_map=_INCOME_COLORS,
-                    labels={"amount_eur": "", "month": "", "type": "Type"},
-                )
-                fig_inc.update_traces(
-                    hovertemplate="<b>%{x}</b><br>%{y:,.2f} €<extra>%{fullData.name}</extra>"
-                )
-                fig_inc.update_layout(
-                    **plotly_layout(margin=dict(l=10, r=10, t=36, b=10)),
-                    xaxis=dict(showgrid=False, tickangle=-45),
-                    yaxis=dict(
-                        showgrid=True, gridcolor="#1e2538",
-                        tickformat=",.0f", ticksuffix=" €",
-                    ),
-                    legend=dict(
-                        orientation="h", yanchor="bottom", y=1.02,
-                        xanchor="right", x=1, font=dict(size=11),
-                    ),
-                )
-                self._chart_income.set_figure(fig_inc)
+                    # Courbe montant investi cumulé
+                    df_invested = compute_invested_series(self._conn, self._person_id)
+                    if not df_invested.empty:
+                        fig_hist.add_trace(go.Scatter(
+                            x=df_invested["date"], y=df_invested["invested_eur"],
+                            mode="lines", name="Montant investi",
+                            line=dict(color="#94a3b8", width=1.5, dash="dot"),
+                            hovertemplate="<b>%{x|%d %b %Y}</b><br>%{y:,.0f} €<extra>Investi</extra>",
+                        ))
+
+                    fig_hist.update_layout(
+                        **plotly_layout(margin=dict(l=10, r=10, t=36, b=10)),
+                        xaxis=dict(
+                            title="", showgrid=True, gridcolor="#1e2538", gridwidth=1,
+                            tickformat="%b %Y",
+                        ),
+                        yaxis=dict(
+                            title="", showgrid=True, gridcolor="#1e2538", gridwidth=1,
+                            tickformat=",.0f", ticksuffix=" €",
+                        ),
+                        legend=dict(
+                            orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="right", x=1, font=dict(size=11),
+                        ),
+                        hovermode="x unified",
+                    )
+                    self._chart_history.set_figure(fig_hist)
+
+                # ── Graphe revenus (U4) ──
+                df_inc = metrics.get("income_df")
+                if df_inc is not None and not df_inc.empty:
+                    df_inc_grp = df_inc.groupby(["month", "type"], as_index=False)["amount_eur"].sum()
+                    fig_inc = px.bar(
+                        df_inc_grp, x="month", y="amount_eur", color="type",
+                        barmode="stack", template="plotly_dark",
+                        color_discrete_map=_INCOME_COLORS,
+                        labels={"amount_eur": "", "month": "", "type": "Type"},
+                    )
+                    fig_inc.update_traces(
+                        hovertemplate="<b>%{x}</b><br>%{y:,.2f} €<extra>%{fullData.name}</extra>"
+                    )
+                    fig_inc.update_layout(
+                        **plotly_layout(margin=dict(l=10, r=10, t=36, b=10)),
+                        xaxis=dict(showgrid=False, tickangle=-45),
+                        yaxis=dict(
+                            showgrid=True, gridcolor="#1e2538",
+                            tickformat=",.0f", ticksuffix=" €",
+                        ),
+                        legend=dict(
+                            orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="right", x=1, font=dict(size=11),
+                        ),
+                    )
+                    self._chart_income.set_figure(fig_inc)
+            else:
+                # Masquer les graphes en mode historique pour éviter la confusion
+                self._chart_history.clear_figure()
+                self._chart_income.clear_figure()
 
             # ── Pie chart répartition (U6) ────────────────────────────────────
             if "value" in df_all.columns and "symbol" in df_all.columns:
@@ -573,6 +721,19 @@ class BourseGlobalPanel(QWidget):
                         showlegend=False,
                     )
                     self._chart_alloc.set_figure(fig_pie)
+
+            # ── Diagnostic Tickers ───────────────────────────────────────────
+            df_diag = get_tickers_diagnostic_df(self._conn, self._person_id)
+            if not df_diag.empty:
+                self._table_diag.set_dataframe(df_diag)
+                # Coloration du statut
+                self._table_diag.set_column_colors({
+                    "Statut": lambda v: COLOR_SUCCESS if "✅" in str(v) else (
+                        "#f97316" if "⚠️" in str(v) else COLOR_ERROR
+                    )
+                })
+            else:
+                self._table_diag.set_dataframe(pd.DataFrame([{"Info": "Aucune position pour le diagnostic."}]))
 
         except Exception as e:
             logger.error("BourseGlobalPanel._load_data error: %s", e, exc_info=True)

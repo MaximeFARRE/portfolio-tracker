@@ -388,6 +388,17 @@ def rebuild_snapshots_person(conn, person_id: int, lookback_days: int = 90) -> d
                 if ccy != "EUR":
                     pairs.add((ccy, "EUR"))
 
+    # AJOUT: On s'assure que les devises des comptes eux-mêmes sont incluses
+    accounts = repo.list_accounts(conn, person_id=person_id)
+    if accounts is not None and not accounts.empty:
+        for _, acc in accounts.iterrows():
+            ccy = str(acc.get("currency") or "EUR").upper()
+            if ccy != "EUR":
+                pairs.add((ccy, "EUR"))
+
+    # AJOUT: Toujours synchroniser l'USD pour permettre le pivot (ex: COP → USD → EUR)
+    pairs.add(("USD", "EUR"))
+
     # Import weekly market data
     if symbols:
         market_history.sync_asset_prices_weekly(conn, symbols, weeks[0], weeks[-1])
@@ -468,6 +479,15 @@ def rebuild_snapshots_person_missing_only(
                 ccy = (r["currency"] or "EUR").upper()
                 if ccy != "EUR":
                     pairs.add((ccy, "EUR"))
+
+    # AJOUT: ensure account currencies + USD pivot
+    accounts = repo.list_accounts(conn, person_id=person_id)
+    if accounts is not None and not accounts.empty:
+        for _, acc in accounts.iterrows():
+            ccy = str(acc.get("currency") or "EUR").upper()
+            if ccy != "EUR":
+                pairs.add((ccy, "EUR"))
+    pairs.add(("USD", "EUR"))
 
     # Import weekly market data (sur l'intervalle global, simple et safe)
     if symbols:
@@ -560,6 +580,15 @@ def rebuild_snapshots_person_from_last(
                 ccy = (r["currency"] or "EUR").upper()
                 if ccy != "EUR":
                     pairs.add((ccy, "EUR"))
+
+    # AJOUT: ensure account currencies + USD pivot
+    accounts = repo.list_accounts(conn, person_id=person_id)
+    if accounts is not None and not accounts.empty:
+        for _, acc in accounts.iterrows():
+            ccy = str(acc.get("currency") or "EUR").upper()
+            if ccy != "EUR":
+                pairs.add((ccy, "EUR"))
+    pairs.add(("USD", "EUR"))
 
     if symbols:
         market_history.sync_asset_prices_weekly(conn, symbols, weeks[0], weeks[-1])
@@ -730,6 +759,15 @@ def rebuild_snapshots_person_backdated_aware(
                 ccy = (r["currency"] or "EUR").upper()
                 if ccy != "EUR":
                     pairs.add((ccy, "EUR"))
+
+    # AJOUT: ensure account currencies + USD pivot
+    accounts = repo.list_accounts(conn, person_id=person_id)
+    if accounts is not None and not accounts.empty:
+        for _, acc in accounts.iterrows():
+            ccy = str(acc.get("currency") or "EUR").upper()
+            if ccy != "EUR":
+                pairs.add((ccy, "EUR"))
+    pairs.add(("USD", "EUR"))
 
     if symbols:
         market_history.sync_asset_prices_weekly(conn, symbols, weeks[0], weeks[-1])

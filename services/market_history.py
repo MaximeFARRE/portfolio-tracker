@@ -47,31 +47,45 @@ def sync_asset_prices_weekly(conn, symbols: Iterable[str], start_date: str, end_
 
     n_rows = 0
 
-    # single
-    if "Adj Close" in data.columns:
-        s = data["Adj Close"].dropna()
-        for idx, px in s.items():
-            wd = week_start(idx.date()).isoformat()
-            mrepo.upsert_asset_price_weekly(conn, symbols[0], wd, float(px))
-            n_rows += 1
-        conn.commit()
-        return {"did_run": True, "n_rows": n_rows}
+    import pandas as pd
+    
+    # yfinance peut retourner un DataFrame vide si aucune donnée n'est trouvée
+    if data is None or data.empty:
+        return {"did_run": True, "n_rows": 0, "reason": "yfinance_empty"}
 
-    # multi
     for sym in symbols:
         try:
-            if sym not in data.columns:
-                continue
-            sub = data[sym]
-            if "Adj Close" not in sub.columns:
-                continue
-            s = sub["Adj Close"].dropna()
-            for idx, px in s.items():
-                wd = week_start(idx.date()).isoformat()
-                mrepo.upsert_asset_price_weekly(conn, sym, wd, float(px))
-                n_rows += 1
-        except Exception:
-            continue
+            # On cherche une colonne de prix dans le DataFrame
+            # On gère le cas MultiIndex (plusieurs tickers) et SingleIndex (un seul)
+            if isinstance(data.columns, pd.MultiIndex):
+                # On essaie de trouver le sous-dataframe pour ce symbole
+                # yf peut mettre le symbole en level 0 ou level 1
+                if sym in data.columns.get_level_values(0):
+                    sub = data[sym]
+                elif sym in data.columns.get_level_values(1):
+                    # Cas où le prix est en level 0 (ex: 'Close') et le ticker en level 1
+                    sub = data.xs(sym, axis=1, level=1, drop_level=True)
+                else:
+                    continue
+            else:
+                # Index simple : un seul ticker a été demandé
+                sub = data
+
+            # Choix de la colonne (Adj Close en priorité)
+            col_to_use = None
+            for candidate in ["Adj Close", "Close"]:
+                if candidate in sub.columns:
+                    col_to_use = candidate
+                    break
+            
+            if col_to_use:
+                s = sub[col_to_use].dropna()
+                for idx, px in s.items():
+                    wd = week_start(idx.date()).isoformat()
+                    mrepo.upsert_asset_price_weekly(conn, sym, wd, float(px))
+                    n_rows += 1
+        except Exception as e:
+            _logger.debug("Erreur lors du traitement de %s : %s", sym, e)
 
     conn.commit()
     return {"did_run": True, "n_rows": n_rows}
@@ -225,12 +239,10 @@ def convert_weekly(conn, amount: float, from_ccy: str, to_ccy: str, week_date: s
 
     rate = get_fx_asof(conn, from_ccy, to_ccy, week_date)
     if rate is None:
-        # FIX: on loggue explicitement — retourner le montant sans conversion peut fausser
-        # les snapshots (ex: un actif USD serait compté 1-pour-1 en EUR)
-        _logger.warning(
+        _logger.error(
             "convert_weekly: taux %s→%s introuvable pour la semaine %s. "
-            "Montant %.4f retourné SANS conversion — vérifier la table fx_rates_weekly.",
-            from_ccy, to_ccy, week_date, amount,
+            "VALEUR ANNULÉE (0.0) pour éviter une valorisation erronée — vérifier fx_rates_weekly.",
+            from_ccy, to_ccy, week_date
         )
-        return float(amount)  # fallback: montant brut sans conversion (taux manquant)
+        return 0.0  # Sécurité : on préfère 0 que des milliards imaginaires (ex: COP counted as EUR)
     return float(amount) * float(rate)

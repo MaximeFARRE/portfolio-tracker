@@ -539,7 +539,7 @@ def get_bourse_performance_metrics(conn, person_id: int, current_live_value: flo
     current_live_value : si fourni, utilisé à la place du dernier snapshot pour le calcul de
                          global_perf et comme point final du graphe (évite le décalage snapshot/live).
     """
-    df_snap = repo.list_patrimoine_snapshots(conn, person_id=person_id)
+    df_snap = mrepo.list_weekly_snapshots(conn, person_id=person_id)
     if df_snap is None or df_snap.empty:
         df_snap = pd.DataFrame(columns=["snapshot_date", "bourse_holdings"])
 
@@ -593,4 +593,147 @@ def get_bourse_performance_metrics(conn, person_id: int, current_live_value: flo
         "total_interests": tot_int,
         "snapshots_df": df_snap,
         "income_df": df_income,
+    }
+
+def get_tickers_diagnostic_df(conn, person_id: int) -> pd.DataFrame:
+    """
+    Retourne un diagnostic de l'état des tickers possédés par une personne.
+    - Prix live (table prices)
+    - Prix hebdo (table asset_prices_weekly)
+    - Statut visuel
+    """
+    import datetime as _dt
+    accounts = repo.list_accounts(conn, person_id=person_id)
+    if accounts is None or accounts.empty:
+        return pd.DataFrame()
+
+    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    if bourse_acc.empty:
+        return pd.DataFrame()
+
+    acc_ids = [int(x) for x in bourse_acc["id"].tolist()]
+    # Utilise positions.compute_positions_asof avec asof=today pour avoir le live
+    pos = positions.compute_positions_asof(conn, person_id=person_id, asof_date=_dt.date.today().isoformat(), account_ids=acc_ids)
+    if pos is None or pos.empty:
+        return pd.DataFrame()
+
+    # Garde uniquement les positions ouvertes
+    pos = pos[pos["quantity"] > 0].copy()
+    if pos.empty:
+        return pd.DataFrame()
+
+    rows = []
+    today = _dt.date.today()
+
+    for _, r in pos.iterrows():
+        sym = str(r.get("symbol") or "").strip()
+        name = str(r.get("name") or "Inconnu")
+        asset_id = r.get("asset_id")
+        
+        if not sym: continue
+
+        # 1) Dernier prix live (table 'prices')
+        # On ne passe pas d'asset_id à repo.get_latest_prices (qui attend une liste),
+        # On va faire simple: une requête directe ou via repo si dispo
+        row_live = conn.execute(
+            "SELECT price, date, currency FROM prices WHERE asset_id = ? ORDER BY date DESC LIMIT 1",
+            (asset_id,)
+        ).fetchone()
+
+        # 2) Dernier prix hebdo (table 'asset_prices_weekly')
+        row_weekly = conn.execute(
+            "SELECT adj_close, week_date FROM asset_prices_weekly WHERE symbol = ? ORDER BY week_date DESC LIMIT 1",
+            (sym,)
+        ).fetchone()
+
+        live_val = f"{row_live['price']:.2f} {row_live['currency']}" if row_live else "—"
+        live_date = row_live["date"] if row_live else "—"
+        
+        weekly_date = row_weekly["week_date"] if row_weekly else "—"
+
+        # Determination du statut
+        statut = "✅ OK"
+        if not row_live:
+            statut = "❌ Pas de prix"
+        elif (today - _dt.date.fromisoformat(row_live["date"])).days > 3:
+            statut = "⚠️ Ancien (>3j)"
+        
+        if not row_weekly:
+            statut += " (No Hebdo)"
+
+        rows.append({
+            "Ticker": sym,
+            "Nom": name,
+            "Dernier Prix": live_val,
+            "MàJ Live": live_date,
+            "MàJ Hebdo": weekly_date,
+            "Statut": statut
+        })
+
+
+def get_bourse_state_asof(conn, person_id: int, asof_date: str) -> dict:
+    """
+    Ressort l'état complet du portefeuille (KPIs + Positions) à une date passée.
+    Servira au debug/historique sur la page Bourse Globale.
+    """
+    import datetime as _dt
+    from services.market_history import get_price_asof, get_fx_asof, convert_weekly
+
+    # 1) Liste des comptes bourse
+    accounts = repo.list_accounts(conn, person_id=person_id)
+    if accounts is None or accounts.empty:
+        return {}
+    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    acc_ids = [int(x) for x in bourse_acc["id"].tolist()]
+
+    # 2) Positions à cette date
+    pos = positions.compute_positions_asof(conn, person_id=person_id, asof_date=asof_date, account_ids=acc_ids)
+    if pos is None or pos.empty:
+        return {"total_val": 0.0, "total_invested": 0.0, "df": pd.DataFrame()}
+
+    # Map account info
+    acc_map = {int(r["id"]): {"name": str(r["name"]), "ccy": str(r["currency"] or "EUR").upper()} for _, r in bourse_acc.iterrows()}
+
+    rows = []
+    total_val_eur = 0.0
+
+    for _, r in pos.iterrows():
+        aid = int(r["account_id"])
+        sym = str(r.get("symbol") or "").strip()
+        qty = float(r.get("quantity") or 0.0)
+        asset_ccy = str(r.get("asset_ccy") or "EUR").upper()
+        
+        if not sym or qty <= 0: continue
+
+        # Prix à la date (weekly fallback ou exact)
+        px = get_price_asof(conn, sym, asof_date) or 0.0
+        val_native = qty * float(px)
+        
+        # Taux de change (asset_ccy -> EUR)
+        fx_rate = 1.0
+        if asset_ccy != "EUR":
+            fx_rate = get_fx_asof(conn, asset_ccy, "EUR", asof_date) or 1.0
+        
+        val_eur = val_native * fx_rate
+        total_val_eur += val_eur
+
+        rows.append({
+            "symbol": sym,
+            "name": sym, # fallback
+            "quantity": qty,
+            "last_price": px,
+            "currency": asset_ccy,
+            "fx_rate": fx_rate,
+            "value": val_eur,
+            "compte": acc_map.get(aid, {}).get("name", "Inconnu"),
+        })
+
+    # 3) Montant investi à cette date
+    invested_eur = compute_invested_amount_eur_asof(conn, person_id, asof_date)
+
+    return {
+        "total_val": total_val_eur,
+        "total_invested": invested_eur,
+        "total_pnl": total_val_eur - invested_eur,
+        "df": pd.DataFrame(rows).sort_values("value", ascending=False)
     }
