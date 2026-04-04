@@ -415,7 +415,7 @@ class BourseGlobalPanel(QWidget):
                     ))
 
                 fig_hist.update_layout(
-                    **plotly_layout(),
+                    **plotly_layout(margin=dict(l=10, r=10, t=36, b=10)),
                     xaxis=dict(
                         title="", showgrid=True, gridcolor="#1e2538", gridwidth=1,
                         tickformat="%b %Y",
@@ -429,7 +429,6 @@ class BourseGlobalPanel(QWidget):
                         xanchor="right", x=1, font=dict(size=11),
                     ),
                     hovermode="x unified",
-                    margin=dict(l=10, r=10, t=36, b=10),
                 )
                 self._chart_history.set_figure(fig_hist)
 
@@ -447,7 +446,7 @@ class BourseGlobalPanel(QWidget):
                     hovertemplate="<b>%{x}</b><br>%{y:,.2f} €<extra>%{fullData.name}</extra>"
                 )
                 fig_inc.update_layout(
-                    **plotly_layout(),
+                    **plotly_layout(margin=dict(l=10, r=10, t=36, b=10)),
                     xaxis=dict(showgrid=False, tickangle=-45),
                     yaxis=dict(
                         showgrid=True, gridcolor="#1e2538",
@@ -457,7 +456,6 @@ class BourseGlobalPanel(QWidget):
                         orientation="h", yanchor="bottom", y=1.02,
                         xanchor="right", x=1, font=dict(size=11),
                     ),
-                    margin=dict(l=10, r=10, t=36, b=10),
                 )
                 self._chart_income.set_figure(fig_inc)
 
@@ -477,9 +475,8 @@ class BourseGlobalPanel(QWidget):
                         pull=[0.04] + [0.0] * (len(df_pie) - 1),
                     )
                     fig_pie.update_layout(
-                        **plotly_layout(),
+                        **plotly_layout(margin=dict(l=24, r=24, t=24, b=24)),
                         showlegend=False,
-                        margin=dict(l=24, r=24, t=24, b=24),
                     )
                     self._chart_alloc.set_figure(fig_pie)
 
