@@ -80,12 +80,25 @@ def fx_pair_to_yf_symbol(base_ccy: str, quote_ccy: str) -> str:
     return f"{base_ccy.upper()}{quote_ccy.upper()}=X"
 
 def sync_fx_weekly(conn, pairs: list[tuple[str, str]], start_date: str, end_date: str) -> dict:
+    """
+    Synchronise les taux de change hebdomadaires pour chaque paire (base, quote).
+
+    Pour chaque paire, on essaie d'abord le symbole direct (ex: COPEUR=X).
+    Si yfinance ne retourne rien (paire exotique absente), on essaie la paire
+    inverse (ex: EURCOP=X) et on la stocke sous (quote, base) — get_fx_asof
+    sait déjà inverser automatiquement pour retrouver (base, quote).
+    """
     pairs = [(a.upper(), b.upper()) for a, b in (pairs or []) if a and b and a.upper() != b.upper()]
     if not pairs:
         return {"did_run": False, "n_rows": 0, "reason": "no_pairs"}
 
-    symbols = [fx_pair_to_yf_symbol(a, b) for a, b in pairs]
-    sync_asset_prices_weekly(conn, symbols, start_date, end_date)
+    # Télécharger direct ET inverse pour maximiser la couverture yfinance
+    all_symbols = list({
+        sym
+        for base, quote in pairs
+        for sym in (fx_pair_to_yf_symbol(base, quote), fx_pair_to_yf_symbol(quote, base))
+    })
+    sync_asset_prices_weekly(conn, all_symbols, start_date, end_date)
 
     start = _to_date(start_date)
     end = _to_date(end_date)
@@ -95,19 +108,37 @@ def sync_fx_weekly(conn, pairs: list[tuple[str, str]], start_date: str, end_date
 
     n_fx = 0
     for base, quote in pairs:
-        yf_sym = fx_pair_to_yf_symbol(base, quote)
+        direct_sym  = fx_pair_to_yf_symbol(base, quote)   # ex: COPEUR=X
+        inverse_sym = fx_pair_to_yf_symbol(quote, base)   # ex: EURCOP=X
+
         rows = conn.execute(
-            """
-            SELECT week_date, adj_close
-            FROM asset_prices_weekly
-            WHERE symbol = ? AND week_date >= ? AND week_date <= ?
-            """,
-            (yf_sym, weeks[0], weeks[-1]),
+            "SELECT week_date, adj_close FROM asset_prices_weekly "
+            "WHERE symbol = ? AND week_date >= ? AND week_date <= ?",
+            (direct_sym, weeks[0], weeks[-1]),
         ).fetchall()
 
-        for r in rows:
-            mrepo.upsert_fx_rate_weekly(conn, base, quote, r["week_date"], float(r["adj_close"]))
-            n_fx += 1
+        if rows:
+            # Paire directe disponible → stocker (base, quote, rate)
+            for r in rows:
+                mrepo.upsert_fx_rate_weekly(conn, base, quote, r["week_date"], float(r["adj_close"]))
+                n_fx += 1
+        else:
+            # Paire directe absente → essayer l'inverse et stocker (quote, base, rate)
+            # get_fx_asof inversera automatiquement pour retrouver base→quote
+            inv_rows = conn.execute(
+                "SELECT week_date, adj_close FROM asset_prices_weekly "
+                "WHERE symbol = ? AND week_date >= ? AND week_date <= ?",
+                (inverse_sym, weeks[0], weeks[-1]),
+            ).fetchall()
+            if inv_rows:
+                _logger.info(
+                    "sync_fx_weekly: paire %s absente sur yfinance, "
+                    "stockage de l'inverse %s (get_fx_asof inversera à la lecture).",
+                    direct_sym, inverse_sym,
+                )
+            for r in inv_rows:
+                mrepo.upsert_fx_rate_weekly(conn, quote, base, r["week_date"], float(r["adj_close"]))
+                n_fx += 1
 
     conn.commit()
     return {"did_run": True, "n_rows": n_fx}
