@@ -662,10 +662,12 @@ def rebuild_snapshots_person_backdated_aware(
     if last_tx_id is None:
         df_new = pd.read_sql_query(
             """
-            SELECT id, date, created_at, asset_symbol, asset_id
-            FROM transactions
-            WHERE person_id=?
-            ORDER BY id ASC
+            SELECT t.id, t.date, t.created_at, t.asset_id,
+                   a.symbol AS asset_symbol
+            FROM transactions t
+            LEFT JOIN assets a ON a.id = t.asset_id
+            WHERE t.person_id=?
+            ORDER BY t.id ASC
             """,
             conn,
             params=(int(person_id),),
@@ -673,10 +675,12 @@ def rebuild_snapshots_person_backdated_aware(
     else:
         df_new = pd.read_sql_query(
             """
-            SELECT id, date, created_at, asset_symbol, asset_id
-            FROM transactions
-            WHERE person_id=? AND id > ?
-            ORDER BY id ASC
+            SELECT t.id, t.date, t.created_at, t.asset_id,
+                   a.symbol AS asset_symbol
+            FROM transactions t
+            LEFT JOIN assets a ON a.id = t.asset_id
+            WHERE t.person_id=? AND t.id > ?
+            ORDER BY t.id ASC
             """,
             conn,
             params=(int(person_id), int(last_tx_id)),
