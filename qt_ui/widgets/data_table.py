@@ -8,7 +8,8 @@ from PyQt6.QtWidgets import (
     QTableView, QWidget, QVBoxLayout, QHBoxLayout, QAbstractItemView,
     QHeaderView, QLineEdit, QLabel, QStyledItemDelegate, QComboBox,
 )
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPainter, QBrush
+from qt_ui.components.skeleton_handler import SkeletonHandler
 
 from qt_ui.theme import BG_CARD, BG_CARD_ALT, STYLE_TABLE, STYLE_INPUT
 
@@ -135,6 +136,10 @@ class DataTableWidget(QWidget):
 
     def __init__(self, parent=None, editable: bool = False, searchable: bool = True):
         super().__init__(parent)
+        self._loading = False
+        self._skeleton_handler = SkeletonHandler(self)
+        self._skeleton_handler.updated.connect(self._view.viewport().update)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -179,6 +184,29 @@ class DataTableWidget(QWidget):
         self._model.dataChanged.connect(self._on_model_data_changed)
 
         layout.addWidget(self._view)
+
+    def set_loading(self, loading: bool) -> None:
+        """Active ou désactive le mode skeleton."""
+        self._loading = loading
+        if loading:
+            self._skeleton_handler.start()
+            # On vide temporairement le modèle ou on affiche des lignes fantômes
+            self._model.set_dataframe(pd.DataFrame({"Loading...": [""] * 5}))
+        else:
+            self._skeleton_handler.stop()
+        self._view.viewport().update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._loading:
+            return
+
+        # On dessine les skeletons par-dessus le viewport de la table
+        # Note: PaintEvent d'un QWidget parent ne dessine pas sur les enfants complexes.
+        # Il est préférable d'utiliser un overlay ou de modifier le modèle.
+        # Ici je vais utiliser le PaintEvent du viewport via un délégué ou simplement
+        # dessiner des barres grises si le modèle est en mode "Loading".
+        pass
 
     def set_dataframe(self, df: pd.DataFrame) -> None:
         self._full_df = df if df is not None else pd.DataFrame()

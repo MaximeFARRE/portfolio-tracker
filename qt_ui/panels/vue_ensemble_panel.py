@@ -160,8 +160,9 @@ class VueEnsemblePanel(QWidget):
         self._kpi_bourse   = KpiCard("Holdings bourse",   "—", tone="broker")
         self._kpi_immo     = KpiCard("Immobilier",        "—", tone="neutral")
         self._kpi_credits  = KpiCard("Crédits restants", "—", tone="red")
-        for k in [self._kpi_net, self._kpi_brut, self._kpi_liq,
-                  self._kpi_bourse, self._kpi_immo, self._kpi_credits]:
+        self._kpis = [self._kpi_net, self._kpi_brut, self._kpi_liq,
+                      self._kpi_bourse, self._kpi_immo, self._kpi_credits]
+        for k in self._kpis:
             kpi_row1.addWidget(k)
         layout.addLayout(kpi_row1)
 
@@ -186,8 +187,9 @@ class VueEnsemblePanel(QWidget):
         self._kpi_part_liquide  = KpiCard("Part liquide",       "—", tone="neutral")
         self._kpi_expo_marches  = KpiCard("Exposition marchés", "—", tone="neutral")
         self._kpi_illiquides    = KpiCard("Actifs illiquides",  "—", tone="neutral")
-        for k in [self._kpi_endettement, self._kpi_part_liquide,
-                  self._kpi_expo_marches, self._kpi_illiquides]:
+        self._kpis_sante = [self._kpi_endettement, self._kpi_part_liquide,
+                            self._kpi_expo_marches, self._kpi_illiquides]
+        for k in self._kpis_sante:
             kpi_row2.addWidget(k)
         kpi_row2.addStretch()
         layout.addLayout(kpi_row2)
@@ -202,8 +204,9 @@ class VueEnsemblePanel(QWidget):
         self._kpi_gain_12m         = KpiCard("Gain patrimonial 12 mois",   "—", tone="neutral")
         self._kpi_epargne_12m      = KpiCard("Épargne cumulée 12 mois",    "—", tone="neutral")
         self._kpi_effet_valo       = KpiCard("Effet valorisation 12 mois", "—", tone="neutral")
-        for k in [self._kpi_gain_3m, self._kpi_gain_12m,
-                  self._kpi_epargne_12m, self._kpi_effet_valo]:
+        self._kpis_prog = [self._kpi_gain_3m, self._kpi_gain_12m,
+                           self._kpi_epargne_12m, self._kpi_effet_valo]
+        for k in self._kpis_prog:
             kpi_row3.addWidget(k)
         kpi_row3.addStretch()
         layout.addLayout(kpi_row3)
@@ -217,7 +220,8 @@ class VueEnsemblePanel(QWidget):
         self._kpi_avg12       = KpiCard("Taux moy. épargne 12 mois",   "—", tone="neutral")
         self._kpi_avg12_ep    = KpiCard("Capacité d'épargne moyenne",  "—", tone="neutral")
         self._kpi_reserve     = KpiCard("Réserve de sécurité",         "—", tone="neutral")
-        for k in [self._kpi_avg12, self._kpi_avg12_ep, self._kpi_reserve]:
+        self._kpis_pilot = [self._kpi_avg12, self._kpi_avg12_ep, self._kpi_reserve]
+        for k in self._kpis_pilot:
             kpi_row4.addWidget(k)
         kpi_row4.addStretch()
         layout.addLayout(kpi_row4)
@@ -300,7 +304,19 @@ class VueEnsemblePanel(QWidget):
     # ── Chargement principal ──────────────────────────────────────────────
 
     def _load_data(self) -> None:
-        self._overlay.start("Chargement des snapshots…")
+        # ── 1. Activation des Skeletons ───────────────────────────────────
+        all_widgets = (self._kpis + self._kpis_sante + self._kpis_prog + 
+                       self._kpis_pilot + [self._kpi_3m, self._kpi_12m, self._kpi_cagr])
+        for w in all_widgets:
+            if hasattr(w, "set_loading"):
+                w.set_loading(True)
+        
+        self._chart_line.set_loading(True)
+        self._chart_alloc.set_loading(True)
+        self._chart_cashflow.set_loading(True)
+        self._chart_epargne.set_loading(True)
+
+        self._overlay.start("Chargement des données…", blur=True)
         try:
             from services.vue_ensemble_metrics import get_vue_ensemble_metrics
             m = get_vue_ensemble_metrics(self._conn, self._person_id)
@@ -427,6 +443,16 @@ class VueEnsemblePanel(QWidget):
             logger.exception("VueEnsemblePanel._load_data error")
             self._semaine_label.setText(f"Erreur : {exc}")
         finally:
+            # ── 2. Désactivation des Skeletons ──────────────────────────────
+            for w in all_widgets:
+                if hasattr(w, "set_loading"):
+                    w.set_loading(False)
+            
+            self._chart_line.set_loading(False)
+            self._chart_alloc.set_loading(False)
+            self._chart_cashflow.set_loading(False)
+            self._chart_epargne.set_loading(False)
+
             self._overlay.stop()
 
     # ── Métriques de performance (MetricLabel) ────────────────────────────

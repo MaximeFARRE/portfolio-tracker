@@ -238,13 +238,8 @@ class BourseGlobalPanel(QWidget):
         layout.addWidget(_sep())
 
         # ── KPI Row 1 — métriques principales ────────────────────────────────
-        kpi_row1 = QHBoxLayout()
-        kpi_row1.setSpacing(10)
-        self._kpi_invested = KpiCard("Total Investi",   "—", emoji="💰", tone="neutral")
-        self._kpi_holdings = KpiCard("Valeur Actuelle", "—", emoji="📊", tone="broker")
-        self._kpi_perf     = KpiCard("Perf Globale",    "—", subtitle="YTD : —", emoji="📈", tone="neutral")
-        self._kpi_pnl      = KpiCard("PnL Latent",      "—", emoji="⚡", tone="neutral")
-        for card in (self._kpi_invested, self._kpi_holdings, self._kpi_perf, self._kpi_pnl):
+        self._kpis_top = [self._kpi_invested, self._kpi_holdings, self._kpi_perf, self._kpi_pnl]
+        for card in self._kpis_top:
             kpi_row1.addWidget(card, stretch=1)
         layout.addLayout(kpi_row1)
 
@@ -254,7 +249,8 @@ class BourseGlobalPanel(QWidget):
         self._kpi_nb  = KpiCard("Positions ouvertes", "—", emoji="🎯", tone="neutral")
         self._kpi_div = KpiCard("Dividendes perçus",  "—", emoji="💵", tone="success")
         self._kpi_int = KpiCard("Intérêts perçus",    "—", emoji="🏦", tone="success")
-        for card in (self._kpi_nb, self._kpi_div, self._kpi_int):
+        self._kpis_bot = [self._kpi_nb, self._kpi_div, self._kpi_int]
+        for card in self._kpis_bot:
             kpi_row2.addWidget(card, stretch=1)
         kpi_row2.addStretch(1)
         layout.addLayout(kpi_row2)
@@ -423,7 +419,17 @@ class BourseGlobalPanel(QWidget):
     # ── Chargement des données ────────────────────────────────────────────────
 
     def _load_data(self) -> None:
-        self._overlay.start("Chargement du portefeuille global…")
+        # ── 1. Activation des Skeletons ──────────────────────────────────
+        all_widgets = self._kpis_top + self._kpis_bot + [self._table_pos, self._table_diag]
+        for w in all_widgets:
+            if hasattr(w, "set_loading"):
+                w.set_loading(True)
+        
+        self._chart_history.set_loading(True)
+        self._chart_income.set_loading(True)
+        self._chart_alloc.set_loading(True)
+
+        self._overlay.start("Analyse du portefeuille global…", blur=True)
         try:
             from services import repositories as repo
             from services import portfolio
@@ -739,6 +745,15 @@ class BourseGlobalPanel(QWidget):
         except Exception as e:
             logger.error("BourseGlobalPanel._load_data error: %s", e, exc_info=True)
         finally:
+            # ── 2. Désactivation des Skeletons ──────────────────────────────
+            for w in all_widgets:
+                if hasattr(w, "set_loading"):
+                    w.set_loading(False)
+            
+            self._chart_history.set_loading(False)
+            self._chart_income.set_loading(False)
+            self._chart_alloc.set_loading(False)
+
             self._overlay.stop()
 
 

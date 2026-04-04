@@ -21,7 +21,7 @@ Usage :
                 self._overlay.stop()
 """
 import math
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QGraphicsBlurEffect
 from PyQt6.QtCore import Qt, QTimer, QRectF
 from PyQt6.QtGui import QPainter, QColor, QPen, QFont
 
@@ -54,12 +54,12 @@ class _SpinnerWidget(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         size = self._size
-        pen_width = max(4, size // 8)
+        pen_width = 3  # Plus fin pour un look moderne
 
         # Arc de fond (gris discret)
-        p.setPen(QPen(QColor(80, 90, 110, 120), pen_width, Qt.PenStyle.SolidLine,
+        p.setPen(QPen(QColor(80, 90, 110, 40), pen_width, Qt.PenStyle.SolidLine,
                       Qt.PenCapStyle.RoundCap))
-        margin = pen_width // 2 + 2
+        margin = pen_width // 2 + 4
         rect = QRectF(margin, margin, size - 2 * margin, size - 2 * margin)
         p.drawArc(rect, 0, 360 * 16)
 
@@ -67,8 +67,9 @@ class _SpinnerWidget(QWidget):
         gradient_color = QColor(96, 165, 250)   # ACCENT_BLUE #60a5fa
         p.setPen(QPen(gradient_color, pen_width, Qt.PenStyle.SolidLine,
                       Qt.PenCapStyle.RoundCap))
-        start_angle = int(-self._angle * 16)   # sens horaire
-        span_angle  = int(270 * 16)            # 270° de couverture
+        # Animation plus fluide
+        start_angle = int(-self._angle * 16)
+        span_angle  = int(90 * 16)  # Arc plus court (90° au lieu de 270°)
         p.drawArc(rect, start_angle, span_angle)
         p.end()
 
@@ -106,25 +107,38 @@ class LoadingOverlay(QWidget):
         # Fond semi-transparent
         self.setStyleSheet("""
             #LoadingOverlay {
-                background-color: rgba(14, 17, 23, 200);
+                background-color: rgba(14, 17, 23, 140);
                 border-radius: 8px;
             }
         """)
+
+        self._blur_effect = QGraphicsBlurEffect()
+        self._blur_effect.setBlurRadius(10)
+        self._blur_enabled = True
 
         self.hide()
 
     # ── API publique ──────────────────────────────────────────────────────
 
-    def start(self, text: str = "Chargement…") -> None:
+    def start(self, text: str = "Chargement…", blur: bool = True) -> None:
         """Affiche l'overlay et démarre l'animation."""
         self._label.setText(text)
         self._label.setVisible(bool(text))
-        self.resize(self.parent().size())   # type: ignore[union-attr]
-        self.raise_()                       # passe au premier plan
+        
+        parent = self.parentWidget()
+        if parent:
+            self.resize(parent.size())
+            if blur:
+                parent.setGraphicsEffect(self._blur_effect)
+        
+        self.raise_()
         self.show()
         self._spinner.start()
 
     def stop(self) -> None:
         """Masque l'overlay et arrête l'animation."""
         self._spinner.stop()
+        parent = self.parentWidget()
+        if parent:
+            parent.setGraphicsEffect(None)
         self.hide()

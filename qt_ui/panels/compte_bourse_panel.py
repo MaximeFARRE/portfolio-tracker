@@ -6,16 +6,18 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QFormLayout, QDoubleSpinBox, QComboBox, QDateEdit, QScrollArea,
 )
 from qt_ui.components.animated_tab import AnimatedTabWidget
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QDate, QThread, pyqtSignal
 
 from qt_ui.widgets import PlotlyView, DataTableWidget, MetricLabel, LoadingOverlay
-from qt_ui.panels.saisie_panel import SaisiePanel, ASSET_TYPES
+from qt_ui.panels.saisie_panel import SaisiePanel, ASSET_TYPES, _ASSET_TYPES_NON_COTES
 from qt_ui.theme import (
-    BG_PRIMARY, STYLE_BTN_PRIMARY, STYLE_SECTION, STYLE_STATUS,
-    STYLE_TAB_INNER, plotly_layout,
+    BG_PRIMARY, STYLE_BTN_PRIMARY, STYLE_BTN_SUCCESS, STYLE_SECTION, STYLE_STATUS,
+    STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR, STYLE_INPUT_FOCUS, STYLE_FORM_LABEL,
+    STYLE_TAB_INNER, STYLE_SCROLLAREA, TEXT_SECONDARY, TEXT_MUTED, plotly_layout,
 )
 
 logger = logging.getLogger(__name__)
@@ -138,13 +140,16 @@ class CompteBoursePanel(QWidget):
         hist_v.addWidget(self._hist_table)
         tabs.addTab(hist, "📋  Historique")
 
+        # Onglet prix manuels (actifs non cotés)
+        tabs.addTab(self._build_prix_manuels_tab(), "✏️  Prix manuels")
+
         main_v.addWidget(tabs)
         self._tabs = tabs
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
         # ── Overlay de chargement ──────────────────────────────────────────
         self._overlay = LoadingOverlay(self)
-        self._load_dashboard()
+        # self._load_dashboard() # Sera appelé par le parent ou via refresh()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -162,6 +167,8 @@ class CompteBoursePanel(QWidget):
             self._saisie._load_assets()
         elif idx == 2:
             self._load_history()
+        elif idx == 3:
+            self._load_prix_manuels()
 
     def _on_refresh_prices(self) -> None:
         self._btn_refresh.setEnabled(False)
@@ -183,7 +190,14 @@ class CompteBoursePanel(QWidget):
         self._load_dashboard()
 
     def _load_dashboard(self) -> None:
-        self._overlay.start("Chargement du portefeuille…")
+        # ── 1. Activation des Skeletons ──────────────────────────────────
+        all_widgets = [self._kpi_holdings, self._kpi_pnl, self._kpi_nb, self._table_pos]
+        for w in all_widgets:
+            if hasattr(w, "set_loading"):
+                w.set_loading(True)
+        self._chart_alloc.set_loading(True)
+
+        self._overlay.start("Chargement du portefeuille…", blur=True)
         try:
             from services import repositories as repo
             from services import portfolio
@@ -227,6 +241,12 @@ class CompteBoursePanel(QWidget):
         except Exception as e:
             logger.error("CompteBoursePanel._load_dashboard error: %s", e, exc_info=True)
         finally:
+            # ── 2. Désactivation des Skeletons ──────────────────────────────
+            for w in all_widgets:
+                if hasattr(w, "set_loading"):
+                    w.set_loading(False)
+            self._chart_alloc.set_loading(False)
+
             self._overlay.stop()
 
     def _on_asset_type_changed(self, row: int, col_name: str, new_value) -> None:
@@ -258,3 +278,241 @@ class CompteBoursePanel(QWidget):
             self._hist_table.set_dataframe(tx[cols])
         except Exception as e:
             logger.error("CompteBoursePanel._load_history error: %s", e, exc_info=True)
+
+    # ── Onglet Prix manuels ────────────────────────────────────────────────
+
+    def _build_prix_manuels_tab(self) -> QWidget:
+        """Construit l'onglet de mise à jour manuelle des prix (actifs non cotés)."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(STYLE_SCROLLAREA)
+
+        container = QWidget()
+        container.setStyleSheet(f"background: {BG_PRIMARY};")
+        v = QVBoxLayout(container)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(16)
+
+        # Titre + hint
+        from PyQt6.QtWidgets import QLabel as _QLabel
+        hint = _QLabel(
+            "Mise à jour manuelle des prix pour les actifs sans cotation automatique\n"
+            "(SCPI, fonds euros, private equity, fonds, non cotés…).\n"
+            "Le prix saisi devient immédiatement le dernier prix connu utilisé dans les positions."
+        )
+        hint.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        # Formulaire de saisie de prix
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(0x0002)  # AlignRight
+
+        def _flbl(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet(STYLE_FORM_LABEL)
+            return lbl
+
+        self._pm_combo = QComboBox()
+        self._pm_combo.setStyleSheet(STYLE_INPUT_FOCUS)
+        self._pm_combo.currentIndexChanged.connect(self._on_pm_asset_selected)
+        form.addRow(_flbl("Actif :"), self._pm_combo)
+
+        self._pm_prix = QDoubleSpinBox()
+        self._pm_prix.setRange(0, 999_999_999)
+        self._pm_prix.setDecimals(4)
+        self._pm_prix.setSuffix(" €")
+        self._pm_prix.setStyleSheet(STYLE_INPUT_FOCUS)
+        form.addRow(_flbl("Nouveau prix unitaire :"), self._pm_prix)
+
+        self._pm_date = QDateEdit()
+        self._pm_date.setCalendarPopup(True)
+        self._pm_date.setDate(QDate.currentDate())
+        self._pm_date.setDisplayFormat("dd/MM/yyyy")
+        self._pm_date.setStyleSheet(STYLE_INPUT_FOCUS)
+        form.addRow(_flbl("Date effective :"), self._pm_date)
+
+        v.addLayout(form)
+
+        # Dernier prix connu (affiché sous le formulaire)
+        self._pm_last_price_lbl = QLabel("")
+        self._pm_last_price_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        v.addWidget(self._pm_last_price_lbl)
+
+        # Bouton + statut
+        btn_row = QHBoxLayout()
+        btn_save = QPushButton("💾  Enregistrer le prix")
+        btn_save.setStyleSheet(STYLE_BTN_SUCCESS)
+        btn_save.clicked.connect(self._save_prix_manuel)
+        self._pm_status = QLabel("")
+        self._pm_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        btn_row.addWidget(btn_save)
+        btn_row.addWidget(self._pm_status)
+        btn_row.addStretch()
+        v.addLayout(btn_row)
+
+        # Séparateur
+        sep = QLabel()
+        sep.setStyleSheet(f"background: #1e2538; min-height: 1px; max-height: 1px;")
+        v.addWidget(sep)
+
+        # Tableau récapitulatif : derniers prix connus par actif non coté
+        recap_lbl = QLabel("Derniers prix connus — actifs non cotés de ce compte")
+        recap_lbl.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px; font-weight: bold;")
+        v.addWidget(recap_lbl)
+
+        self._pm_table = DataTableWidget()
+        self._pm_table.setMinimumHeight(220)
+        v.addWidget(self._pm_table)
+
+        v.addStretch()
+        scroll.setWidget(container)
+        return scroll
+
+    def _load_prix_manuels(self) -> None:
+        """Charge les actifs non cotés du compte dans le combo et le tableau récap."""
+        try:
+            from services import repositories as repo
+
+            asset_ids = repo.list_account_asset_ids(self._conn, account_id=self._account_id)
+            if not asset_ids:
+                self._pm_combo.clear()
+                self._pm_table.set_dataframe(pd.DataFrame([{"Info": "Aucun actif dans ce compte."}]))
+                return
+
+            # Requête : actifs non cotés + dernier prix connu
+            placeholders = ",".join("?" * len(asset_ids))
+            rows = self._conn.execute(f"""
+                SELECT
+                    a.id        AS asset_id,
+                    a.symbol,
+                    a.name,
+                    a.asset_type,
+                    a.currency,
+                    (SELECT p.price FROM prices p
+                     WHERE p.asset_id = a.id
+                     ORDER BY p.date DESC LIMIT 1) AS last_price,
+                    (SELECT p.date FROM prices p
+                     WHERE p.asset_id = a.id
+                     ORDER BY p.date DESC LIMIT 1) AS last_price_date
+                FROM assets a
+                WHERE a.id IN ({placeholders})
+                  AND a.asset_type IN (
+                      'scpi','private_equity','non_cote',
+                      'fonds','fonds_euros','autre'
+                  )
+                ORDER BY a.name;
+            """, asset_ids).fetchall()
+
+            # Remplir le combo
+            self._pm_combo.blockSignals(True)
+            self._pm_combo.clear()
+            for r in rows:
+                label = f"{r['symbol']} — {r['name'] or ''} ({r['asset_type']})"
+                self._pm_combo.addItem(label, int(r["asset_id"]))
+            self._pm_combo.blockSignals(False)
+
+            if self._pm_combo.count() > 0:
+                self._on_pm_asset_selected(0)
+            else:
+                self._pm_last_price_lbl.setText("Aucun actif non coté dans ce compte.")
+
+            # Tableau récap
+            if rows:
+                df = pd.DataFrame([dict(r) for r in rows])
+                df = df.rename(columns={
+                    "symbol":         "Ticker",
+                    "name":           "Nom",
+                    "asset_type":     "Type",
+                    "currency":       "Devise",
+                    "last_price":     "Dernier prix",
+                    "last_price_date":"Date du prix",
+                })
+                df = df.drop(columns=["asset_id"], errors="ignore")
+                self._pm_table.set_dataframe(df)
+            else:
+                self._pm_table.set_dataframe(pd.DataFrame([{
+                    "Info": "Aucun actif non coté (SCPI, PE, fonds euros…) dans ce compte."
+                }]))
+
+        except Exception as e:
+            logger.error("CompteBoursePanel._load_prix_manuels error: %s", e, exc_info=True)
+
+    def _on_pm_asset_selected(self, _idx: int) -> None:
+        """Pré-remplit le prix avec le dernier prix connu de l'actif sélectionné."""
+        try:
+            asset_id = self._pm_combo.currentData()
+            if asset_id is None:
+                return
+            row = self._conn.execute("""
+                SELECT p.price, p.date, p.currency
+                FROM prices p
+                WHERE p.asset_id = ?
+                ORDER BY p.date DESC
+                LIMIT 1;
+            """, (int(asset_id),)).fetchone()
+
+            if row and row["price"] is not None:
+                self._pm_prix.setValue(float(row["price"]))
+                self._pm_last_price_lbl.setText(
+                    f"Dernier prix connu : {float(row['price']):.4f} {row['currency'] or 'EUR'}"
+                    f" — au {row['date']}"
+                )
+            else:
+                self._pm_prix.setValue(0.0)
+                self._pm_last_price_lbl.setText("Aucun prix enregistré pour cet actif.")
+        except Exception as e:
+            logger.warning("Erreur pré-remplissage prix: %s", e)
+
+    def _save_prix_manuel(self) -> None:
+        """Enregistre le prix manuel et rafraîchit le tableau récap."""
+        try:
+            from services import repositories as repo
+
+            asset_id = self._pm_combo.currentData()
+            if asset_id is None:
+                self._pm_status.setStyleSheet(STYLE_STATUS_ERROR)
+                self._pm_status.setText("❌  Sélectionnez un actif.")
+                return
+
+            prix = self._pm_prix.value()
+            if prix <= 0:
+                self._pm_status.setStyleSheet(STYLE_STATUS_ERROR)
+                self._pm_status.setText("❌  Le prix doit être supérieur à 0.")
+                return
+
+            date_str = self._pm_date.date().toString("yyyy-MM-dd")
+
+            # Récupérer la devise de l'actif
+            row = self._conn.execute(
+                "SELECT currency FROM assets WHERE id = ?", (int(asset_id),)
+            ).fetchone()
+            currency = (row["currency"] if row and row["currency"] else "EUR").upper()
+
+            repo.upsert_price(
+                self._conn,
+                asset_id=int(asset_id),
+                date=date_str,
+                price=prix,
+                currency=currency,
+                source="MANUEL",
+            )
+
+            nom = self._pm_combo.currentText()
+            self._pm_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+            self._pm_status.setText(f"✅  Prix enregistré : {prix:.4f} {currency} au {date_str}")
+
+            # Mettre à jour le hint + rafraîchir le tableau
+            self._pm_last_price_lbl.setText(
+                f"Dernier prix connu : {prix:.4f} {currency} — au {date_str}"
+            )
+            self._load_prix_manuels()
+
+            # Rafraîchir aussi le dashboard pour refléter la nouvelle valeur
+            self._load_dashboard()
+
+        except Exception as e:
+            logger.error("CompteBoursePanel._save_prix_manuel error: %s", e, exc_info=True)
+            self._pm_status.setStyleSheet(STYLE_STATUS_ERROR)
+            self._pm_status.setText(f"❌  Erreur : {e}")

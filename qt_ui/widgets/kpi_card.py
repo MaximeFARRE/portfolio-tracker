@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
-from qt_ui.theme import KPI_TONES
+from qt_ui.theme import KPI_TONES, TEXT_SECONDARY, BG_CARD
+from qt_ui.components.skeleton_handler import SkeletonHandler
 
 # Nombre maximum de lignes de détail supportées par la carte
 _MAX_DETAILS = 4
@@ -33,6 +34,9 @@ class KpiCard(QFrame):
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setMinimumWidth(140)
         self.setMinimumHeight(90)
+        self._loading = False
+        self._skeleton_handler = SkeletonHandler(self)
+        self._skeleton_handler.updated.connect(self.update)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
@@ -85,6 +89,51 @@ class KpiCard(QFrame):
         layout.addStretch()
 
         self.set_content(title, value, subtitle, emoji, tone)
+
+    def set_loading(self, loading: bool) -> None:
+        """Active ou désactive le mode skeleton."""
+        self._loading = loading
+        if loading:
+            self._skeleton_handler.start()
+        else:
+            self._skeleton_handler.stop()
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        """Dessine le squelette par-dessus le contenu si en mode chargement."""
+        super().paintEvent(event)
+        if not self._loading:
+            return
+
+        from PyQt6.QtGui import QPainter, QColor, QBrush
+        from PyQt6.QtCore import QRectF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Opacité pulsante
+        alpha = int(self._skeleton_handler.opacity() * 255)
+        color = QColor(100, 110, 130, alpha)  # Gris bleuté
+        brush = QBrush(color)
+
+        # On cache les labels en mettant leur couleur à transparent
+        # (Alternative: masquer les widgets, mais dessiner par-dessus est plus "skeleton-like")
+        
+        # Rect pour le titre
+        rect_title = QRectF(14, 12, self.width() * 0.6, 14)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(brush)
+        p.drawRoundedRect(rect_title, 4, 4)
+
+        # Rect pour la valeur
+        rect_val = QRectF(14, 34, self.width() * 0.5, 24)
+        p.drawRoundedRect(rect_val, 6, 6)
+
+        # Rect pour le sous-titre
+        if self._subtitle_label.isVisible():
+            rect_sub = QRectF(14, 64, self.width() * 0.7, 12)
+            p.drawRoundedRect(rect_sub, 3, 3)
+
+        p.end()
 
     def set_content(self, title: str, value: str, subtitle: str = "",
                     emoji: str = "", tone: str = "neutral",
