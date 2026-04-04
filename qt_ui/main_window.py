@@ -19,6 +19,7 @@ from qt_ui.theme import (
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, TEXT_DARK, TEXT_DISABLED,
     ACCENT_BLUE, STYLE_NAV_BTN,
 )
+from qt_ui.components.animated_stack import AnimatedStackedWidget
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,7 @@ class MainWindow(QMainWindow):
         self._page_settings = SettingsPage(conn)
 
         # Stack
-        self._stack = QStackedWidget()
+        self._stack = AnimatedStackedWidget()
         self._stack.addWidget(self._page_famille)
         self._stack.addWidget(self._page_personnes)
         self._stack.addWidget(self._page_import)

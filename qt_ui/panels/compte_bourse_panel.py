@@ -6,9 +6,9 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTabWidget
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
 )
+from qt_ui.components.animated_tab import AnimatedTabWidget
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from qt_ui.widgets import PlotlyView, DataTableWidget, MetricLabel, LoadingOverlay
@@ -70,7 +70,7 @@ class CompteBoursePanel(QWidget):
         main_v.setSpacing(12)
 
         # Onglets internes : Tableau de bord / Saisie / Historique
-        tabs = QTabWidget()
+        tabs = AnimatedTabWidget()
         tabs.setStyleSheet(STYLE_TAB_INNER)
 
         # Onglet dashboard

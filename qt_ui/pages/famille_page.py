@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QFrame, QProgressBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from qt_ui.components.animated_tab import AnimatedTabWidget
 
 from qt_ui.widgets import PlotlyView, DataTableWidget, KpiCard, MetricLabel
 from qt_ui.theme import (
@@ -603,7 +604,7 @@ class FamillePage(QWidget):
         layout.addWidget(header)
 
         # Onglets
-        self._tabs = QTabWidget()
+        self._tabs = AnimatedTabWidget()
         self._tabs.setStyleSheet(STYLE_TAB)
 
         self._panel_dashboard = FamilleDashboardPanel(conn)

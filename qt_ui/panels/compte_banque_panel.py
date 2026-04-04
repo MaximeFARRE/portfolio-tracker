@@ -4,8 +4,9 @@ Panel d'un compte Banque — remplace ui/compte_banque.py
 import logging
 import pandas as pd
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTabWidget
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel
 )
+from qt_ui.components.animated_tab import AnimatedTabWidget
 from qt_ui.widgets import DataTableWidget, MetricLabel
 from qt_ui.panels.saisie_panel import SaisiePanel
 from qt_ui.theme import (
@@ -27,7 +28,7 @@ class CompteBanquePanel(QWidget):
         main_v.setContentsMargins(12, 12, 12, 12)
         main_v.setSpacing(12)
 
-        tabs = QTabWidget()
+        tabs = AnimatedTabWidget()
         tabs.setStyleSheet(STYLE_TAB_INNER)
 
         # Dashboard

@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QScrollArea, QSplitter
 )
 from PyQt6.QtCore import Qt
+from qt_ui.components.animated_tab import AnimatedTabWidget
 
 from qt_ui.panels.vue_ensemble_panel import VueEnsemblePanel
 from qt_ui.panels.depenses_panel import DepensesPanel
@@ -108,7 +109,7 @@ class PersonnesPage(QWidget):
         content_v.setSpacing(0)
 
         # Onglets FIXES (8 onglets)
-        self._fixed_tabs = QTabWidget()
+        self._fixed_tabs = AnimatedTabWidget()
         self._fixed_tabs.setStyleSheet(STYLE_TAB)
         self._fixed_tabs.currentChanged.connect(self._on_fixed_tab_changed)
 
@@ -151,7 +152,7 @@ class PersonnesPage(QWidget):
         content_v.addWidget(add_w)
 
         # Onglets dynamiques (comptes)
-        self._account_tabs = QTabWidget()
+        self._account_tabs = AnimatedTabWidget()
         self._account_tabs.setStyleSheet(STYLE_TAB)
         self._account_tabs.currentChanged.connect(self._on_account_tab_changed)
         content_v.addWidget(self._account_tabs)

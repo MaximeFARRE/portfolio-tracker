@@ -6,10 +6,11 @@ et remonte automatiquement les SCPI détenues dans les comptes existants.
 import logging
 import pandas as pd
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTabWidget,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QFormLayout, QLineEdit, QDoubleSpinBox, QComboBox, QPushButton,
     QDateEdit, QScrollArea,
 )
+from qt_ui.components.animated_tab import AnimatedTabWidget
 from PyQt6.QtCore import QDate, Qt
 
 from qt_ui.widgets import DataTableWidget, MetricLabel
@@ -46,7 +47,7 @@ class ImmobilierPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        tabs = QTabWidget()
+        tabs = AnimatedTabWidget()
         tabs.setStyleSheet(STYLE_TAB_INNER)
         tabs.addTab(self._build_overview_tab(), "🏠  Vue d'ensemble")
         tabs.addTab(self._build_edit_tab(),     "🏗️  Créer / Modifier")

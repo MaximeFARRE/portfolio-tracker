@@ -8,10 +8,11 @@ import plotly.graph_objects as go
 from datetime import datetime
 import pytz
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTabWidget, QProgressBar,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
     QFormLayout, QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox, QPushButton,
     QDateEdit, QCheckBox, QScrollArea,
 )
+from qt_ui.components.animated_tab import AnimatedTabWidget
 from PyQt6.QtCore import QDate, Qt
 from qt_ui.widgets import PlotlyView, DataTableWidget, MetricLabel
 from qt_ui.panels.saisie_panel import SaisiePanel
@@ -47,7 +48,7 @@ class CompteCreditPanel(QWidget):
         main_v.setContentsMargins(12, 12, 12, 12)
         main_v.setSpacing(12)
 
-        tabs = QTabWidget()
+        tabs = AnimatedTabWidget()
         tabs.setStyleSheet(STYLE_TAB_INNER)
 
         # ── Onglet 0 : Configuration (NOUVEAU) ────────────────────────────
