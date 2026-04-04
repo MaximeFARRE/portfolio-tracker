@@ -23,7 +23,7 @@ from qt_ui.theme import (
     STYLE_INPUT_FOCUS, STYLE_FORM_LABEL, STYLE_GROUP, STYLE_SECTION,
     STYLE_TITLE, STYLE_STATUS, STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR,
     STYLE_TAB_INNER, STYLE_SCROLLAREA, STYLE_PROGRESS,
-    COLOR_SUCCESS, BORDER_SUBTLE, plotly_layout,
+    COLOR_SUCCESS, BORDER_SUBTLE, plotly_layout, plotly_time_series_layout,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ class CreditsOverviewPanel(QWidget):
         lbl_crd = QLabel("📉 Évolution du capital restant dû (CRD)")
         lbl_crd.setStyleSheet(STYLE_SECTION)
         v.addWidget(lbl_crd)
-        self._chart_crd = PlotlyView(min_height=280)
+        self._chart_crd = PlotlyView(min_height=350)
         v.addWidget(self._chart_crd)
 
         # Tableau synthèse
@@ -510,7 +510,7 @@ class CreditsOverviewPanel(QWidget):
                     mode="markers", name="Aujourd'hui",
                     marker=dict(color="red", size=10),
                 ))
-                fig.update_layout(**plotly_layout(xaxis_title="Mois", yaxis_title="CRD total (€)"))
+                fig.update_layout(**plotly_time_series_layout(xaxis_title="Mois", yaxis_title="CRD total (€)"))
                 self._chart_crd.set_figure(fig)
 
             if lignes_table:

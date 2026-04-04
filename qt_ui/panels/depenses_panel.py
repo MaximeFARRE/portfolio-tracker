@@ -14,7 +14,7 @@ from PyQt6.QtCore import Qt
 from qt_ui.theme import (
     BG_PRIMARY, STYLE_BTN_PRIMARY, STYLE_INPUT, STYLE_GROUP, STYLE_SECTION,
     STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR, STYLE_STATUS_WARNING,
-    STYLE_BTN_UNDO, plotly_layout,
+    STYLE_BTN_UNDO, plotly_layout, plotly_time_series_layout,
 )
 from qt_ui.widgets import PlotlyView, DataTableWidget, KpiCard, LoadingOverlay
 
@@ -129,7 +129,7 @@ class DepensesPanel(QWidget):
         lbl_hist = QLabel("Historique mensuel")
         lbl_hist.setStyleSheet(STYLE_SECTION)
         layout.addWidget(lbl_hist)
-        self._chart_hist = PlotlyView(min_height=250)
+        self._chart_hist = PlotlyView(min_height=320)
         layout.addWidget(self._chart_hist)
 
         layout.addStretch()
@@ -231,7 +231,7 @@ class DepensesPanel(QWidget):
                         df_hist["total"] = df_hist[total_col].sum(axis=1)
                         fig_h = px.bar(df_hist, x="mois", y="total", template="plotly_dark",
                                        labels={"mois": "Mois", "total": "Total dépenses (€)"})
-                        fig_h.update_layout(**plotly_layout())
+                        fig_h.update_layout(**plotly_time_series_layout())
                         self._chart_hist.set_figure(fig_h)
             except Exception as e:
                 logger.warning("Chargement historique mensuel dépenses échoué : %s", e)

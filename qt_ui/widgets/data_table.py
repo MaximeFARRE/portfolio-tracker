@@ -103,6 +103,24 @@ class PandasTableModel(QAbstractTableModel):
     def get_dataframe(self) -> pd.DataFrame:
         return self._df.copy()
 
+    def sort(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder):
+        """Trie le DataFrame selon la colonne cliquée."""
+        if self._df.empty:
+            return
+        self.layoutAboutToBeChanged.emit()
+        col_name = self._df.columns[column]
+        ascending = (order == Qt.SortOrder.AscendingOrder)
+        
+        # On utilise inplace=True pour trier les données réelles
+        # kind='mergesort' est stable et performant sur petits jeux
+        try:
+            self._df.sort_values(by=col_name, ascending=ascending, inplace=True, kind='mergesort')
+            self._df.reset_index(drop=True, inplace=True)
+        except Exception:
+            pass # Parfois le tri échoue sur des types mixtes/objets
+            
+        self.layoutChanged.emit()
+
 
 class ComboBoxDelegate(QStyledItemDelegate):
     """Délégué affichant un QComboBox pour les cellules éditables."""
