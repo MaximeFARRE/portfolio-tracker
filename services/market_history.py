@@ -1,10 +1,24 @@
 from __future__ import annotations
 import datetime as dt
 import logging
+import threading
 from typing import Iterable
 from services import market_repository as mrepo
 
 _logger = logging.getLogger(__name__)
+
+# ── Tracker de taux FX manquants ────────────────────────────────────────────
+_missing_fx_lock: threading.Lock = threading.Lock()
+_missing_fx_pairs: set[tuple[str, str]] = set()
+
+
+def get_and_clear_missing_fx() -> set[tuple[str, str]]:
+    """Retourne les paires FX manquantes depuis le dernier appel, puis remet à zéro."""
+    global _missing_fx_pairs
+    with _missing_fx_lock:
+        result = set(_missing_fx_pairs)
+        _missing_fx_pairs.clear()
+    return result
 
 
 def _row_val(row, key: str, idx: int):
@@ -258,5 +272,7 @@ def convert_weekly(conn, amount: float, from_ccy: str, to_ccy: str, week_date: s
             "VALEUR ANNULÉE (0.0) pour éviter une valorisation erronée — vérifier fx_rates_weekly.",
             from_ccy, to_ccy, week_date
         )
+        with _missing_fx_lock:
+            _missing_fx_pairs.add((from_ccy, to_ccy))
         return 0.0  # Sécurité : on préfère 0 que des milliards imaginaires (ex: COP counted as EUR)
     return float(amount) * float(rate)
