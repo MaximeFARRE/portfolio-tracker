@@ -2,6 +2,7 @@ import os
 import sqlite3
 import logging
 from pathlib import Path
+from typing import Callable
 
 try:
     import libsql
@@ -15,6 +16,13 @@ _ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = _ROOT / "patrimoine.db"
 SCHEMA_PATH = _ROOT / "db" / "schema.sql"
 MIGRATIONS_PATH = _ROOT / "db" / "migrations"
+
+# Versions des migrations "code" (évite les ALTER TABLE au fil de l'eau).
+MIG_VER_ADD_TR_PHONE = 9001
+MIG_VER_IMPORT_BATCHES = 9002
+MIG_VER_ADD_IMMO_COLUMNS = 9003
+MIG_VER_ADD_CREDITS_PAYER_ACCOUNT = 9004
+MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX = 9005
 
 # ──────────────────────────────────────────────────────────────
 # Compat libsql ↔ sqlite3 : DictRow + WrappedCursor
@@ -202,33 +210,209 @@ def _row_get(row, key: str, idx: int = 0):
         return row[idx]
 
 
+def _ensure_schema_version_table(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_version (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT DEFAULT (datetime('now')),
+          description TEXT
+        )
+        """
+    )
+
+
+def _table_exists(conn, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1;",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _index_exists(conn, index_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ? LIMIT 1;",
+        (index_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _column_exists(conn, table_name: str, column_name: str) -> bool:
+    if not _table_exists(conn, table_name):
+        return False
+    rows = conn.execute(f"PRAGMA table_info({table_name});").fetchall()
+    for row in rows:
+        try:
+            name = str(row["name"])
+        except Exception:
+            name = str(row[1])
+        if name == column_name:
+            return True
+    return False
+
+
+def _applied_versions(conn) -> set[int]:
+    _ensure_schema_version_table(conn)
+    rows = conn.execute("SELECT version FROM schema_version;").fetchall()
+    versions: set[int] = set()
+    for row in rows:
+        try:
+            versions.add(int(row["version"]))
+        except Exception:
+            versions.add(int(row[0]))
+    return versions
+
+
+def _mark_version_applied(conn, version: int, description: str) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version(version, description) VALUES (?, ?);",
+        (int(version), str(description)),
+    )
+
+
+def _split_sql_statements(sql_text: str) -> list[str]:
+    return [s.strip() for s in sql_text.split(";") if s.strip()]
+
+
+def _is_benign_migration_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "duplicate column name" in msg
+        or ("already exists" in msg and "schema_version" not in msg)
+    )
+
+
+def _apply_sql_file_migration(conn, migration_file: Path, version: int) -> None:
+    sql = migration_file.read_text(encoding="utf-8")
+    for stmt in _split_sql_statements(sql):
+        try:
+            conn.execute(stmt)
+        except Exception as exc:
+            if _is_benign_migration_error(exc):
+                _logger.warning(
+                    "Migration %s: erreur bénigne ignorée sur '%s': %s",
+                    migration_file.name,
+                    stmt[:80],
+                    exc,
+                )
+                continue
+            raise
+
+    # Les fichiers historiques écrivent déjà schema_version, mais on sécurise ici.
+    _mark_version_applied(conn, version, f"sql:{migration_file.name}")
+
+
+def _migrate_add_tr_phone(conn) -> None:
+    if _column_exists(conn, "people", "tr_phone"):
+        return
+    conn.execute("ALTER TABLE people ADD COLUMN tr_phone TEXT;")
+
+
+def _migrate_import_batches(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS import_batches (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          import_type  TEXT NOT NULL,
+          person_id    INTEGER,
+          person_name  TEXT,
+          account_id   INTEGER,
+          account_name TEXT,
+          filename     TEXT,
+          imported_at  TEXT DEFAULT (datetime('now')),
+          nb_rows      INTEGER DEFAULT 0,
+          status       TEXT NOT NULL DEFAULT 'ACTIVE',
+          FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_import_batches_person "
+        "ON import_batches(person_id, imported_at);"
+    )
+
+    for table in ("transactions", "depenses", "revenus"):
+        if not _column_exists(conn, table, "import_batch_id"):
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN import_batch_id INTEGER "
+                f"REFERENCES import_batches(id) ON DELETE SET NULL;"
+            )
+
+
+def _migrate_add_immobilier_columns(conn) -> None:
+    for table in (
+        "patrimoine_snapshots",
+        "patrimoine_snapshots_weekly",
+        "patrimoine_snapshots_family_weekly",
+    ):
+        if _table_exists(conn, table) and not _column_exists(conn, table, "immobilier_value"):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN immobilier_value REAL DEFAULT 0;")
+
+
+def _migrate_add_credits_payer_account(conn) -> None:
+    if _table_exists(conn, "credits") and not _column_exists(conn, "credits", "payer_account_id"):
+        conn.execute("ALTER TABLE credits ADD COLUMN payer_account_id INTEGER;")
+
+
+def _migrate_add_tx_person_account_index(conn) -> None:
+    if _table_exists(conn, "transactions") and not _index_exists(conn, "idx_tx_person_account_date"):
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tx_person_account_date "
+            "ON transactions(person_id, account_id, date);"
+        )
+
+
+_CODE_MIGRATIONS: list[tuple[int, str, Callable]] = [
+    (MIG_VER_ADD_TR_PHONE, "add people.tr_phone", _migrate_add_tr_phone),
+    (MIG_VER_IMPORT_BATCHES, "add import_batches + import_batch_id refs", _migrate_import_batches),
+    (MIG_VER_ADD_IMMO_COLUMNS, "add immobilier_value columns on snapshot tables", _migrate_add_immobilier_columns),
+    (MIG_VER_ADD_CREDITS_PAYER_ACCOUNT, "add credits.payer_account_id", _migrate_add_credits_payer_account),
+    (MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX, "add idx_tx_person_account_date", _migrate_add_tx_person_account_index),
+]
+
+
+def apply_code_migrations(conn) -> list[int]:
+    applied_now: list[int] = []
+    applied = _applied_versions(conn)
+
+    for version, description, migrate_fn in sorted(_CODE_MIGRATIONS, key=lambda x: x[0]):
+        if int(version) in applied:
+            continue
+        migrate_fn(conn)
+        _mark_version_applied(conn, int(version), description)
+        applied_now.append(int(version))
+        applied.add(int(version))
+
+    if applied_now:
+        conn.commit()
+    return applied_now
+
+
+def _apply_single_code_migration(conn, version: int) -> bool:
+    for v, description, migrate_fn in _CODE_MIGRATIONS:
+        if int(v) != int(version):
+            continue
+        applied = _applied_versions(conn)
+        if int(v) in applied:
+            return False
+        migrate_fn(conn)
+        _mark_version_applied(conn, int(v), description)
+        conn.commit()
+        return True
+    raise ValueError(f"Migration code inconnue: {version}")
+
+
 def run_migrations(conn) -> list:
     """
     Applique les migrations SQL manquantes dans l'ordre numérique.
     Retourne la liste des versions appliquées.
     """
-    # Crée la table si absente (pour les DBs avant l'ajout du versioning)
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS schema_version (
-      version INTEGER PRIMARY KEY,
-      applied_at TEXT DEFAULT (datetime('now')),
-      description TEXT
-    )
-    """)
-
-    # Numéro de version courant
-    row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-    current = 0
-    if row:
-        try:
-            v = row["v"]
-        except Exception:
-            v = row[0]
-        if v is not None:
-            current = int(v)
+    _ensure_schema_version_table(conn)
+    applied_versions = _applied_versions(conn)
 
     if not MIGRATIONS_PATH.exists():
-        return []
+        return apply_code_migrations(conn)
 
     applied = []
     migration_files = sorted(MIGRATIONS_PATH.glob("*.sql"))
@@ -239,22 +423,17 @@ def run_migrations(conn) -> list:
         except (ValueError, IndexError):
             continue
 
-        if num <= current:
+        if num in applied_versions:
             continue
 
-        sql = mf.read_text(encoding="utf-8")
-        statements = [s.strip() for s in sql.split(";") if s.strip()]
-        for stmt in statements:
-            try:
-                conn.execute(stmt)
-            except Exception:
-                pass  # index déjà présent etc.
-
+        _apply_sql_file_migration(conn, mf, num)
         applied.append(num)
+        applied_versions.add(num)
 
     if applied:
         conn.commit()
 
+    applied.extend(apply_code_migrations(conn))
     return applied
 
 
@@ -273,8 +452,6 @@ def init_db() -> None:
 
         ensure_snapshots_table(conn)
         ensure_weekly_tables(conn)
-        ensure_people_columns(conn)
-        ensure_import_batches_table(conn)
         run_migrations(conn)
 
         conn.commit()
@@ -356,51 +533,13 @@ def seed_minimal() -> None:
             conn.commit()
 
 def ensure_people_columns(conn) -> None:
-    """Migrations additionnelles sur la table people."""
-    try:
-        conn.execute("ALTER TABLE people ADD COLUMN tr_phone TEXT;")
-        conn.commit()
-    except Exception:
-        pass  # colonne déjà présente
+    """Compat API: applique la migration versionnée de people.tr_phone."""
+    _apply_single_code_migration(conn, MIG_VER_ADD_TR_PHONE)
 
 
 def ensure_import_batches_table(conn) -> None:
-    """Crée la table import_batches et ajoute import_batch_id aux tables de données (AM-19)."""
-    # Table des batches d'import
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS import_batches (
-          id           INTEGER PRIMARY KEY AUTOINCREMENT,
-          import_type  TEXT NOT NULL,
-          person_id    INTEGER,
-          person_name  TEXT,
-          account_id   INTEGER,
-          account_name TEXT,
-          filename     TEXT,
-          imported_at  TEXT DEFAULT (datetime('now')),
-          nb_rows      INTEGER DEFAULT 0,
-          status       TEXT NOT NULL DEFAULT 'ACTIVE',
-          FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE SET NULL
-        )
-    """)
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_import_batches_person "
-        "ON import_batches(person_id, imported_at);"
-    )
-
-    # Colonne import_batch_id sur transactions, depenses, revenus
-    for table in ("transactions", "depenses", "revenus"):
-        try:
-            conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN import_batch_id INTEGER "
-                f"REFERENCES import_batches(id) ON DELETE SET NULL;"
-            )
-        except Exception:
-            pass  # colonne déjà présente
-
-    try:
-        conn.commit()
-    except Exception:
-        pass
+    """Compat API: applique la migration versionnée import_batches."""
+    _apply_single_code_migration(conn, MIG_VER_IMPORT_BATCHES)
 
 
 def ensure_weekly_tables(conn):
@@ -487,23 +626,13 @@ def ensure_weekly_tables(conn):
 
     # enterprise_history est geree par entreprises_repository.ensure_tables()
 
-    # Migration : immobilier_value dans les snapshots existants
-    for table in ["patrimoine_snapshots", "patrimoine_snapshots_weekly", "patrimoine_snapshots_family_weekly"]:
-        try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN immobilier_value REAL DEFAULT 0;")
-        except Exception:
-            pass # déjà présente
-
     # Composite index pour les queries filtrées sur person + account
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tx_person_account_date ON transactions(person_id, account_id, date);")
     conn.commit()
 
 
 def ensure_credits_migrations(conn) -> None:
-    """Ajoute les colonnes manquantes à la table credits (BUG-05)."""
-    try:
-        conn.execute("ALTER TABLE credits ADD COLUMN payer_account_id INTEGER;")
-        conn.commit()
-        _logger.info("Migration : colonne payer_account_id ajoutée à credits.")
-    except Exception:
-        pass  # colonne déjà présente
+    """Compat API: applique la migration versionnée de credits."""
+    changed = _apply_single_code_migration(conn, MIG_VER_ADD_CREDITS_PAYER_ACCOUNT)
+    if changed:
+        _logger.info("Migration appliquée : colonne credits.payer_account_id.")
