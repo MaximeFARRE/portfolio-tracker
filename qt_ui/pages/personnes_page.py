@@ -236,7 +236,8 @@ class PersonnesPage(QWidget):
     def _rebuild_account_tabs(self) -> None:
         """Reconstruit les onglets dynamiques selon les comptes de la personne."""
         # Fermer et vider les anciens
-        self._account_tabs.clear()
+        while self._account_tabs.count() > 0:
+            self._account_tabs.removeTab(0)
         self._account_panels.clear()
 
         if self._current_person_id is None:
