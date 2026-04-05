@@ -42,18 +42,43 @@ def _list_weeks(start: dt.date, end: dt.date) -> list[str]:
 # --------------------
 # CASH BANQUE as-of
 # --------------------
-def _sens_flux(t: str) -> int:
-    """Wrapper safe : retourne 0 pour les types inconnus (neutre)."""
-    from utils.validators import sens_flux_safe
-    return sens_flux_safe(t)
 
-def _bank_cash_asof_eur(conn, person_id: int, week_date: str) -> float:
+# Map vectorisé pour éviter .apply(lambda) ligne à ligne
+_SENS_FLUX_MAP: dict[str, int] = {
+    "DEPOT": 1, "ENTREE": 1, "CREDIT": 1, "VENTE": 1,
+    "DIVIDENDE": 1, "INTERETS": 1, "LOYER": 1, "ABONDEMENT": 1,
+    "RETRAIT": -1, "SORTIE": -1, "DEBIT": -1, "ACHAT": -1,
+    "DEPENSE": -1, "FRAIS": -1, "IMPOT": -1, "REMBOURSEMENT_CREDIT": -1,
+}
+
+
+def _sum_cash_native(df: pd.DataFrame) -> float:
+    """Calcule le solde natif d'un DataFrame de transactions (vectorisé)."""
+    if df.empty:
+        return 0.0
+    amount = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
+    sens = df["type"].astype(str).str.strip().str.upper().map(_SENS_FLUX_MAP).fillna(0)
+    return float((amount * sens).sum())
+
+
+def _bank_cash_asof_eur(conn, person_id: int, week_date: str,
+                        tx_cache: "dict[int, pd.DataFrame] | None" = None) -> float:
     accounts = repo.list_accounts(conn, person_id=person_id)
     if accounts is None or accounts.empty:
         return 0.0
 
     banks = accounts[accounts["account_type"].astype(str).str.upper() == "BANQUE"].copy()
     total_eur = 0.0
+
+    def _get_tx(account_id: int) -> pd.DataFrame:
+        """Récupère les transactions <= week_date depuis le cache ou la DB."""
+        if tx_cache is not None and account_id in tx_cache:
+            df = tx_cache[account_id]
+            return df[df["date"] <= week_date] if not df.empty else df
+        return repo.list_transactions(
+            conn, person_id=person_id, account_id=account_id,
+            limit=200000, date_asof=week_date,
+        )
 
     for _, acc in banks.iterrows():
         acc_id = int(acc["id"])
@@ -71,29 +96,13 @@ def _bank_cash_asof_eur(conn, person_id: int, week_date: str) -> float:
             if subs is not None and not subs.empty:
                 for _, s in subs.iterrows():
                     sub_id = int(s["sub_account_id"])
-                    tx = repo.list_transactions(conn, person_id=person_id, account_id=sub_id, limit=200000)
-                    if tx is None or tx.empty:
-                        continue
-                    df = tx.copy()
-                    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-                    df = df.dropna(subset=["date"])
-                    df = df[df["date"] <= pd.to_datetime(week_date)]
-                    if df.empty:
-                        continue
-                    df["amount"] = pd.to_numeric(df["amount"] if "amount" in df.columns else 0.0, errors="coerce").fillna(0.0)
-                    df["type"] = df["type"].astype(str)
-                    total_native += float(df.apply(lambda r: float(r["amount"]) * _sens_flux(r["type"]), axis=1).sum())
+                    df = _get_tx(sub_id)
+                    if df is not None and not df.empty:
+                        total_native += _sum_cash_native(df)
         else:
-            tx = repo.list_transactions(conn, person_id=person_id, account_id=acc_id, limit=200000)
-            if tx is not None and not tx.empty:
-                df = tx.copy()
-                df["date"] = pd.to_datetime(df["date"], errors="coerce")
-                df = df.dropna(subset=["date"])
-                df = df[df["date"] <= pd.to_datetime(week_date)]
-                if not df.empty:
-                    df["amount"] = pd.to_numeric(df["amount"] if "amount" in df.columns else 0.0, errors="coerce").fillna(0.0)
-                    df["type"] = df["type"].astype(str)
-                    total_native += float(df.apply(lambda r: float(r["amount"]) * _sens_flux(r["type"]), axis=1).sum())
+            df = _get_tx(acc_id)
+            if df is not None and not df.empty:
+                total_native += _sum_cash_native(df)
 
         total_eur += market_history.convert_weekly(conn, float(total_native), acc_ccy, "EUR", week_date)
 
@@ -386,8 +395,9 @@ def upsert_weekly_snapshot(conn, person_id: int, week_date: str, mode: str, payl
         ),
     )
 
-def compute_weekly_snapshot_person(conn, person_id: int, week_date: str) -> dict:
-    bank_cash = _bank_cash_asof_eur(conn, person_id, week_date)
+def compute_weekly_snapshot_person(conn, person_id: int, week_date: str,
+                                    tx_cache: "dict[int, pd.DataFrame] | None" = None) -> dict:
+    bank_cash = _bank_cash_asof_eur(conn, person_id, week_date, tx_cache=tx_cache)
     bourse_cash, bourse_holdings = _bourse_cash_and_holdings_eur_asof(conn, person_id, week_date)
     pe_cash = _pe_cash_asof_eur(conn, person_id, week_date)
     pe_value = _pe_value_asof_eur(conn, person_id, week_date)
@@ -456,9 +466,34 @@ def rebuild_snapshots_person(conn, person_id: int, lookback_days: int = 90) -> d
     if pairs:
         market_history.sync_fx_weekly(conn, sorted(list(pairs)), weeks[0], weeks[-1])
 
+    # Cache des transactions bancaires par account_id (évite N*W requêtes SQL)
+    bank_tx_cache: dict[int, pd.DataFrame] = {}
+    if accounts is not None and not accounts.empty:
+        bank_accs = accounts[accounts["account_type"].astype(str).str.upper() == "BANQUE"]
+        for _, acc in bank_accs.iterrows():
+            acc_id = int(acc["id"])
+            try:
+                is_container = repo.is_bank_container(conn, acc_id)
+            except Exception:
+                is_container = False
+            if is_container:
+                subs = repo.list_bank_subaccounts(conn, acc_id)
+                if subs is not None and not subs.empty:
+                    for _, s in subs.iterrows():
+                        sub_id = int(s["sub_account_id"])
+                        df = repo.list_transactions(conn, person_id=person_id, account_id=sub_id, limit=200000)
+                        if df is not None and not df.empty:
+                            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                            bank_tx_cache[sub_id] = df
+            else:
+                df = repo.list_transactions(conn, person_id=person_id, account_id=acc_id, limit=200000)
+                if df is not None and not df.empty:
+                    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                    bank_tx_cache[acc_id] = df
+
     n_ok = 0
     for wd in weeks:
-        payload = compute_weekly_snapshot_person(conn, person_id, wd)
+        payload = compute_weekly_snapshot_person(conn, person_id, wd, tx_cache=bank_tx_cache)
         upsert_weekly_snapshot(conn, person_id, wd, mode="REBUILD", payload=payload)
         n_ok += 1
 
