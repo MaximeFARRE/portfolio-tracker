@@ -1,6 +1,6 @@
 import pandas as pd
 import pytest
-from utils.validators import sens_flux
+from utils.validators import sens_flux, sens_flux_safe
 
 
 # ─── sens_flux (utilisé dans snapshots et calculations) ──
@@ -29,9 +29,13 @@ def test_sens_flux_frais():
     assert sens_flux("FRAIS") == -1
 
 
-def test_sens_flux_inconnu():
-    # Par défaut -1 pour types inconnus
-    assert sens_flux("INCONNU") == -1
+def test_sens_flux_inconnu_leve_value_error():
+    with pytest.raises(ValueError, match="type_operation inconnu"):
+        sens_flux("INCONNU")
+
+
+def test_sens_flux_safe_inconnu_retourne_zero():
+    assert sens_flux_safe("INCONNU") == 0
 
 
 # ─── Test simple de cohérence de solde via calculations ──
