@@ -102,24 +102,7 @@ def _bank_cash_asof_eur(conn, person_id: int, week_date: str) -> float:
 # --------------------
 # CASH BOURSE as-of
 # --------------------
-def _broker_cash_asof_native(tx: pd.DataFrame) -> float:
-    if tx is None or tx.empty:
-        return 0.0
-    df = tx.copy()
-    df["type"] = df["type"].astype(str)
-    df["amount"] = pd.to_numeric(df.get("amount", 0.0), errors="coerce").fillna(0.0)
-    df["fees"] = pd.to_numeric(df.get("fees", 0.0), errors="coerce").fillna(0.0)
-
-    cash = 0.0
-    cash += float(df.loc[df["type"] == "DEPOT", "amount"].sum())
-    cash -= float(df.loc[df["type"] == "RETRAIT", "amount"].sum())
-    cash -= float(df.loc[df["type"] == "ACHAT", "amount"].sum())
-    cash += float(df.loc[df["type"] == "VENTE", "amount"].sum())
-    cash += float(df.loc[df["type"] == "DIVIDENDE", "amount"].sum())
-    cash += float(df.loc[df["type"] == "INTERETS", "amount"].sum())
-    cash -= float(df.loc[df["type"] == "FRAIS", "amount"].sum())
-    cash -= float(df["fees"].sum())
-    return float(round(cash, 2))
+from services.bourse_analytics import _broker_cash_asof_native  # noqa: E402
 
 def _bourse_cash_and_holdings_eur_asof(conn, person_id: int, week_date: str) -> tuple[float, float]:
     accounts = repo.list_accounts(conn, person_id=person_id)
