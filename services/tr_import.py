@@ -16,6 +16,7 @@ Flux authentification (2 étapes) :
 Chaque personne peut avoir un numéro TR différent (colonne tr_phone dans people).
 """
 
+import logging
 import os
 import queue
 import re
@@ -27,6 +28,8 @@ import threading
 from pathlib import Path
 
 import pandas as pd
+
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Utilitaires bas-niveau
@@ -631,6 +634,9 @@ def import_tr_transactions(
         effective_account_id = account_id
         if ticker_account_map and symbol in ticker_account_map:
             effective_account_id = ticker_account_map[symbol]
+            if effective_account_id != account_id:
+                _logger.info("ticker_account_map: %s redirige vers account_id=%s (defaut=%s)",
+                             symbol, effective_account_id, account_id)
 
         # Déduplication (inclut l'ISIN via assets pour éviter les faux positifs)
         if isin:
