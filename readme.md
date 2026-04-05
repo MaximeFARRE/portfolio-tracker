@@ -68,26 +68,6 @@ Objectifs produit:
   - sauvegardes automatiques à la fermeture,
   - sauvegardes manuelles dans la page Paramètres.
 
-## Aperçu de l'interface
-
-Ajoute ici tes captures pour améliorer la conversion des visiteurs GitHub.
-
-Exemple de structure recommandée:
-
-```text
-/docs/images/
-  famille-dashboard.png
-  personne-vue-ensemble.png
-  import-trade-republic.png
-```
-
-Puis remplace les placeholders:
-
-```md
-![Dashboard Famille](docs/images/famille-dashboard.png)
-![Vue Personne](docs/images/personne-vue-ensemble.png)
-![Import Trade Republic](docs/images/import-trade-republic.png)
-```
 
 ## Architecture
 
