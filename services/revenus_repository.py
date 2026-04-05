@@ -99,7 +99,11 @@ def compute_taux_epargne_mensuel(
     df_dep = df_dep.rename(columns={"total": "depenses"})
 
     # Outer join : garde les mois avec revenus OU dépenses
-    df = pd.merge(df_rev, df_dep, on="mois", how="outer").fillna(0.0)
+    # On remplit colonne par colonne pour éviter le FutureWarning de pandas sur le
+    # downcasting silencieux de fillna() appliqué à un DataFrame entier (objet dtype).
+    df = pd.merge(df_rev, df_dep, on="mois", how="outer")
+    df["revenus"] = df["revenus"].fillna(0.0)
+    df["depenses"] = df["depenses"].fillna(0.0)
     df = df.infer_objects(copy=False)
     df = df[df["mois"].notna()].copy()
     df["mois"] = df["mois"].astype(str)

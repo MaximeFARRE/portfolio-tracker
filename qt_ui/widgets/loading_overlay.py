@@ -112,9 +112,7 @@ class LoadingOverlay(QWidget):
             }
         """)
 
-        self._blur_effect = QGraphicsBlurEffect()
-        self._blur_effect.setBlurRadius(10)
-        self._blur_enabled = True
+        self._blur_radius = 10
 
         self.hide()
 
@@ -129,7 +127,13 @@ class LoadingOverlay(QWidget):
         if parent:
             self.resize(parent.size())
             if blur:
-                parent.setGraphicsEffect(self._blur_effect)
+                # Recréer l'effet à chaque appel : Qt prend possession de l'objet
+                # lors de setGraphicsEffect() et le détruit quand il est remplacé
+                # ou mis à None. Réutiliser l'ancienne instance provoquerait un
+                # RuntimeError sur le wrapper Python (objet C++ déjà supprimé).
+                blur_effect = QGraphicsBlurEffect()
+                blur_effect.setBlurRadius(self._blur_radius)
+                parent.setGraphicsEffect(blur_effect)
         
         self.raise_()
         self.show()

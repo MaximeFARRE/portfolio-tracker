@@ -137,6 +137,12 @@ class CompteBoursePanel(QWidget):
         hist_v.setContentsMargins(8, 8, 8, 8)
         self._hist_table = DataTableWidget()
         self._hist_table.setMinimumHeight(400)
+        self._hist_table.set_filter_config([
+            {"col": "type",         "kind": "combo",        "label": "Type"},
+            {"col": "asset_symbol", "kind": "combo",        "label": "Actif"},
+            {"col": "date",         "kind": "date_range",   "label": "Date"},
+            {"col": "amount",       "kind": "number_range", "label": "Montant"},
+        ])
         hist_v.addWidget(self._hist_table)
         tabs.addTab(hist, "📋  Historique")
 

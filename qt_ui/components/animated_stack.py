@@ -4,7 +4,7 @@ Fournit une transition avec glissement (slide) et fondu (fade-in).
 """
 import logging
 from PyQt6.QtWidgets import QStackedWidget, QWidget, QGraphicsOpacityEffect
-from PyQt6.QtCore import Qt, QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QPoint, pyqtProperty
+from PyQt6.QtCore import Qt, QPropertyAnimation, QParallelAnimationGroup, QEasingCurve, QPoint
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,11 @@ class AnimatedStackedWidget(QStackedWidget):
         current_widget = self.widget(self._current_index)
         next_widget = self.widget(self._next_index)
         
+        if not next_widget or not current_widget:
+            super().setCurrentIndex(self._next_index)
+            self._is_animating = False
+            return
+            
         width = self.width()
         
         # Préparer le prochain widget
@@ -62,34 +67,34 @@ class AnimatedStackedWidget(QStackedWidget):
         next_widget.move(start_pos)
         
         # Animation de position pour le prochain widget
-        pos_anim_next = QPropertyAnimation(next_widget, b"pos", self)
+        pos_anim_next = QPropertyAnimation(next_widget, b"pos")
         pos_anim_next.setDuration(self._duration)
         pos_anim_next.setStartValue(start_pos)
         pos_anim_next.setEndValue(QPoint(0, 0))
         pos_anim_next.setEasingCurve(self._easing)
-        
+
         # Animation d'opacité pour le prochain widget
         opacity_effect_next = QGraphicsOpacityEffect(next_widget)
         next_widget.setGraphicsEffect(opacity_effect_next)
-        
-        opacity_anim_next = QPropertyAnimation(opacity_effect_next, b"opacity", self)
+
+        opacity_anim_next = QPropertyAnimation(opacity_effect_next, b"opacity")
         opacity_anim_next.setDuration(self._duration)
         opacity_anim_next.setStartValue(0.0)
         opacity_anim_next.setEndValue(1.0)
         opacity_anim_next.setEasingCurve(self._easing)
-        
+
         # Animation de position pour le widget actuel (il sort)
-        pos_anim_curr = QPropertyAnimation(current_widget, b"pos", self)
+        pos_anim_curr = QPropertyAnimation(current_widget, b"pos")
         pos_anim_curr.setDuration(self._duration)
         pos_anim_curr.setStartValue(QPoint(0, 0))
-        pos_anim_curr.setEndValue(QPoint(-width * direction * 0.3, 0)) # Sortie partielle pour effet de parallaxe
+        pos_anim_curr.setEndValue(QPoint(int(-width * direction * 0.3), 0)) # Sortie partielle pour effet de parallaxe
         pos_anim_curr.setEasingCurve(self._easing)
 
         # Animation d'opacité pour le widget actuel
         opacity_effect_curr = QGraphicsOpacityEffect(current_widget)
         current_widget.setGraphicsEffect(opacity_effect_curr)
-        
-        opacity_anim_curr = QPropertyAnimation(opacity_effect_curr, b"opacity", self)
+
+        opacity_anim_curr = QPropertyAnimation(opacity_effect_curr, b"opacity")
         opacity_anim_curr.setDuration(int(self._duration * 0.8)) # Disparaît un peu plus vite
         opacity_anim_curr.setStartValue(1.0)
         opacity_anim_curr.setEndValue(0.0)
@@ -107,18 +112,22 @@ class AnimatedStackedWidget(QStackedWidget):
     def _on_animation_finished(self):
         # Finaliser le changement d'index (sans animation cette fois via super)
         super().setCurrentIndex(self._next_index)
-        
+
+        # Supprimer les animations d'abord (elles référencent les effets d'opacité)
+        # avant de supprimer les effets eux-mêmes pour éviter les dangling pointers
+        self._animation_group.clear()
+
         # Nettoyer les effets et positions
         current_widget = self.widget(self._current_index)
         next_widget = self.widget(self._next_index)
-        
+
         if current_widget:
             current_widget.setGraphicsEffect(None)
             current_widget.move(0, 0)
         if next_widget:
             next_widget.setGraphicsEffect(None)
             next_widget.move(0, 0)
-            
+
         self._is_animating = False
         
     def resizeEvent(self, event):

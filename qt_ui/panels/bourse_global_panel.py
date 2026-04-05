@@ -238,9 +238,16 @@ class BourseGlobalPanel(QWidget):
         layout.addWidget(_sep())
 
         # ── KPI Row 1 — métriques principales ────────────────────────────────
+        kpi_row1 = QHBoxLayout()
+        kpi_row1.setSpacing(10)
+        self._kpi_invested = KpiCard("Capital investi", "—", emoji="💰", tone="neutral")
+        self._kpi_holdings = KpiCard("Valeur actuelle", "—", emoji="💹", tone="primary")
+        self._kpi_perf     = KpiCard("Performance",      "—", emoji="📊", tone="neutral")
+        self._kpi_pnl      = KpiCard("Plus-value latente", "—", emoji="✨", tone="success")
+
         self._kpis_top = [self._kpi_invested, self._kpi_holdings, self._kpi_perf, self._kpi_pnl]
         for card in self._kpis_top:
-            kpi_row1.addWidget(card, stretch=1)
+            kpi_row1.addWidget(card)
         layout.addLayout(kpi_row1)
 
         # ── KPI Row 2 — revenus & positions ──────────────────────────────────
@@ -328,6 +335,11 @@ class BourseGlobalPanel(QWidget):
 
         self._table_pos = DataTableWidget()
         self._table_pos.setMinimumHeight(260)
+        self._table_pos.set_filter_config([
+            {"col": "Type actif", "kind": "combo", "label": "Type actif"},
+            {"col": "Compte",     "kind": "combo", "label": "Compte"},
+            {"col": "Type",       "kind": "combo", "label": "PEA/CTO"},
+        ])
         table_area.addWidget(self._table_pos, stretch=3)
 
         vbox_alloc = QVBoxLayout()
@@ -349,6 +361,9 @@ class BourseGlobalPanel(QWidget):
 
         self._table_diag = DataTableWidget()
         self._table_diag.setMinimumHeight(240)
+        self._table_diag.set_filter_config([
+            {"col": "Statut", "kind": "combo", "label": "Statut"},
+        ])
         layout.addWidget(self._table_diag)
 
         # ── Overlay de chargement (sur le widget externe, pas le scroll) ───
@@ -660,10 +675,16 @@ class BourseGlobalPanel(QWidget):
                         ))
 
                     fig_hist.update_layout(
-                        **plotly_time_series_layout(margin=dict(l=10, r=10, t=40, b=10)),
-                        xaxis=dict(
-                            title="", showgrid=True, gridcolor="#1e2538", gridwidth=1,
-                            tickformat="%b %Y",
+                        **plotly_time_series_layout(
+                            margin=dict(l=10, r=10, t=40, b=10),
+                            # xaxis passé ici pour être fusionné avec le xaxis de
+                            # plotly_time_series_layout (rangeselector, rangeslider…)
+                            # plutôt qu'en argument séparé de update_layout() ce qui
+                            # provoquerait un TypeError "multiple values for keyword 'xaxis'".
+                            xaxis=dict(
+                                title="", showgrid=True, gridcolor="#1e2538", gridwidth=1,
+                                tickformat="%b %Y",
+                            ),
                         ),
                         yaxis=dict(
                             title="", showgrid=True, gridcolor="#1e2538", gridwidth=1,

@@ -59,6 +59,7 @@ def import_wide_csv_to_monthly_table(
     ignore_cols=("Total",),
     delete_existing: bool = True,
     drop_zeros: bool = True,
+    import_batch_id: int | None = None,
 ):
     """
     CSV format attendu (wide):
@@ -99,10 +100,13 @@ def import_wide_csv_to_monthly_table(
         conn.commit()
 
     # Insert en masse
-    rows = [(person_id, r["mois"], r["categorie"], float(r["montant"])) for _, r in long.iterrows()]
+    rows = [
+        (person_id, r["mois"], r["categorie"], float(r["montant"]), import_batch_id)
+        for _, r in long.iterrows()
+    ]
 
     conn.executemany(
-        f"INSERT INTO {table} (person_id, mois, categorie, montant) VALUES (?, ?, ?, ?)",
+        f"INSERT INTO {table} (person_id, mois, categorie, montant, import_batch_id) VALUES (?, ?, ?, ?, ?)",
         rows
     )
     conn.commit()
@@ -249,6 +253,7 @@ def import_bankin_csv(
     file,
     also_fill_monthly_tables: bool = True,
     purge_existing_transactions: bool = False,
+    import_batch_id: int | None = None,
 ) -> dict:
     """
     Importe le CSV Bankin dans transactions.
@@ -309,10 +314,10 @@ def import_bankin_csv(
 
         conn.execute(
             """
-            INSERT INTO transactions(date, person_id, account_id, type, asset_id, quantity, price, fees, amount, category, note)
-            VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, ?, ?, ?)
+            INSERT INTO transactions(date, person_id, account_id, type, asset_id, quantity, price, fees, amount, category, note, import_batch_id)
+            VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, ?, ?, ?, ?)
             """,
-            (d.strftime("%Y-%m-%d"), person_id, account_id, tx_type, tx_amount, categorie_finale, f"{note} | {desc}"),
+            (d.strftime("%Y-%m-%d"), person_id, account_id, tx_type, tx_amount, categorie_finale, f"{note} | {desc}", import_batch_id),
         )
         inserted += 1
 

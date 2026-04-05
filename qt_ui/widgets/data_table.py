@@ -1,18 +1,28 @@
 """
 Widget QTableView avec modèle Pandas.
 Remplace st.dataframe() et st.data_editor() de Streamlit.
+
+AM-12 : FilterBar avec filtres combo / date_range / number_range
+AM-13 : Tri amélioré via PandasTableModel.sort() + indicateur visuel
 """
 import pandas as pd
-from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, pyqtSignal
+from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, pyqtSignal, QDate
 from PyQt6.QtWidgets import (
     QTableView, QWidget, QVBoxLayout, QHBoxLayout, QAbstractItemView,
     QHeaderView, QLineEdit, QLabel, QStyledItemDelegate, QComboBox,
+    QDoubleSpinBox, QDateEdit, QPushButton, QSizePolicy, QFrame,
 )
 from PyQt6.QtGui import QColor, QPainter, QBrush
 from qt_ui.components.skeleton_handler import SkeletonHandler
 
-from qt_ui.theme import BG_CARD, BG_CARD_ALT, STYLE_TABLE, STYLE_INPUT
+from qt_ui.theme import (
+    BG_CARD, BG_CARD_ALT, STYLE_TABLE, STYLE_INPUT,
+    STYLE_INPUT_FOCUS, TEXT_MUTED, BORDER_DEFAULT, BG_HOVER,
+    ACCENT_BLUE, TEXT_SECONDARY,
+)
 
+
+# ─── Modèle Pandas ─────────────────────────────────────────────────────────────
 
 class PandasTableModel(QAbstractTableModel):
     """Modèle Qt pour afficher un DataFrame pandas dans un QTableView."""
@@ -110,17 +120,15 @@ class PandasTableModel(QAbstractTableModel):
         self.layoutAboutToBeChanged.emit()
         col_name = self._df.columns[column]
         ascending = (order == Qt.SortOrder.AscendingOrder)
-        
-        # On utilise inplace=True pour trier les données réelles
-        # kind='mergesort' est stable et performant sur petits jeux
         try:
             self._df.sort_values(by=col_name, ascending=ascending, inplace=True, kind='mergesort')
             self._df.reset_index(drop=True, inplace=True)
         except Exception:
-            pass # Parfois le tri échoue sur des types mixtes/objets
-            
+            pass  # Parfois le tri échoue sur des types mixtes/objets
         self.layoutChanged.emit()
 
+
+# ─── Delegate ComboBox ─────────────────────────────────────────────────────────
 
 class ComboBoxDelegate(QStyledItemDelegate):
     """Délégué affichant un QComboBox pour les cellules éditables."""
@@ -146,8 +154,299 @@ class ComboBoxDelegate(QStyledItemDelegate):
         editor.setGeometry(option.rect)
 
 
+# ─── FilterBar ─────────────────────────────────────────────────────────────────
+
+_STYLE_FILTER_COMBO = f"""
+    QComboBox {{
+        background: {BG_CARD}; color: {TEXT_SECONDARY};
+        border: 1px solid {BORDER_DEFAULT}; border-radius: 4px;
+        padding: 2px 6px; font-size: 12px; min-width: 90px;
+    }}
+    QComboBox:focus {{ border: 1px solid {ACCENT_BLUE}; }}
+    QComboBox QAbstractItemView {{ background: {BG_CARD}; color: white; }}
+    QComboBox::drop-down {{ border: none; }}
+"""
+
+_STYLE_FILTER_SPIN = f"""
+    QDoubleSpinBox {{
+        background: {BG_CARD}; color: {TEXT_SECONDARY};
+        border: 1px solid {BORDER_DEFAULT}; border-radius: 4px;
+        padding: 2px 4px; font-size: 12px; min-width: 80px;
+    }}
+    QDoubleSpinBox:focus {{ border: 1px solid {ACCENT_BLUE}; }}
+"""
+
+_STYLE_FILTER_DATE = f"""
+    QDateEdit {{
+        background: {BG_CARD}; color: {TEXT_SECONDARY};
+        border: 1px solid {BORDER_DEFAULT}; border-radius: 4px;
+        padding: 2px 4px; font-size: 12px; min-width: 95px;
+    }}
+    QDateEdit:focus {{ border: 1px solid {ACCENT_BLUE}; }}
+    QDateEdit::drop-down {{ border: none; }}
+"""
+
+_STYLE_FILTER_LABEL = f"color: {TEXT_MUTED}; font-size: 11px;"
+
+_STYLE_RESET_BTN = f"""
+    QPushButton {{
+        background: transparent; color: {TEXT_MUTED};
+        border: 1px solid {BORDER_DEFAULT}; border-radius: 4px;
+        padding: 2px 8px; font-size: 11px;
+    }}
+    QPushButton:hover {{ background: {BG_HOVER}; color: white; }}
+"""
+
+_STYLE_FILTERBAR = f"""
+    QWidget#filterBar {{
+        background: rgba(26, 31, 46, 0.7);
+        border: 1px solid {BORDER_DEFAULT};
+        border-radius: 6px;
+    }}
+"""
+
+
+class FilterBar(QWidget):
+    """
+    Barre de filtres avancés, configurable via set_config().
+
+    Chaque filtre est un dict :
+        {"col": "date",   "kind": "date_range",   "label": "Du/Au"}
+        {"col": "type",   "kind": "combo",         "label": "Type"}
+        {"col": "amount", "kind": "number_range",  "label": "Min/Max"}
+    """
+
+    filters_changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("filterBar")
+        self.setStyleSheet(_STYLE_FILTERBAR)
+
+        self._config: list[dict] = []
+        # Widgets de filtres enregistrés : col -> widget(s)
+        self._filter_widgets: dict = {}
+
+        # Layout principal vertical (2 lignes)
+        self._main_v = QVBoxLayout(self)
+        self._main_v.setContentsMargins(8, 6, 8, 6)
+        self._main_v.setSpacing(4)
+
+        # Ligne 1 : recherche texte + combos + bouton reset
+        self._row1 = QHBoxLayout()
+        self._row1.setSpacing(8)
+
+        # Recherche texte (toujours présente)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("🔍  Recherche...")
+        self._search.setStyleSheet(STYLE_INPUT + " max-height: 24px; font-size: 12px;")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self.filters_changed)
+        self._row1.addWidget(self._search, stretch=2)
+
+        self._main_v.addLayout(self._row1)
+
+        # Ligne 2 : date_range + number_range
+        self._row2 = QHBoxLayout()
+        self._row2.setSpacing(8)
+        self._row2_used = False
+        self._main_v.addLayout(self._row2)
+
+        # Bouton reset (sera ajouté à row1 à la fin)
+        self._btn_reset = QPushButton("✕  Reset")
+        self._btn_reset.setStyleSheet(_STYLE_RESET_BTN)
+        self._btn_reset.setFixedHeight(24)
+        self._btn_reset.clicked.connect(self._reset_all)
+
+    def set_config(self, config: list[dict]) -> None:
+        """Configure les filtres. Appelé une seule fois après construction."""
+        self._config = config
+
+        # Vider row1 (sauf la search bar) et row2
+        while self._row1.count() > 1:
+            item = self._row1.takeAt(1)
+            if item.widget():
+                item.widget().deleteLater()
+        while self._row2.count():
+            item = self._row2.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._filter_widgets.clear()
+        self._row2_used = False
+
+        for cfg in config:
+            kind = cfg.get("kind", "combo")
+            col = cfg.get("col", "")
+            label = cfg.get("label", col.capitalize())
+
+            if kind == "combo":
+                lbl = QLabel(f"{label} :")
+                lbl.setStyleSheet(_STYLE_FILTER_LABEL)
+                combo = QComboBox()
+                combo.setStyleSheet(_STYLE_FILTER_COMBO)
+                combo.addItem("Tous")
+                combo.currentTextChanged.connect(self.filters_changed)
+                self._row1.addWidget(lbl)
+                self._row1.addWidget(combo)
+                self._filter_widgets[col] = combo
+
+            elif kind == "date_range":
+                self._row2_used = True
+                lbl_du = QLabel(f"{label} — Du :")
+                lbl_du.setStyleSheet(_STYLE_FILTER_LABEL)
+                date_from = QDateEdit()
+                date_from.setCalendarPopup(True)
+                date_from.setDisplayFormat("dd/MM/yyyy")
+                date_from.setStyleSheet(_STYLE_FILTER_DATE)
+                date_from.setSpecialValueText("—")  # Valeur nulle = pas de filtre
+                date_from.setDate(QDate(2000, 1, 1))
+                date_from.dateChanged.connect(self.filters_changed)
+
+                lbl_au = QLabel("Au :")
+                lbl_au.setStyleSheet(_STYLE_FILTER_LABEL)
+                date_to = QDateEdit()
+                date_to.setCalendarPopup(True)
+                date_to.setDisplayFormat("dd/MM/yyyy")
+                date_to.setStyleSheet(_STYLE_FILTER_DATE)
+                date_to.setDate(QDate.currentDate())
+                date_to.dateChanged.connect(self.filters_changed)
+
+                self._row2.addWidget(lbl_du)
+                self._row2.addWidget(date_from)
+                self._row2.addWidget(lbl_au)
+                self._row2.addWidget(date_to)
+                self._filter_widgets[col] = (date_from, date_to)
+
+            elif kind == "number_range":
+                self._row2_used = True
+                lbl_min = QLabel(f"{label} — Min :")
+                lbl_min.setStyleSheet(_STYLE_FILTER_LABEL)
+                spin_min = QDoubleSpinBox()
+                spin_min.setRange(0, 999_999_999)
+                spin_min.setDecimals(2)
+                spin_min.setValue(0.0)
+                spin_min.setStyleSheet(_STYLE_FILTER_SPIN)
+                spin_min.valueChanged.connect(self.filters_changed)
+
+                lbl_max = QLabel("Max :")
+                lbl_max.setStyleSheet(_STYLE_FILTER_LABEL)
+                spin_max = QDoubleSpinBox()
+                spin_max.setRange(0, 999_999_999)
+                spin_max.setDecimals(2)
+                spin_max.setSpecialValueText("∞")
+                spin_max.setValue(0.0)  # 0 = pas de filtre max
+                spin_max.setStyleSheet(_STYLE_FILTER_SPIN)
+                spin_max.valueChanged.connect(self.filters_changed)
+
+                self._row2.addWidget(lbl_min)
+                self._row2.addWidget(spin_min)
+                self._row2.addWidget(lbl_max)
+                self._row2.addWidget(spin_max)
+                self._filter_widgets[col] = (spin_min, spin_max)
+
+        # Stretcher + bouton reset en fin de row1
+        self._row1.addStretch()
+        self._row1.addWidget(self._btn_reset)
+
+        # Stretcher fin de row2
+        if self._row2_used:
+            self._row2.addStretch()
+        else:
+            # Masquer row2 si vide
+            pass
+
+    def populate_combo(self, col: str, values: list) -> None:
+        """Remplit un QComboBox de filtre avec les valeurs uniques du DataFrame."""
+        widget = self._filter_widgets.get(col)
+        if widget is None or not isinstance(widget, QComboBox):
+            return
+        current = widget.currentText()
+        widget.blockSignals(True)
+        widget.clear()
+        widget.addItem("Tous")
+        for v in sorted(set(str(x) for x in values if pd.notna(x) and str(x).strip())):
+            widget.addItem(v)
+        # Restaurer la sélection si possible
+        idx = widget.findText(current)
+        if idx >= 0:
+            widget.setCurrentIndex(idx)
+        widget.blockSignals(False)
+
+    def get_search_text(self) -> str:
+        return self._search.text().strip().lower()
+
+    def get_filter_values(self) -> dict:
+        """Retourne un dict col -> valeur(s) de filtre active."""
+        result = {}
+        for col, widget in self._filter_widgets.items():
+            cfg = next((c for c in self._config if c["col"] == col), {})
+            kind = cfg.get("kind", "combo")
+
+            if kind == "combo":
+                val = widget.currentText()
+                result[col] = None if val == "Tous" else val
+
+            elif kind == "date_range":
+                date_from, date_to = widget
+                result[col] = (
+                    date_from.date().toPyDate(),
+                    date_to.date().toPyDate(),
+                )
+
+            elif kind == "number_range":
+                spin_min, spin_max = widget
+                result[col] = (
+                    spin_min.value(),
+                    spin_max.value() if spin_max.value() > 0 else None,
+                )
+        return result
+
+    def _reset_all(self) -> None:
+        """Remet tous les filtres à zéro."""
+        self._search.blockSignals(True)
+        self._search.clear()
+        self._search.blockSignals(False)
+
+        for col, widget in self._filter_widgets.items():
+            cfg = next((c for c in self._config if c["col"] == col), {})
+            kind = cfg.get("kind", "combo")
+
+            if kind == "combo":
+                widget.blockSignals(True)
+                widget.setCurrentIndex(0)
+                widget.blockSignals(False)
+
+            elif kind == "date_range":
+                date_from, date_to = widget
+                date_from.blockSignals(True)
+                date_to.blockSignals(True)
+                date_from.setDate(QDate(2000, 1, 1))
+                date_to.setDate(QDate.currentDate())
+                date_from.blockSignals(False)
+                date_to.blockSignals(False)
+
+            elif kind == "number_range":
+                spin_min, spin_max = widget
+                spin_min.blockSignals(True)
+                spin_max.blockSignals(True)
+                spin_min.setValue(0.0)
+                spin_max.setValue(0.0)
+                spin_min.blockSignals(False)
+                spin_max.blockSignals(False)
+
+        self.filters_changed.emit()
+
+
+# ─── DataTableWidget ───────────────────────────────────────────────────────────
+
 class DataTableWidget(QWidget):
-    """Widget complet : tableau + en-têtes stylisés + barre de recherche."""
+    """
+    Widget complet : tableau + en-têtes stylisés + barre de recherche + FilterBar optionnelle.
+
+    AM-12 : Filtres par type/catégorie (combo), date_range, number_range.
+             Activer via set_filter_config([...]).
+    AM-13 : Tri par clic sur header (flèches ↑↓) — déjà supporté via setSortingEnabled.
+    """
 
     # Émis quand une cellule éditable est modifiée : (row_in_model, col_name, new_value)
     cell_changed = pyqtSignal(int, str, object)
@@ -155,6 +454,12 @@ class DataTableWidget(QWidget):
     def __init__(self, parent=None, editable: bool = False, searchable: bool = True):
         super().__init__(parent)
         self._loading = False
+        self._full_df: pd.DataFrame = pd.DataFrame()
+        self._model = PandasTableModel()
+        self._view = QTableView()
+        self._view.setModel(self._model)
+        self._view.setStyleSheet(STYLE_TABLE)
+
         self._skeleton_handler = SkeletonHandler(self)
         self._skeleton_handler.updated.connect(self._view.viewport().update)
 
@@ -162,7 +467,7 @@ class DataTableWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        # Barre de recherche
+        # ── Barre de recherche simple (legacy, masquée si FilterBar active) ──
         self._search_bar = QLineEdit()
         self._search_bar.setPlaceholderText("🔍  Filtrer...")
         self._search_bar.setStyleSheet(STYLE_INPUT + " max-height: 28px;")
@@ -173,14 +478,11 @@ class DataTableWidget(QWidget):
         else:
             self._search_bar.hide()
 
-        self._full_df: pd.DataFrame = pd.DataFrame()
-        self._model = PandasTableModel()
-        self._view = QTableView()
-        self._view.setModel(self._model)
+        # ── FilterBar (AM-12) — créée mais masquée jusqu'à set_filter_config() ──
+        self._filter_bar: FilterBar | None = None
+        self._filter_config: list[dict] = []
 
-        # Style
-        self._view.setStyleSheet(STYLE_TABLE)
-
+        # Configuration de la vue
         self._view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self._view.horizontalHeader().setStretchLastSection(True)
         self._view.verticalHeader().setVisible(False)
@@ -203,12 +505,103 @@ class DataTableWidget(QWidget):
 
         layout.addWidget(self._view)
 
+    # ── AM-12 : Configuration des filtres avancés ──────────────────────────────
+
+    def set_filter_config(self, config: list[dict]) -> None:
+        """
+        Active la FilterBar avec la configuration donnée.
+        Masque la barre de recherche simple et la remplace.
+
+        config = [
+            {"col": "type",     "kind": "combo",        "label": "Type"},
+            {"col": "date",     "kind": "date_range",   "label": "Date"},
+            {"col": "amount",   "kind": "number_range", "label": "Montant"},
+            {"col": "category", "kind": "combo",        "label": "Catégorie"},
+        ]
+        """
+        self._filter_config = config
+
+        # Créer la FilterBar si elle n'existe pas encore
+        if self._filter_bar is None:
+            self._filter_bar = FilterBar()
+            # L'insérer avant la table (position 0 du layout)
+            layout = self.layout()
+            layout.insertWidget(0, self._filter_bar)
+
+        self._filter_bar.set_config(config)
+        self._filter_bar.filters_changed.connect(self._on_advanced_filter_changed)
+
+        # Masquer la barre de recherche simple pour éviter la duplication
+        self._search_bar.hide()
+
+    def _populate_filter_combos(self) -> None:
+        """Remplit les combos de la FilterBar avec les valeurs uniques du df."""
+        if self._filter_bar is None or self._full_df.empty:
+            return
+        for cfg in self._filter_config:
+            if cfg.get("kind") == "combo":
+                col = cfg["col"]
+                if col in self._full_df.columns:
+                    self._filter_bar.populate_combo(col, self._full_df[col].tolist())
+
+    def _on_advanced_filter_changed(self) -> None:
+        """Applique tous les filtres actifs (texte + combo + date + nombre)."""
+        if self._full_df.empty:
+            return
+
+        df = self._full_df.copy()
+
+        # Filtre texte global
+        text = self._filter_bar.get_search_text()
+        if text:
+            mask = df.apply(lambda row: any(text in str(v).lower() for v in row), axis=1)
+            df = df[mask]
+
+        # Filtres avancés
+        filter_vals = self._filter_bar.get_filter_values()
+        for cfg in self._filter_config:
+            col = cfg["col"]
+            kind = cfg.get("kind", "combo")
+            val = filter_vals.get(col)
+
+            if col not in df.columns or val is None:
+                continue
+
+            if kind == "combo" and val is not None:
+                df = df[df[col].astype(str) == val]
+
+            elif kind == "date_range":
+                date_from, date_to = val
+                try:
+                    col_dt = pd.to_datetime(df[col], errors="coerce")
+                    from_ts = pd.Timestamp(date_from)
+                    to_ts = pd.Timestamp(date_to).replace(hour=23, minute=59, second=59)
+                    df = df[(col_dt >= from_ts) & (col_dt <= to_ts)]
+                except Exception:
+                    pass
+
+            elif kind == "number_range":
+                min_val, max_val = val
+                try:
+                    col_num = pd.to_numeric(df[col], errors="coerce").abs()
+                    if min_val > 0:
+                        df = df[col_num >= min_val]
+                    if max_val is not None and max_val > 0:
+                        df = df[col_num <= max_val]
+                except Exception:
+                    pass
+
+        self._model.set_dataframe(df.reset_index(drop=True))
+        self._apply_delegates()
+        self._apply_hidden_cols()
+
+    # ── Chargement / skelton ───────────────────────────────────────────────────
+
     def set_loading(self, loading: bool) -> None:
         """Active ou désactive le mode skeleton."""
         self._loading = loading
         if loading:
             self._skeleton_handler.start()
-            # On vide temporairement le modèle ou on affiche des lignes fantômes
             self._model.set_dataframe(pd.DataFrame({"Loading...": [""] * 5}))
         else:
             self._skeleton_handler.stop()
@@ -216,20 +609,23 @@ class DataTableWidget(QWidget):
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
-        if not self._loading:
-            return
 
-        # On dessine les skeletons par-dessus le viewport de la table
-        # Note: PaintEvent d'un QWidget parent ne dessine pas sur les enfants complexes.
-        # Il est préférable d'utiliser un overlay ou de modifier le modèle.
-        # Ici je vais utiliser le PaintEvent du viewport via un délégué ou simplement
-        # dessiner des barres grises si le modèle est en mode "Loading".
-        pass
+    # ── DataFrame ─────────────────────────────────────────────────────────────
 
     def set_dataframe(self, df: pd.DataFrame) -> None:
         self._full_df = df if df is not None else pd.DataFrame()
-        self._search_bar.clear()
-        self._model.set_dataframe(self._full_df)
+
+        # Si FilterBar active, repopuler les combos AVANT de réinitialiser les filtres
+        if self._filter_bar is not None:
+            self._filter_bar.blockSignals(True)
+            self._populate_filter_combos()
+            self._filter_bar.blockSignals(False)
+            # Appliquer les filtres actuels (sans reset)
+            self._on_advanced_filter_changed()
+        else:
+            self._search_bar.clear()
+            self._model.set_dataframe(self._full_df)
+
         self._view.resizeColumnsToContents()
         self._apply_delegates()
         self._apply_hidden_cols()
@@ -238,7 +634,7 @@ class DataTableWidget(QWidget):
         return self._model.get_dataframe()
 
     def set_column_colors(self, column_colors: dict) -> None:
-        """Définit des fonctions de couleur par colonne. Ex: {"PnL (€)": lambda v: "#4ade80" if v >= 0 else "#f87171"}"""
+        """Définit des fonctions de couleur par colonne."""
         self._model.set_column_colors(column_colors)
 
     def set_combo_delegate(self, col_name: str, items: list) -> None:
@@ -254,6 +650,8 @@ class DataTableWidget(QWidget):
         """Masque une colonne par son nom (elle reste dans le DataFrame sous-jacent)."""
         self._hidden_cols.add(col_name)
         self._apply_hidden_cols()
+
+    # ── Internes ──────────────────────────────────────────────────────────────
 
     def _apply_delegates(self) -> None:
         df = self._model.get_dataframe()
@@ -287,6 +685,7 @@ class DataTableWidget(QWidget):
                 self.cell_changed.emit(row, col_name, new_value)
 
     def _on_filter_changed(self, text: str) -> None:
+        """Filtre textuel simple (barre de recherche legacy)."""
         if not text.strip() or self._full_df.empty:
             self._model.set_dataframe(self._full_df)
             self._apply_delegates()

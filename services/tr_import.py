@@ -538,6 +538,7 @@ def import_tr_transactions(
     account_id: int,
     dry_run: bool = True,
     ticker_account_map: dict[str, int] | None = None,
+    import_batch_id: int | None = None,
 ) -> dict:
     """
     Parse et importe les transactions TR.
@@ -679,9 +680,9 @@ def import_tr_transactions(
 
         conn.executemany(
             """INSERT INTO transactions
-               (date, person_id, account_id, type, asset_id, quantity, price, fees, amount, category, note)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            rows_to_insert,
+               (date, person_id, account_id, type, asset_id, quantity, price, fees, amount, category, note, import_batch_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [r + (import_batch_id,) for r in rows_to_insert],
         )
         conn.commit()
 

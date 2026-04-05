@@ -316,3 +316,24 @@ CREATE TABLE IF NOT EXISTS patrimoine_snapshots_family_weekly (
 
 CREATE INDEX IF NOT EXISTS idx_psfw_family_week
 ON patrimoine_snapshots_family_weekly(family_id, week_date);
+
+-- =========================================
+-- HISTORIQUE DES IMPORTS (AM-19)
+-- =========================================
+
+CREATE TABLE IF NOT EXISTS import_batches (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  import_type  TEXT NOT NULL,               -- 'TR' | 'BANKIN' | 'DEPENSES' | 'REVENUS'
+  person_id    INTEGER,
+  person_name  TEXT,
+  account_id   INTEGER,
+  account_name TEXT,
+  filename     TEXT,
+  imported_at  TEXT DEFAULT (datetime('now')),
+  nb_rows      INTEGER DEFAULT 0,
+  status       TEXT NOT NULL DEFAULT 'ACTIVE', -- 'ACTIVE' | 'ROLLED_BACK'
+  FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_batches_person
+ON import_batches(person_id, imported_at);

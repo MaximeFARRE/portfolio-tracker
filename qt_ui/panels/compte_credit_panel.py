@@ -93,6 +93,10 @@ class CompteCreditPanel(QWidget):
         dash_v.addWidget(lbl_amort)
         self._table_amort = DataTableWidget()
         self._table_amort.setMinimumHeight(250)
+        self._table_amort.set_filter_config([
+            {"col": "date_echeance", "kind": "date_range",   "label": "Date échéance"},
+            {"col": "capital",       "kind": "number_range", "label": "Capital"},
+        ])
         dash_v.addWidget(self._table_amort)
         dash_v.addStretch()
         tabs.addTab(dash, "📊  Tableau de bord")
@@ -101,12 +105,17 @@ class CompteCreditPanel(QWidget):
         self._saisie = SaisiePanel(conn, person_id, account_id, "CREDIT")
         tabs.addTab(self._saisie, "✏️  Saisie")
 
-        # ── Onglet 3 : Historique ──────────────────────────────────────────
+        # ── Onglet 3 : Historique ────────────────────────────────────────────────
         hist = QWidget()
         hist.setStyleSheet(f"background: {BG_PRIMARY};")
         hist_v = QVBoxLayout(hist)
         self._hist_table = DataTableWidget()
         self._hist_table.setMinimumHeight(350)
+        self._hist_table.set_filter_config([
+            {"col": "type",   "kind": "combo",        "label": "Type"},
+            {"col": "date",   "kind": "date_range",   "label": "Date"},
+            {"col": "amount", "kind": "number_range", "label": "Montant"},
+        ])
         hist_v.addWidget(self._hist_table)
         tabs.addTab(hist, "📋  Historique")
 

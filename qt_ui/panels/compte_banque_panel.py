@@ -51,6 +51,10 @@ class CompteBanquePanel(QWidget):
         dash_v.addWidget(lbl_hist)
         self._table_recent = DataTableWidget()
         self._table_recent.setMinimumHeight(300)
+        self._table_recent.set_filter_config([
+            {"col": "type",     "kind": "combo",      "label": "Type"},
+            {"col": "category", "kind": "combo",      "label": "Catégorie"},
+        ])
         dash_v.addWidget(self._table_recent)
         dash_v.addStretch()
         tabs.addTab(dash, "🏦  Tableau de bord")
@@ -66,6 +70,12 @@ class CompteBanquePanel(QWidget):
         hist_v.setContentsMargins(8, 8, 8, 8)
         self._hist_table = DataTableWidget()
         self._hist_table.setMinimumHeight(400)
+        self._hist_table.set_filter_config([
+            {"col": "type",     "kind": "combo",        "label": "Type"},
+            {"col": "date",     "kind": "date_range",   "label": "Date"},
+            {"col": "amount",   "kind": "number_range", "label": "Montant"},
+            {"col": "category", "kind": "combo",        "label": "Catégorie"},
+        ])
         hist_v.addWidget(self._hist_table)
         tabs.addTab(hist, "📋  Historique")
 

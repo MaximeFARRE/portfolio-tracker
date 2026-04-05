@@ -99,6 +99,11 @@ class ImportPage(QScrollArea):
         self._stack.addWidget(self._panel_credit)
 
         main_layout.addWidget(self._stack)
+
+        # ── Historique des imports (AM-19) ──────────────────────────────────
+        self._history_panel = self._build_history_panel()
+        main_layout.addWidget(self._history_panel)
+
         main_layout.addStretch()
 
         self._refresh_people()
@@ -167,16 +172,33 @@ class ImportPage(QScrollArea):
             person = self._person_combo.currentText()
             try:
                 from services.imports import import_wide_csv_to_monthly_table
+                from services.import_history import create_batch, close_batch
+                import os
+                pid = self._conn.execute(
+                    "SELECT id FROM people WHERE name = ?", (person,)
+                ).fetchone()
+                pid = int(pid[0]) if pid else None
+                itype = "DEPENSES" if table_type == "depenses" else "REVENUS"
+                batch_id = create_batch(
+                    self._conn,
+                    import_type=itype,
+                    person_id=pid,
+                    person_name=person,
+                    filename=os.path.basename(w._file_path),
+                )
                 with open(w._file_path, "rb") as f:
                     res = import_wide_csv_to_monthly_table(
                         self._conn, table=table_type, person_name=person,
-                        file=f, delete_existing=w._chk_delete.isChecked()
+                        file=f, delete_existing=w._chk_delete.isChecked(),
+                        import_batch_id=batch_id,
                     )
+                close_batch(self._conn, batch_id, res["nb_lignes"])
                 result_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
                 result_lbl.setText(
                     f"Import OK ✅ — {res['nb_lignes']} lignes dans {res['table']}\n"
                     f"Mois : {res['mois']}\nCatégories : {res['categories']}"
                 )
+                self._refresh_history()
             except Exception as e:
                 result_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
                 result_lbl.setText(f"Erreur : {e}")
@@ -249,18 +271,34 @@ class ImportPage(QScrollArea):
             person = self._person_combo.currentText()
             try:
                 from services.imports import import_bankin_csv
+                from services.import_history import create_batch, close_batch
+                import os
+                pid = self._conn.execute(
+                    "SELECT id FROM people WHERE name = ?", (person,)
+                ).fetchone()
+                pid = int(pid[0]) if pid else None
+                batch_id = create_batch(
+                    self._conn,
+                    import_type="BANKIN",
+                    person_id=pid,
+                    person_name=person,
+                    filename=os.path.basename(w._file_path),
+                )
                 with open(w._file_path, "rb") as f:
                     res = import_bankin_csv(
                         self._conn, person_name=person, file=f,
                         also_fill_monthly_tables=chk_fill.isChecked(),
                         purge_existing_transactions=chk_purge.isChecked(),
+                        import_batch_id=batch_id,
                     )
+                close_batch(self._conn, batch_id, res["transactions_inserted"])
                 result_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
                 result_lbl.setText(
                     f"Import Bankin OK ✅ — {res['transactions_inserted']} transactions\n"
                     f"Mois dépenses : {res['months_depenses']}\n"
                     f"Mois revenus : {res['months_revenus']}"
                 )
+                self._refresh_history()
             except Exception as e:
                 result_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
                 result_lbl.setText(f"Erreur : {e}")
@@ -890,20 +928,36 @@ class ImportPage(QScrollArea):
         def _confirm_import() -> None:
             filepath = w._pending_filepath
             account_id = tr_account_combo.currentData()
+            account_label = tr_account_combo.currentText()
             pid = _get_person_id()
+            person = self._person_combo.currentText()
             if not filepath or not account_id or not pid:
                 return
             try:
                 from services.tr_import import import_tr_transactions
+                from services.import_history import create_batch, close_batch
+                import os
+                batch_id = create_batch(
+                    self._conn,
+                    import_type="TR",
+                    person_id=pid,
+                    person_name=person,
+                    account_id=account_id,
+                    account_name=account_label,
+                    filename=os.path.basename(filepath),
+                )
                 result = import_tr_transactions(
-                    self._conn, filepath, pid, account_id, 
-                    dry_run=False, ticker_account_map=w._ticker_map
+                    self._conn, filepath, pid, account_id,
+                    dry_run=False, ticker_account_map=w._ticker_map,
+                    import_batch_id=batch_id,
                 )
                 n = result["to_insert"]
+                close_batch(self._conn, batch_id, n)
                 result_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
                 result_lbl.setText(f"Import OK ✅ — {n} transactions enregistrées.")
                 btn_confirm.setEnabled(False)
-                _log(f"✅ {n} transactions importées.", "#22c55e")
+                _log(f"✅ {n} transactions importées (batch #{batch_id}).", "#22c55e")
+                self._refresh_history()
             except Exception as e:
                 result_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
                 result_lbl.setText(f"Erreur : {e}")
@@ -992,6 +1046,141 @@ class ImportPage(QScrollArea):
                 phone_edit.setText(phone)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Panel Historique des imports (AM-19)
+    # ------------------------------------------------------------------
+
+    _HISTORY_COLS = ["#", "Type", "Personne", "Compte / Fichier", "Date", "Lignes", "Statut", "Action"]
+    _TYPE_ICONS = {"TR": "📈", "BANKIN": "🏦", "DEPENSES": "💸", "REVENUS": "💰"}
+
+    def _build_history_panel(self) -> QGroupBox:
+        grp = QGroupBox("📋  Historique des imports")
+        grp.setStyleSheet(_GROUP_STYLE)
+        v = QVBoxLayout(grp)
+        v.setSpacing(8)
+
+        # Barre d'outils
+        toolbar = QHBoxLayout()
+        btn_refresh = QPushButton("🔄  Rafraîchir")
+        btn_refresh.setStyleSheet(_BTN_STYLE)
+        btn_refresh.setFixedWidth(130)
+        btn_refresh.clicked.connect(self._refresh_history)
+        toolbar.addWidget(btn_refresh)
+        toolbar.addStretch()
+        note = QLabel("🗑️ Annuler supprime les transactions / lignes du batch de la base de données.")
+        note.setStyleSheet("color: #64748b; font-size: 11px;")
+        toolbar.addWidget(note)
+        v.addLayout(toolbar)
+
+        # Tableau
+        tbl = QTableWidget(0, len(self._HISTORY_COLS))
+        tbl.setHorizontalHeaderLabels(self._HISTORY_COLS)
+        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        tbl.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        tbl.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        tbl.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        tbl.setMinimumHeight(160)
+        tbl.setMaximumHeight(280)
+        tbl.setStyleSheet(
+            "QTableWidget { background: #0a0e16; color: #e2e8f0; border: 1px solid #1e2538; "
+            "gridline-color: #1e2538; font-size: 12px; }"
+            "QHeaderView::section { background: #1a1f2e; color: #94a3b8; border: none; padding: 4px; }"
+        )
+        v.addWidget(tbl)
+
+        self._history_table = tbl
+        return grp
+
+    def _refresh_history(self) -> None:
+        """Recharge le tableau historique depuis la DB."""
+        try:
+            from services.import_history import list_batches
+            batches = list_batches(self._conn, limit=50)
+        except Exception:
+            return
+
+        tbl = self._history_table
+        tbl.setRowCount(0)
+
+        for b in batches:
+            ri = tbl.rowCount()
+            tbl.insertRow(ri)
+
+            itype = b["import_type"]
+            icon = self._TYPE_ICONS.get(itype, "📥")
+            status = b["status"]
+            rolled_back = (status == "ROLLED_BACK")
+
+            # Colonne 0 — id
+            tbl.setItem(ri, 0, QTableWidgetItem(str(b["id"])))
+            # Colonne 1 — type
+            tbl.setItem(ri, 1, QTableWidgetItem(f"{icon} {itype}"))
+            # Colonne 2 — personne
+            tbl.setItem(ri, 2, QTableWidgetItem(b["person_name"] or "—"))
+            # Colonne 3 — compte / fichier
+            detail = b["account_name"] or b["filename"] or "—"
+            tbl.setItem(ri, 3, QTableWidgetItem(detail))
+            # Colonne 4 — date
+            dt = (b["imported_at"] or "")[:16].replace("T", " ")
+            tbl.setItem(ri, 4, QTableWidgetItem(dt))
+            # Colonne 5 — nb lignes
+            nb_lbl = f"{b['nb_rows']} ({b['alive_rows']} en base)"
+            tbl.setItem(ri, 5, QTableWidgetItem(nb_lbl))
+            # Colonne 6 — statut
+            status_text = "✅ Actif" if not rolled_back else "🗑️ Annulé"
+            status_item = QTableWidgetItem(status_text)
+            status_item.setForeground(QColor("#22c55e" if not rolled_back else "#64748b"))
+            tbl.setItem(ri, 6, status_item)
+
+            # Colonne 7 — bouton Annuler (seulement si actif et lignes présentes)
+            if not rolled_back and b["alive_rows"] > 0:
+                btn = QPushButton("🗑️ Annuler")
+                btn.setStyleSheet(
+                    "QPushButton { background: #3b0000; color: #f87171; border: 1px solid #7f1d1d; "
+                    "border-radius: 4px; padding: 3px 10px; font-size: 11px; }"
+                    "QPushButton:hover { background: #5a0000; }"
+                )
+                batch_id = b["id"]
+                nb = b["alive_rows"]
+                btn.clicked.connect(lambda checked, bid=batch_id, n=nb: self._rollback_batch(bid, n))
+                tbl.setCellWidget(ri, 7, btn)
+            else:
+                tbl.setItem(ri, 7, QTableWidgetItem("—"))
+
+            # Griser la ligne si annulée
+            if rolled_back:
+                for col in range(tbl.columnCount()):
+                    item = tbl.item(ri, col)
+                    if item:
+                        item.setForeground(QColor("#475569"))
+
+    def _rollback_batch(self, batch_id: int, nb_rows: int) -> None:
+        """Demande confirmation puis annule le batch."""
+        reply = QMessageBox.question(
+            self,
+            "Confirmer l'annulation",
+            f"Voulez-vous vraiment annuler ce batch ?\n\n"
+            f"⚠️  {nb_rows} ligne(s) seront supprimées définitivement de la base.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            from services.import_history import rollback_batch
+            result = rollback_batch(self._conn, batch_id)
+            total = result["total_deleted"]
+            QMessageBox.information(
+                self,
+                "Annulation réussie",
+                f"✅ Batch #{batch_id} annulé — {total} ligne(s) supprimée(s).",
+            )
+            self._refresh_history()
+        except Exception as e:
+            QMessageBox.critical(self, "Erreur", f"Impossible d'annuler le batch :\n{e}")
 
     def _build_credit_panel(self) -> QWidget:
         w = QScrollArea()
@@ -1203,6 +1392,7 @@ class ImportPage(QScrollArea):
             self._person_combo.currentIndexChanged.connect(self._on_person_changed)
             self._person_signal_connected = True
         self._on_person_changed()
+        self._refresh_history()
 
     def _on_person_changed(self) -> None:
         person = self._person_combo.currentText()

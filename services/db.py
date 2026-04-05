@@ -124,6 +124,7 @@ def init_db() -> None:
         ensure_snapshots_table(conn)
         ensure_weekly_tables(conn)
         ensure_people_columns(conn)
+        ensure_import_batches_table(conn)
 
         conn.commit()
 
@@ -210,6 +211,45 @@ def ensure_people_columns(conn) -> None:
         conn.commit()
     except Exception:
         pass  # colonne déjà présente
+
+
+def ensure_import_batches_table(conn) -> None:
+    """Crée la table import_batches et ajoute import_batch_id aux tables de données (AM-19)."""
+    # Table des batches d'import
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS import_batches (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          import_type  TEXT NOT NULL,
+          person_id    INTEGER,
+          person_name  TEXT,
+          account_id   INTEGER,
+          account_name TEXT,
+          filename     TEXT,
+          imported_at  TEXT DEFAULT (datetime('now')),
+          nb_rows      INTEGER DEFAULT 0,
+          status       TEXT NOT NULL DEFAULT 'ACTIVE',
+          FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE SET NULL
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_import_batches_person "
+        "ON import_batches(person_id, imported_at);"
+    )
+
+    # Colonne import_batch_id sur transactions, depenses, revenus
+    for table in ("transactions", "depenses", "revenus"):
+        try:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN import_batch_id INTEGER "
+                f"REFERENCES import_batches(id) ON DELETE SET NULL;"
+            )
+        except Exception:
+            pass  # colonne déjà présente
+
+    try:
+        conn.commit()
+    except Exception:
+        pass
 
 
 def ensure_weekly_tables(conn):
