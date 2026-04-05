@@ -186,6 +186,9 @@ class CompteBoursePanel(QWidget):
         except Exception as e:
             logger.warning("Could not fetch account currency: %s", e)
             acc_ccy = "EUR"
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait()
         self._thread = PriceRefreshThread(self._account_id, acc_ccy)
         self._thread.finished.connect(self._on_refresh_done)
         self._thread.start()
