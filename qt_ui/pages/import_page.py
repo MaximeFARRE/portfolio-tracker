@@ -1442,6 +1442,10 @@ class ImportPage(QScrollArea):
             person_id = int(row[0] if not hasattr(row, '__getitem__') else row["id"])
 
             account_id = self._credit_account_combo.currentData()
+            if account_id is None:
+                self._credit_result.setStyleSheet("color: #ef4444; font-size: 12px;")
+                self._credit_result.setText("Sélectionnez un compte crédit.")
+                return
             payer_account_id = self._payer_account_combo.currentData()
             date_debut = self._c_date_debut.date().toString("yyyy-MM-dd")
 
