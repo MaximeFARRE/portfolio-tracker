@@ -13,6 +13,7 @@ from PyQt6.QtGui import QFont, QIcon
 from qt_ui.pages.famille_page import FamillePage
 from qt_ui.pages.personnes_page import PersonnesPage
 from qt_ui.pages.import_page import ImportPage
+from qt_ui.pages.goals_projection_page import GoalsProjectionPage
 from qt_ui.pages.settings_page import SettingsPage
 from qt_ui.theme import (
     BG_PRIMARY, BG_SIDEBAR, BG_HOVER, BG_ACTIVE, BORDER_SUBTLE,
@@ -145,14 +146,17 @@ class NavSidebar(QFrame):
         self._btn_famille = NavButton("🏠  Famille")
         self._btn_personnes = NavButton("👤  Personnes")
         self._btn_import = NavButton("📥  Import")
+        self._btn_goals_projection = NavButton("🎯  Objectifs & Projection")
 
         self._btn_famille.clicked.connect(lambda: main_window.show_page("famille"))
         self._btn_personnes.clicked.connect(lambda: main_window.show_page("personnes"))
         self._btn_import.clicked.connect(lambda: main_window.show_page("import"))
+        self._btn_goals_projection.clicked.connect(lambda: main_window.show_page("goals_projection"))
 
         layout.addWidget(self._btn_famille)
         layout.addWidget(self._btn_personnes)
         layout.addWidget(self._btn_import)
+        layout.addWidget(self._btn_goals_projection)
 
         # Séparateur
         layout.addWidget(self._make_separator())
@@ -217,6 +221,7 @@ class NavSidebar(QFrame):
         self._btn_famille.setChecked(page == "famille")
         self._btn_personnes.setChecked(page == "personnes")
         self._btn_import.setChecked(page == "import")
+        self._btn_goals_projection.setChecked(page == "goals_projection")
         self._btn_settings.setChecked(page == "settings")
         for btn in self._person_buttons:
             btn.setChecked(False)
@@ -244,6 +249,7 @@ class MainWindow(QMainWindow):
         self._page_famille = FamillePage(conn)
         self._page_personnes = PersonnesPage(conn)
         self._page_import = ImportPage(conn)
+        self._page_goals_projection = GoalsProjectionPage(conn)
         self._page_settings = SettingsPage(conn)
 
         # Stack
@@ -251,6 +257,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._page_famille)
         self._stack.addWidget(self._page_personnes)
         self._stack.addWidget(self._page_import)
+        self._stack.addWidget(self._page_goals_projection)
         self._stack.addWidget(self._page_settings)
 
         # Sidebar
@@ -323,6 +330,9 @@ class MainWindow(QMainWindow):
         elif page == "import":
             self._stack.setCurrentWidget(self._page_import)
             self._page_import.refresh()
+        elif page == "goals_projection":
+            self._stack.setCurrentWidget(self._page_goals_projection)
+            self._page_goals_projection.refresh()
         elif page == "settings":
             self._stack.setCurrentWidget(self._page_settings)
             self._page_settings.refresh()
