@@ -33,9 +33,9 @@
 |---|---|
 | **Gravite** | FAIBLE |
 | **Fichier** | `services/db.py` |
-| **Statut** | A VERIFIER |
+| **Statut** | CORRIGE (pas de double execution) |
 
-**Description** : Verifier si `seed_minimal()` appelle toujours `init_db()` en interne, ce qui doublerait l'execution du schema au demarrage.
+**Description** : Verifie — `seed_minimal()` n'appelle pas `init_db()` en interne. `core/db_connection.py` les appelle sequentiellement (L26-27). Pas de correction necessaire.
 
 ---
 
