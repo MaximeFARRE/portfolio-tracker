@@ -97,19 +97,15 @@ def compute_positions_v2_fx(conn, tx_df: pd.DataFrame, latest_prices: pd.DataFra
     if asset_ids:
         qmarks = ",".join(["?"] * len(asset_ids))
         rows = conn.execute(
-            f"SELECT id as asset_id, currency FROM assets WHERE id IN ({qmarks});",
+            f"SELECT id as asset_id, currency, asset_type FROM assets WHERE id IN ({qmarks});",
             tuple(asset_ids),
         ).fetchall()
-        if not rows:
-            cur_df = pd.DataFrame(columns=["asset_id", "currency"])
-        else:
-            try:
-                cur_df = pd.DataFrame([dict(r) for r in rows])
-            except (TypeError, KeyError):
-                cur_df = pd.DataFrame(list(rows), columns=["asset_id", "currency"])
+        cur_df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame(columns=["asset_id", "currency", "asset_type"])
+
         out = out.merge(cur_df, on="asset_id", how="left", suffixes=("", "_asset"))
     else:
         out["currency"] = None
+        out["asset_type"] = None
 
     # devise actif: priorité assets.currency, sinon latest_prices.currency, sinon account_ccy
     lp2 = lp[["asset_id", "currency"]].drop_duplicates() if not lp.empty else pd.DataFrame(columns=["asset_id","currency"])
@@ -132,5 +128,8 @@ def compute_positions_v2_fx(conn, tx_df: pd.DataFrame, latest_prices: pd.DataFra
     out["pnl_latent"] = (out["last_price"] - out["pru"]) * out["quantity"]
 
     # Option: on garde la colonne asset_ccy pour debug
-    out = out[["asset_id","symbol","name","quantity","pru","last_price","value","pnl_latent","asset_ccy"]]
+    if "asset_type" not in out.columns:
+        out["asset_type"] = "autre"
+    out["asset_type"] = out["asset_type"].fillna("autre")
+    out = out[["asset_id","symbol","name","asset_type","quantity","pru","last_price","value","pnl_latent","asset_ccy"]]
     return out

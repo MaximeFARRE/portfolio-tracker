@@ -1,16 +1,24 @@
 # Libellés et codes normalisés (sans accents en base, affichage en français).
 
 # Types de compte en base
-TYPES_COMPTE = ["BANQUE", "PEA", "CTO", "CRYPTO", "IMMOBILIER", "CREDIT", "PE"]
+TYPES_COMPTE = [
+    "BANQUE", "PEA", "PEA_PME", "CTO", "CRYPTO",
+    "ASSURANCE_VIE", "PER", "PEE",
+    "IMMOBILIER", "CREDIT", "PE",
+]
 
 LIBELLES_TYPE_COMPTE = {
-    "BANQUE": "Banque",
-    "PEA": "PEA",
-    "CTO": "Compte-titres",
-    "CRYPTO": "Crypto",
-    "IMMOBILIER": "Immobilier",
-    "CREDIT": "Crédit",
-    "PE": "Private equity",
+    "BANQUE":        "Banque",
+    "PEA":           "PEA",
+    "PEA_PME":       "PEA-PME",
+    "CTO":           "Compte-titres",
+    "CRYPTO":        "Crypto",
+    "ASSURANCE_VIE": "Assurance-vie",
+    "PER":           "PER",
+    "PEE":           "PEE",
+    "IMMOBILIER":    "Immobilier",
+    "CREDIT":        "Crédit",
+    "PE":            "Private equity",
 }
 
 # Types d'opération en base
@@ -19,21 +27,22 @@ TYPES_OPERATION = [
     "DEPOT", "RETRAIT",
     "DEPENSE", "FRAIS", "IMPOT",
     "INTERETS", "REMBOURSEMENT_CREDIT",
-    "LOYER",
+    "LOYER", "ABONDEMENT",
 ]
 
 LIBELLES_TYPE_OPERATION = {
-    "ACHAT": "Achat",
-    "VENTE": "Vente",
-    "DIVIDENDE": "Dividende",
-    "DEPOT": "Dépôt",
-    "RETRAIT": "Retrait",
-    "DEPENSE": "Dépense",
-    "FRAIS": "Frais",
-    "IMPOT": "Impôt",
-    "INTERETS": "Intérêts",
-    "REMBOURSEMENT_CREDIT": "Remboursement crédit",
-    "LOYER": "Loyer",
+    "ACHAT":                 "Achat",
+    "VENTE":                 "Vente",
+    "DIVIDENDE":             "Dividende",
+    "DEPOT":                 "Dépôt",
+    "RETRAIT":               "Retrait",
+    "DEPENSE":               "Dépense",
+    "FRAIS":                 "Frais",
+    "IMPOT":                 "Impôt",
+    "INTERETS":              "Intérêts",
+    "REMBOURSEMENT_CREDIT":  "Remboursement crédit",
+    "LOYER":                 "Loyer",
+    "ABONDEMENT":            "Abondement",
 }
 
 # Suggestions catégories (dépenses)

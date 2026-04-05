@@ -1,17 +1,16 @@
 # services/imports.py
+import logging
 import sqlite3
 import pandas as pd
 
+_logger = logging.getLogger(__name__)
 
-def _ensure_person(conn: sqlite3.Connection, person_name: str) -> int:
-    row = conn.execute("SELECT id FROM people WHERE name = ?", (person_name,)).fetchone()
-    if row:
-        return int(row[0] if not hasattr(row, "keys") else row["id"])
 
-    conn.execute("INSERT INTO people(name) VALUES (?)", (person_name,))
+def _ensure_person(conn: sqlite3.Connection, name: str) -> int:
+    conn.execute("INSERT OR IGNORE INTO people(name) VALUES (?)", (name,))
     conn.commit()
-    row2 = conn.execute("SELECT id FROM people WHERE name = ?", (person_name,)).fetchone()
-    return int(row2[0] if not hasattr(row2, "keys") else row2["id"])
+    row = conn.execute("SELECT id FROM people WHERE name = ?", (name,)).fetchone()
+    return int(row[0] if not hasattr(row, "keys") else row["id"])
 
 
 def _read_clean_wide_csv(file) -> pd.DataFrame:
@@ -69,6 +68,7 @@ def import_wide_csv_to_monthly_table(
     ignore_cols=("Total",),
     delete_existing: bool = True,
     drop_zeros: bool = True,
+    import_batch_id: int | None = None,
 ):
     """
     CSV format attendu (wide):
@@ -103,14 +103,24 @@ def import_wide_csv_to_monthly_table(
 
     long["mois"] = long[date_col].apply(_month_key_from_date)
 
-    rows = [(person_id, r["mois"], r["categorie"], float(r["montant"])) for _, r in long.iterrows()]
+    # Validation basique
+    if table == "depenses":
+        negatifs = long[long["montant"] < 0]
+        if not negatifs.empty:
+            _logger.warning("import_csv_wide: %d montants négatifs dans les dépenses (ignorés)", len(negatifs))
+            long = long[long["montant"] >= 0]
 
-    # DELETE + INSERT dans la même transaction pour éviter la perte de données en cas d'erreur
+    rows = [
+        (person_id, r["mois"], r["categorie"], float(r["montant"]), import_batch_id)
+        for _, r in long.iterrows()
+    ]
+
+    # DELETE + INSERT dans la même transaction pour éviter la perte de données en cas d’erreur
     if delete_existing:
         conn.execute(f"DELETE FROM {table} WHERE person_id = ?", (person_id,))
 
     conn.executemany(
-        f"INSERT INTO {table} (person_id, mois, categorie, montant) VALUES (?, ?, ?, ?)",
+        f"INSERT INTO {table} (person_id, mois, categorie, montant, import_batch_id) VALUES (?, ?, ?, ?, ?)",
         rows
     )
     conn.commit()
@@ -247,6 +257,7 @@ def import_bankin_csv(
     file,
     also_fill_monthly_tables: bool = True,
     purge_existing_transactions: bool = False,
+    import_batch_id: int | None = None,
 ) -> dict:
     """
     Importe le CSV Bankin dans transactions.
@@ -307,10 +318,10 @@ def import_bankin_csv(
 
         conn.execute(
             """
-            INSERT INTO transactions(date, person_id, account_id, type, asset_id, quantity, price, fees, amount, category, note)
-            VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, ?, ?, ?)
+            INSERT INTO transactions(date, person_id, account_id, type, asset_id, quantity, price, fees, amount, category, note, import_batch_id)
+            VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, ?, ?, ?, ?)
             """,
-            (d.strftime("%Y-%m-%d"), person_id, account_id, tx_type, tx_amount, categorie_finale, f"{note} | {desc}"),
+            (d.strftime("%Y-%m-%d"), person_id, account_id, tx_type, tx_amount, categorie_finale, f"{note} | {desc}", import_batch_id),
         )
         inserted += 1
 
@@ -318,28 +329,38 @@ def import_bankin_csv(
 
     # Option : remplir depenses/revenus (mensuel)
     if also_fill_monthly_tables:
-        # Supprimer les mois concernés avant ré-insert pour éviter les doublons
-        # lors de ré-importations successives du même fichier Bankin.
-        for mois in set(m for (m, _) in monthly_dep.keys()):
-            conn.execute("DELETE FROM depenses WHERE person_id = ? AND mois = ?", (person_id, mois))
-        for mois in set(m for (m, _) in monthly_rev.keys()):
-            conn.execute("DELETE FROM revenus WHERE person_id = ? AND mois = ?", (person_id, mois))
+        # Purge les mois importés pour éviter les doublons en cas de re-import
+        dep_months = sorted(set(m for (m, _) in monthly_dep.keys()))
+        rev_months = sorted(set(m for (m, _) in monthly_rev.keys()))
+
+        if dep_months:
+            placeholders = “,”.join([“?”] * len(dep_months))
+            conn.execute(
+                f”DELETE FROM depenses WHERE person_id = ? AND mois IN ({placeholders})”,
+                (person_id, *dep_months),
+            )
+        if rev_months:
+            placeholders = “,”.join([“?”] * len(rev_months))
+            conn.execute(
+                f”DELETE FROM revenus WHERE person_id = ? AND mois IN ({placeholders})”,
+                (person_id, *rev_months),
+            )
 
         for (mois, cat), total in monthly_dep.items():
             conn.execute(
-                """
+                “””
                 INSERT INTO depenses(person_id, mois, categorie, montant)
                 VALUES (?, ?, ?, ?)
-                """,
+                “””,
                 (person_id, mois, cat, float(total)),
             )
 
         for (mois, cat), total in monthly_rev.items():
             conn.execute(
-                """
+                “””
                 INSERT INTO revenus(person_id, mois, categorie, montant)
                 VALUES (?, ?, ?, ?)
-                """,
+                “””,
                 (person_id, mois, cat, float(total)),
             )
         conn.commit()

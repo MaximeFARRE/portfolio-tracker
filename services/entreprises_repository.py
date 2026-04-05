@@ -64,6 +64,7 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE enterprise_history SET effective_date = COALESCE(effective_date, substr(changed_at, 1, 10));")
         conn.execute("UPDATE enterprise_history SET effective_date = COALESCE(effective_date, date('now'));")
 
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_eh_ent_date ON enterprise_history(enterprise_id, effective_date);")
     conn.commit()
 
 

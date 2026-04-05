@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS credits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   person_id INTEGER NOT NULL,
   account_id INTEGER NOT NULL,           -- le sous-compte de type CREDIT
+  payer_account_id INTEGER,              -- compte bancaire payeur
   nom TEXT NOT NULL,
   banque TEXT,
   type_credit TEXT,                     -- immo / conso / auto / etudiant / autre
@@ -318,10 +319,5 @@ CREATE INDEX IF NOT EXISTS idx_psfw_family_week
 ON patrimoine_snapshots_family_weekly(family_id, week_date);
 
 -- =========================================
--- SCHEMA VERSIONING
--- =========================================
-CREATE TABLE IF NOT EXISTS schema_version (
-  version INTEGER PRIMARY KEY,
-  applied_at TEXT DEFAULT (datetime('now')),
-  description TEXT
-);
+-- HISTORIQUE DES IMPORTS (AM-19)
+-- 
