@@ -98,39 +98,18 @@ def get_family_series_from_people_snapshots(conn, person_ids: List[int]) -> pd.D
     Agrège directement depuis patrimoine_snapshots_weekly (somme par week_date).
     On ne dépend pas de la table famille si tu veux rester flexible.
     """
-    if not person_ids:
-        return pd.DataFrame()
+    from services import family_snapshots as fs
+    return fs.get_family_weekly_series(conn, family_id=1, fallback_person_ids=person_ids)
 
-    has_immo = _has_column(conn, "patrimoine_snapshots_weekly", "immobilier_value")
-    immo_select = "SUM(immobilier_value) AS immobilier_value" if has_immo else "0.0 AS immobilier_value"
 
-    q = ",".join(["?"] * len(person_ids))
-    df = pd.read_sql_query(
-        f"""
-        SELECT week_date,
-               SUM(patrimoine_net) AS patrimoine_net,
-               SUM(patrimoine_brut) AS patrimoine_brut,
-               SUM(liquidites_total) AS liquidites_total,
-               SUM(bourse_holdings) AS bourse_holdings,
-               SUM(pe_value) AS pe_value,
-               SUM(ent_value) AS ent_value,
-               {immo_select},
-               SUM(credits_remaining) AS credits_remaining
-        FROM patrimoine_snapshots_weekly
-        WHERE person_id IN ({q})
-        GROUP BY week_date
-        ORDER BY week_date ASC
-        """,
-        conn,
-        params=tuple([int(x) for x in person_ids]),
-    )
-
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    df["week_date"] = pd.to_datetime(df["week_date"], errors="coerce")
-    df = df.dropna(subset=["week_date"]).sort_values("week_date")
-    return df
+def get_family_series(conn, person_ids: Optional[List[int]] = None, family_id: int = 1) -> pd.DataFrame:
+    """
+    Source de vérité famille:
+    - priorité: table patrimoine_snapshots_family_weekly
+    - fallback: agrégation des snapshots weekly personnes
+    """
+    from services import family_snapshots as fs
+    return fs.get_family_weekly_series(conn, family_id=family_id, fallback_person_ids=person_ids or [])
 
 
 def get_last_common_week(conn, person_ids: List[int]) -> Optional[pd.Timestamp]:

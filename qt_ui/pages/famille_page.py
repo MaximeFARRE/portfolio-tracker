@@ -142,7 +142,7 @@ class FamilleDashboardPanel(QWidget):
         self._progress_bar.hide()
         top_row.addWidget(self._progress_bar)
 
-        self._rebuild_status = QLabel("Vue Famille = somme des snapshots weekly des personnes.")
+        self._rebuild_status = QLabel("Vue Famille = snapshots famille weekly (fallback: somme snapshots personnes).")
         self._rebuild_status.setStyleSheet(STYLE_STATUS)
         top_row.addWidget(self._rebuild_status, 1)
         self._layout.addLayout(top_row)
@@ -538,7 +538,7 @@ class FamilleDashboardPanel(QWidget):
                 return
             person_ids = [int(x) for x in people["id"].tolist()]
 
-            df_family = fd.get_family_series_from_people_snapshots(self._conn, person_ids)
+            df_family = fd.get_family_series(self._conn, person_ids=person_ids, family_id=1)
             if df_family.empty:
                 self._title_label.setText("Aucune donnée weekly — lancez un rebuild.")
                 return

@@ -3,7 +3,17 @@ import pandas as pd
 from datetime import datetime
 import pytz
 
-from services import snapshots as wk_snap
+FAMILY_WEEKLY_COLUMNS = [
+    "week_date",
+    "patrimoine_net",
+    "patrimoine_brut",
+    "liquidites_total",
+    "bourse_holdings",
+    "pe_value",
+    "ent_value",
+    "immobilier_value",
+    "credits_remaining",
+]
 
 
 def _now_paris_iso() -> str:
@@ -24,6 +34,60 @@ def list_family_weekly_snapshots(conn, family_id: int = 1) -> pd.DataFrame:
         conn,
         params=(int(family_id),),
     )
+
+
+def _normalize_family_weekly_series(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=FAMILY_WEEKLY_COLUMNS)
+
+    out = df.copy()
+    out["week_date"] = pd.to_datetime(out["week_date"], errors="coerce")
+    out = out.dropna(subset=["week_date"]).sort_values("week_date")
+
+    for col in FAMILY_WEEKLY_COLUMNS:
+        if col == "week_date":
+            continue
+        if col not in out.columns:
+            out[col] = 0.0
+
+    return out[FAMILY_WEEKLY_COLUMNS].reset_index(drop=True)
+
+
+def get_family_weekly_series(conn, family_id: int = 1, fallback_person_ids: list[int] | None = None) -> pd.DataFrame:
+    """
+    Source canonique de la série famille :
+    1) table famille weekly
+    2) fallback (si table vide) via agrégation snapshots personnes
+    """
+    df_family = list_family_weekly_snapshots(conn, family_id=family_id)
+    df_family = _normalize_family_weekly_series(df_family)
+    if not df_family.empty:
+        return df_family
+
+    if not fallback_person_ids:
+        return df_family
+
+    q = ",".join(["?"] * len(fallback_person_ids))
+    df_people = pd.read_sql_query(
+        f"""
+        SELECT week_date,
+               SUM(patrimoine_net) AS patrimoine_net,
+               SUM(patrimoine_brut) AS patrimoine_brut,
+               SUM(liquidites_total) AS liquidites_total,
+               SUM(bourse_holdings) AS bourse_holdings,
+               SUM(pe_value) AS pe_value,
+               SUM(ent_value) AS ent_value,
+               SUM(immobilier_value) AS immobilier_value,
+               SUM(credits_remaining) AS credits_remaining
+        FROM patrimoine_snapshots_weekly
+        WHERE person_id IN ({q})
+        GROUP BY week_date
+        ORDER BY week_date ASC
+        """,
+        conn,
+        params=tuple([int(x) for x in fallback_person_ids]),
+    )
+    return _normalize_family_weekly_series(df_people)
 
 
 def upsert_family_snapshot(conn, family_id: int, week_date: str, mode: str, payload: dict) -> None:
@@ -70,6 +134,8 @@ def upsert_family_snapshot(conn, family_id: int, week_date: str, mode: str, payl
 def rebuild_family_weekly(conn, person_ids: list[int], lookback_days: int = 90, family_id: int = 1) -> dict:
     if not person_ids:
         return {"did_run": False, "reason": "no_person_ids"}
+
+    from services import snapshots as wk_snap
 
     # 1) rebuild chaque personne
     for pid in person_ids:
