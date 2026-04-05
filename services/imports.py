@@ -115,9 +115,15 @@ def import_wide_csv_to_monthly_table(
         for _, r in long.iterrows()
     ]
 
-    # DELETE + INSERT dans la même transaction pour éviter la perte de données en cas d’erreur
+    # DELETE ciblé sur les mois du fichier importé uniquement (pas l’historique complet)
     if delete_existing:
-        conn.execute(f"DELETE FROM {table} WHERE person_id = ?", (person_id,))
+        months = long["mois"].dropna().unique().tolist()
+        if months:
+            placeholders = ",".join(["?"] * len(months))
+            conn.execute(
+                f"DELETE FROM {table} WHERE person_id = ? AND mois IN ({placeholders})",
+                (person_id, *months),
+            )
 
     conn.executemany(
         f"INSERT INTO {table} (person_id, mois, categorie, montant, import_batch_id) VALUES (?, ?, ?, ?, ?)",
