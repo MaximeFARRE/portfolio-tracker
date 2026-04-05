@@ -1,220 +1,264 @@
-# Architecture — Suivie Patrimoine Desktop
+# Architecture — Patrimoine Desktop (état actuel)
 
 ## Stack technique
 
 | Couche | Technologie |
 |---|---|
-| UI | **PyQt6** (QMainWindow, QStackedWidget, QTabWidget) |
-| Graphiques | **Plotly** rendu via QWebEngineView |
-| Base de données | **SQLite local** (dev) ou **Turso/libsql** (prod, embedded replica) |
-| Données financières | **yfinance** (prix boursiers, taux FX) |
-| Data processing | **pandas**, **numpy** |
+| UI desktop | PyQt6 (`QMainWindow`, `QStackedWidget`, `QTabWidget`) |
+| Widgets graphiques | Plotly via `QWebEngineView` |
+| Données/Calcul | `pandas`, `numpy` |
+| Base de données | SQLite local (WAL) ou Turso/libsql (embedded replica) |
+| Marché/FX | `yfinance` |
 | Point d'entrée | `main.py` |
 
 ---
 
-## Arborescence
+## Vue d'ensemble runtime
 
-```
+1. `main.py` initialise logging, handler global d'exception et style Qt global.
+2. `core/db_connection.py` crée la connexion singleton :
+   - `init_db()` (schema + migrations),
+   - `seed_minimal()` (personnes/comptes de base),
+   - `ensure_credits_migrations()`.
+3. `qt_ui/main_window.py` instancie 4 pages racines :
+   - `FamillePage`,
+   - `PersonnesPage`,
+   - `ImportPage`,
+   - `SettingsPage`.
+4. Au démarrage, un `AutoRebuildThread` lance un rebuild snapshots hebdo par personne (`rebuild_snapshots_person_from_last`) sans bloquer l'UI.
+5. À la fermeture, backup automatique DB (`patrimoine.db` + variante Turso) dans `~/.patrimoine/backups`.
+
+---
+
+## Arborescence projet (code actif)
+
+```text
 Suivie patrimoine desktop/
-│
-├── main.py                          # Point d'entrée — QApplication, connexion DB, MainWindow
+├── main.py
+├── ARCHITECTURE.md
+├── readme.md
+├── requirements.txt
 │
 ├── core/
-│   ├── __init__.py
-│   └── db_connection.py             # Singleton connexion DB (get_connection / close_connection)
-│
-├── services/                        # Logique métier — aucun import Qt
-│   ├── db.py                        # init_db, seed_minimal, get_conn, SyncedLibsqlConn, migrations
-│   ├── repositories.py              # CRUD générique : people, accounts, assets, transactions...
-│   ├── calculations.py              # Calculs financiers : solde, cashflow, performance
-│   ├── snapshots.py                 # Rebuild snapshots weekly par personne
-│   ├── family_snapshots.py          # Rebuild snapshots weekly famille (agrégation)
-│   ├── family_dashboard.py          # KPIs famille, séries temporelles, leaderboards
-│   ├── bourse_analytics.py          # Analytics portefeuille boursier (PnL, TWR, allocation)
-│   ├── credits.py                   # Calculs crédits (amortissement, capital restant)
-│   ├── fx.py                        # Taux de change (fetch yfinance, cache weekly)
-│   ├── pricing.py                   # Valorisation positions (prix spot × quantité × FX)
-│   ├── market_history.py            # Historique prix weekly (asset_prices_weekly)
-│   ├── market_repository.py         # Persistance prix/FX weekly en DB
-│   ├── positions.py                 # Positions bourse (calcul depuis transactions)
-│   ├── portfolio.py                 # Vue globale portefeuille (toutes classes d'actifs)
-│   ├── isin_resolver.py             # Résolution ISIN → ticker yfinance
-│   ├── imports.py                   # Import générique d'opérations (CSV/manuel)
-│   ├── tr_import.py                 # Import spécifique Trading Republic (CSV)
-│   ├── diagnostics.py               # Diagnostic par personne (snapshots manquants)
-│   ├── diagnostics_global.py        # Diagnostic global (marché, personnes, tickers)
-│   ├── depenses_repository.py       # Dépenses : CRUD + agrégations
-│   ├── revenus_repository.py        # Revenus : CRUD + agrégations
-│   ├── entreprises_repository.py    # Entreprises : CRUD + valorisation
-│   ├── pe_cash_repository.py        # Cash Private Equity : CRUD
-│   ├── private_equity.py            # Private Equity : calculs (TRI, multiple)
-│   ├── private_equity_repository.py # Private Equity : CRUD
-│   ├── sankey.py                    # Construction du diagramme Sankey (flux)
-│   └── imports.py                   # Import d'opérations
-│
-├── qt_ui/                           # Interface PyQt6
-│   ├── __init__.py
-│   │
-│   ├── main_window.py               # MainWindow + NavSidebar (3 pages principales)
-│   │
-│   ├── pages/                       # Pages de premier niveau (chargées dans QStackedWidget)
-│   │   ├── __init__.py
-│   │   ├── famille_page.py          # Page Famille : 3 onglets (Dashboard, Diagnostic, Flux)
-│   │   ├── personnes_page.py        # Page Personnes : sélecteur + 8 onglets fixes + onglets comptes
-│   │   └── import_page.py           # Page Import : formulaire import CSV / manuel
-│   │
-│   ├── panels/                      # Panneaux réutilisables (un panneau = un onglet ou une section)
-│   │   ├── __init__.py
-│   │   ├── vue_ensemble_panel.py    # Vue d'ensemble personne (snapshot, allocation, évolution)
-│   │   ├── depenses_panel.py        # Dépenses par personne (table + graphiques)
-│   │   ├── revenus_panel.py         # Revenus par personne (table + graphiques)
-│   │   ├── credits_overview_panel.py# Crédits : tableau de bord + amortissement
-│   │   ├── private_equity_panel.py  # Private Equity : positions + TRI
-│   │   ├── entreprises_panel.py     # Entreprises détenues (valeur, % participation)
-│   │   ├── liquidites_panel.py      # Liquidités (cash banque + cash bourse + PE cash)
-│   │   ├── bourse_global_panel.py   # Synthèse bourse tous comptes confondus
-│   │   ├── ajout_compte_panel.py    # Formulaire ajout de compte (émet signal account_created)
-│   │   ├── compte_banque_panel.py   # Panneau compte BANQUE (opérations, solde)
-│   │   ├── compte_bourse_panel.py   # Panneau compte PEA/CTO/CRYPTO (positions, PnL)
-│   │   ├── compte_credit_panel.py   # Panneau compte CREDIT (tableau amortissement)
-│   │   ├── saisie_panel.py          # Formulaire saisie d'opération générique
-│   │   └── sankey_panel.py          # Diagramme Sankey des flux financiers
-│   │
-│   └── widgets/                     # Composants réutilisables bas-niveau
-│       ├── __init__.py
-│       ├── kpi_card.py              # KpiCard — carte métrique (titre, valeur, tone couleur)
-│       ├── metric_label.py          # MetricLabel — étiquette simple (label + valeur)
-│       ├── data_table.py            # DataTableWidget — tableau pandas → QTableWidget
-│       └── plotly_view.py           # PlotlyView — rendu figure Plotly via QWebEngineView
-│
-├── utils/
-│   ├── cache.py                     # Cache Streamlit (héritage, inutilisé en Qt)
-│   ├── format_monnaie.py            # money(val) → "1 234,56 €"
-│   ├── formatters.py                # Formateurs génériques (dates, pourcentages)
-│   ├── libelles.py                  # afficher_type_compte() — labels lisibles
-│   └── validators.py                # Validations (montants, symboles, dates)
-│
-├── models/
-│   └── enums.py                     # Enums : AccountType, TransactionType, etc.
+│   └── db_connection.py               # Singleton DB (init + seed + get/close)
 │
 ├── db/
-│   └── schema.sql                   # Schéma SQL complet (tables + index)
+│   ├── schema.sql                     # Schéma SQL de référence
+│   └── migrations/
+│       ├── 001_initial.sql            # Initialisation schema_version
+│       └── 002_add_indexes.sql        # Index composite transactions
 │
-├── ui/                              # Ancien code Streamlit (non utilisé en Qt, conservé pour référence)
-│   └── *.py
+├── qt_ui/
+│   ├── main_window.py                 # Fenêtre principale + sidebar + navigation
+│   ├── theme.py                       # Design tokens + styles + layouts Plotly
+│   ├── components/
+│   │   ├── animated_stack.py          # Transitions pages
+│   │   ├── animated_tab.py            # Onglets animés
+│   │   └── skeleton_handler.py        # Gestion placeholders de chargement
+│   ├── pages/
+│   │   ├── famille_page.py            # Dashboard famille + diagnostic + flux
+│   │   ├── personnes_page.py          # Sélecteur personne + onglets fixes + comptes dynamiques
+│   │   ├── import_page.py             # Imports CSV/Bankin/TR + crédit + historique/rollback
+│   │   └── settings_page.py           # Préférences, backup manuel, logs, infos système
+│   ├── panels/
+│   │   ├── vue_ensemble_panel.py
+│   │   ├── depenses_panel.py
+│   │   ├── revenus_panel.py
+│   │   ├── credits_overview_panel.py
+│   │   ├── private_equity_panel.py
+│   │   ├── entreprises_panel.py
+│   │   ├── immobilier_panel.py
+│   │   ├── liquidites_panel.py
+│   │   ├── bourse_global_panel.py
+│   │   ├── taux_epargne_panel.py
+│   │   ├── ajout_compte_panel.py
+│   │   ├── compte_banque_panel.py
+│   │   ├── compte_bourse_panel.py
+│   │   ├── compte_credit_panel.py
+│   │   ├── saisie_panel.py
+│   │   └── sankey_panel.py
+│   └── widgets/
+│       ├── kpi_card.py
+│       ├── metric_label.py
+│       ├── data_table.py
+│       ├── plotly_view.py
+│       └── loading_overlay.py
 │
-├── pages/                           # Ancien code Streamlit (non utilisé en Qt)
-│   └── *.py
+├── services/
+│   ├── db.py                          # Connexions SQLite/libsql, wrappers compat, init/migrations
+│   ├── repositories.py                # Repositories génériques (people/accounts/assets/tx/snapshots)
+│   ├── calculations.py                # Solde/cashflow basés flux
+│   ├── snapshots.py                   # Snapshots hebdo personne (rebuilds multi-stratégies)
+│   ├── family_snapshots.py            # Agrégation famille hebdo
+│   ├── family_dashboard.py            # KPIs/allocations/leaderboards famille
+│   ├── diagnostics.py                 # Diagnostic bourse as-of
+│   ├── diagnostics_global.py          # Data health global
+│   ├── market_history.py              # Sync weekly prix/FX as-of
+│   ├── market_repository.py           # Upsert/get weekly prices & FX
+│   ├── pricing.py                     # Prix live fallback
+│   ├── fx.py                          # Conversion devise et FX rates
+│   ├── positions.py                   # Positions bourse as-of
+│   ├── bourse_analytics.py            # Perf, CAGR, breakdowns, diagnostics tickers
+│   ├── portfolio.py                   # Valorisation portefeuille v1/v2 FX
+│   ├── depenses_repository.py
+│   ├── revenus_repository.py          # Inclut taux d'épargne mensuel
+│   ├── credits.py                     # Crédit + amortissement + coût réel
+│   ├── entreprises_repository.py
+│   ├── immobilier_repository.py
+│   ├── private_equity_repository.py
+│   ├── private_equity.py
+│   ├── pe_cash_repository.py
+│   ├── liquidites.py                  # Vue consolidée liquidités
+│   ├── sankey.py                      # Données du diagramme de flux
+│   ├── imports.py                     # Imports CSV larges + Bankin
+│   ├── tr_import.py                   # Flux Trade Republic/pytr + mapping transactions
+│   ├── import_history.py              # Batches d'import + rollback
+│   ├── isin_resolver.py               # Résolution ISIN -> ticker (+ cache DB)
+│   ├── vue_ensemble_metrics.py        # KPIs agrégés page Vue d'ensemble
+│   ├── projections.py                 # Scénarios de projection patrimoine
+│   └── pdf_export.py                  # Export PDF patrimoine
 │
-├── app.py                           # Ancien point d'entrée Streamlit (non utilisé)
-├── requirements.txt                 # Dépendances Python
-└── patrimoine.spec                  # Spec PyInstaller (packaging en .exe)
+├── utils/
+│   ├── format_monnaie.py
+│   ├── libelles.py
+│   ├── validators.py
+│   └── pagination.py
+│
+├── tests/
+│   ├── conftest.py
+│   ├── test_calculations.py
+│   ├── test_credits.py
+│   ├── test_imports.py
+│   └── test_snapshots.py
+│
+└── legacy_streamlit/                  # Archive (ancien socle Streamlit)
 ```
 
 ---
 
-## Schéma de base de données
+## Navigation UI
 
-```
-people                          accounts
-  id (PK)                         id (PK)
-  name                            person_id (FK → people)
-  tr_phone                        name
-                                  account_type  (BANQUE|PEA|CTO|CRYPTO|CREDIT|PE|IMMOBILIER)
-                                  institution
-                                  currency
-                                  created_at
+### Sidebar (MainWindow)
 
-assets                          transactions
-  id (PK)                         id (PK)
-  symbol                          account_id (FK → accounts)
-  name                            person_id (FK → people)
-  asset_type                      date
-  currency                        type  (BUY|SELL|DIVIDEND|DEPOT|RETRAIT|...)
-                                  asset_symbol
-                                  quantity
-                                  price
-                                  amount
-                                  fees
-                                  currency
-                                  category
-                                  note
+- `Famille`
+- `Personnes`
+- `Import`
+- `Paramètres`
+- Boutons dynamiques par personne (navigation directe vers `PersonnesPage`).
 
-── Snapshots weekly ──────────────────────────────────────────────────────────
-patrimoine_snapshots             patrimoine_snapshots_weekly
-  person_id (FK)                   person_id (FK)
-  snapshot_date                    week_date
-  patrimoine_net/brut              patrimoine_net/brut
-  liquidites_total                 liquidites_total
-  bourse_holdings                  bourse_holdings
-  pe_value / ent_value             pe_value / ent_value
-  credits_remaining                credits_remaining
+### Page Famille
 
-patrimoine_snapshots_family_weekly
-  family_id (DEFAULT 1)
-  week_date
-  (mêmes colonnes que weekly)
+3 onglets:
+- `Snapshots weekly`: KPIs, courbe net hebdo, allocations, leaderboard.
+- `Diagnostic`: statut freshness snapshots/marché/tickers + rebuild global.
+- `Flux (V1)`: synthèse flux basée transactions (solde, cashflow, dernières ops).
 
-── Marché ────────────────────────────────────────────────────────────────────
-asset_prices_weekly              fx_rates_weekly
-  symbol                           base_ccy / quote_ccy
-  week_date                        week_date
-  adj_close                        rate
-  currency                         source
-  source
-```
+### Page Personnes
 
----
+- Sélecteur de personne.
+- 9 onglets fixes:
+  - Vue d'ensemble,
+  - Dépenses,
+  - Revenus,
+  - Crédits,
+  - Private Equity,
+  - Entreprises,
+  - Immobilier,
+  - Liquidités,
+  - Bourse globale.
+- Zone comptes dynamiques par type de compte.
 
-## Flux de données
+Mapping des comptes dynamiques:
+- `BANQUE` -> `CompteBanquePanel`
+- `PEA`, `PEA_PME`, `CTO`, `CRYPTO`, `ASSURANCE_VIE`, `PER`, `PEE` -> `CompteBoursePanel`
+- `CREDIT` -> `CompteCreditPanel`
+- autres types -> `SaisiePanel` générique
 
-```
-main.py
-  └─ get_connection()          ← core/db_connection.py
-       └─ init_db() + seed_minimal()  ← services/db.py
-  └─ MainWindow(conn)          ← qt_ui/main_window.py
-       ├─ FamillePage(conn)    ← qt_ui/pages/famille_page.py
-       │     ├─ FamilleDashboardPanel  → services/family_dashboard.py
-       │     ├─ DataHealthPanel        → services/diagnostics_global.py
-       │     └─ FluxPanel             → services/repositories.py + calculations.py
-       │
-       ├─ PersonnesPage(conn)  ← qt_ui/pages/personnes_page.py
-       │     ├─ [8 onglets fixes] → panels/* → services/*
-       │     └─ [onglets comptes] → panels/compte_*_panel.py
-       │
-       └─ ImportPage(conn)     ← qt_ui/pages/import_page.py
-             └─ services/tr_import.py + imports.py
-```
+### Page Import
+
+Modes d'import:
+- Dépenses mensuelles (CSV large)
+- Revenus mensuels (CSV large)
+- Bankin (transactions)
+- Trade Republic (via `pytr`)
+- Crédit (fiche + génération amortissement)
+
+Inclut un panneau d'historique des imports (`import_batches`) avec rollback par batch.
+
+### Page Paramètres
+
+- Infos système (DB, logs, backups, versions)
+- Préférences (`QSettings`): devise par défaut, délai rebuild auto, retention backups
+- Backup manuel / export DB
+- Accès dossier logs
+- À propos
 
 ---
 
-## Conventions de code
+## Architecture base de données
 
-- **Pattern `set_person(person_id) + refresh()`** : tous les panels fixes de `PersonnesPage` implémentent ces deux méthodes. `set_person()` change l'ID courant, `refresh()` recharge les données.
-- **QThread pour les opérations longues** : les rebuilds snapshots sont délégués à des `QThread` dédiés (ex : `RebuildAllThread`) avec signaux `finished` / `error`.
-- **Connexion DB singleton** : une seule connexion partagée, gérée par `core/db_connection.py`. La couche service ne crée jamais de connexion, elle reçoit `conn` en paramètre.
-- **Services sans Qt** : les fichiers `services/` et `utils/` n'importent jamais PyQt6 — séparation stricte logique/UI.
-- **Dark theme global** : le stylesheet Qt est défini une seule fois dans `main.py` et s'applique en cascade.
-- **Widgets réutilisables** : `KpiCard`, `MetricLabel`, `DataTableWidget`, `PlotlyView` sont les briques de base de toutes les pages.
+Tables cœur:
+- `people`, `accounts`, `assets`, `transactions`
+- `depenses`, `revenus`
+- `credits`, `credit_amortissements`
+
+Tables marché:
+- `prices`, `fx_rates` (historique non-hebdo)
+- `asset_prices_weekly`, `fx_rates_weekly` (as-of hebdo)
+
+Tables snapshots:
+- `patrimoine_snapshots` (historique legacy)
+- `patrimoine_snapshots_weekly` (personne)
+- `patrimoine_snapshots_family_weekly` (famille)
+
+Tables classes d'actifs spécifiques:
+- `pe_projects`, `pe_transactions`, `pe_cash_transactions`
+- `enterprises`, `enterprise_shares`, `enterprise_history`
+- `immobiliers`, `immobilier_shares`, `immobilier_history`
+
+Tables techniques:
+- `import_batches` (traçabilité imports + rollback)
+- `schema_version` (versioning migrations SQL)
+- `isin_ticker_cache` (résolution ISIN)
+- `rebuild_watermarks` (rebuild backdated-aware)
+- `bank_subaccounts` (liens compte banque conteneur -> sous-comptes)
 
 ---
 
-## Pages de navigation
+## Flux de données clés
 
-| Page | Fichier | Contenu |
-|---|---|---|
-| **Famille** | `qt_ui/pages/famille_page.py` | Snapshots weekly famille, diagnostic data, flux globaux |
-| **Personnes** | `qt_ui/pages/personnes_page.py` | 8 onglets fixes (vue, dépenses, revenus, crédits, PE, entreprises, liquidités, bourse) + onglets par compte |
-| **Import** | `qt_ui/pages/import_page.py` | Import CSV Trading Republic + saisie manuelle |
+### 1) Calcul patrimoine hebdo personne
+
+`transactions + positions + prix weekly + fx weekly + crédits + PE + entreprises + immobilier`
+-> `services/snapshots.py`
+-> `patrimoine_snapshots_weekly`.
+
+### 2) Agrégation famille
+
+`patrimoine_snapshots_weekly (N personnes)`
+-> `services/family_snapshots.py`
+-> `patrimoine_snapshots_family_weekly`.
+
+### 3) Import traçable + annulation
+
+`ImportPage` -> `create_batch()` -> import service (`imports.py` / `tr_import.py`) -> `close_batch()`.
+En cas d'annulation: `rollback_batch()` supprime les lignes liées (`transactions`/`depenses`/`revenus`) puis passe le batch en `ROLLED_BACK`.
 
 ---
 
-## Types de comptes
+## Threading & perf
 
-| Type | Panel associé | Description |
-|---|---|---|
-| `BANQUE` | `compte_banque_panel.py` | Compte courant / épargne |
-| `PEA` / `CTO` / `CRYPTO` | `compte_bourse_panel.py` | Portefeuille titres |
-| `CREDIT` | `compte_credit_panel.py` | Prêt immobilier / conso |
-| `PE` / `IMMOBILIER` / autres | `saisie_panel.py` (générique) | Actifs illiquides |
+- Rebuilds lourds exécutés en `QThread` (`AutoRebuildThread`, `RebuildAllThread`, etc.).
+- Connexion DB dédiée dans les threads de fond (évite partage unsafe cross-thread).
+- SQLite en mode WAL + index composite `transactions(person_id, account_id, date)`.
+- Conversion/compat libsql via wrappers `DictRow`, `WrappedCursor`, `SyncedLibsqlConn`.
+
+---
+
+## Conventions de structure
+
+- `services/` contient la logique métier (aucune dépendance Qt).
+- `qt_ui/` contient l'assemblage interface + orchestration des actions utilisateur.
+- Pattern panel côté `PersonnesPage`: `set_person(person_id)` puis `refresh()`.
+- Le thème visuel est centralisé dans `qt_ui/theme.py`.
+- Les tests unitaires couvrent en priorité les calculs métier et la cohérence des imports/snapshots.

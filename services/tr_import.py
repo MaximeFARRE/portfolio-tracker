@@ -90,6 +90,30 @@ def _find_pytr_cmd() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Gestion des credentials pytr
+# ---------------------------------------------------------------------------
+
+def get_pytr_credentials_path() -> Path:
+    """Retourne le chemin du fichier de credentials pytr (~/.pytr/credentials)."""
+    return Path.home() / ".pytr" / "credentials"
+
+
+def pytr_has_credentials() -> bool:
+    """Retourne True si des credentials pytr existent localement."""
+    return get_pytr_credentials_path().exists()
+
+
+def clear_pytr_credentials() -> bool:
+    """Supprime le fichier de credentials pytr. Retourne True si supprimé."""
+    cred_path = get_pytr_credentials_path()
+    if cred_path.exists():
+        cred_path.unlink()
+        _logger.info("Credentials pytr supprimés : %s", cred_path)
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Mapping types Trade Republic → types internes
 # ---------------------------------------------------------------------------
 
@@ -643,10 +667,11 @@ def import_tr_transactions(
             existing = conn.execute(
                 """SELECT t.id FROM transactions t
                    LEFT JOIN assets a ON t.asset_id = a.id
+                   LEFT JOIN asset_meta am ON a.id = am.asset_id
                    WHERE t.date = ? AND t.account_id = ? AND t.type = ?
                      AND ABS(t.amount - ?) < 0.01
-                     AND a.isin = ?""",
-                (date_str, effective_account_id, tx_type, tx_amount, isin),
+                     AND (am.isin = ? OR a.symbol = ?)""",
+                (date_str, effective_account_id, tx_type, tx_amount, isin, isin),
             ).fetchone()
         else:
             existing = conn.execute(

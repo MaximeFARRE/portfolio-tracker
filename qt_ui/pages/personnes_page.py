@@ -77,6 +77,7 @@ class PersonnesPage(QWidget):
         self._current_person_id: Optional[int] = None
         self._people_df: pd.DataFrame = pd.DataFrame()
         self._account_panels: dict = {}
+        self._account_tab_index: dict[int, int] = {}
 
         self.setStyleSheet(f"background: {BG_PRIMARY};")
         layout = QVBoxLayout(self)
@@ -218,6 +219,49 @@ class PersonnesPage(QWidget):
                 self._person_combo.setCurrentIndex(i)
                 break
 
+    def select_person_by_id(self, person_id: int) -> bool:
+        """Sélectionne une personne via son id."""
+        pid = int(person_id)
+        for i in range(self._person_combo.count()):
+            data = self._person_combo.itemData(i)
+            if data is not None and int(data) == pid:
+                self._person_combo.setCurrentIndex(i)
+                return True
+        return False
+
+    def select_fixed_tab(self, index: int) -> bool:
+        """Sélectionne un onglet fixe et le rafraîchit."""
+        if 0 <= index < self._fixed_tabs.count():
+            self._fixed_tabs.setCurrentIndex(index)
+            self._on_fixed_tab_changed(index)
+            return True
+        return False
+
+    def select_bourse_tab(self) -> bool:
+        """Raccourci vers l'onglet fixe Bourse globale."""
+        return self.select_fixed_tab(8)
+
+    def select_account_by_id(self, account_id: int, person_id: Optional[int] = None) -> bool:
+        """
+        Sélectionne un compte dynamique par son id.
+        Optionnellement force d'abord la sélection de la personne.
+        """
+        if person_id is not None:
+            self.select_person_by_id(int(person_id))
+
+        aid = int(account_id)
+        idx = self._account_tab_index.get(aid)
+        if idx is None:
+            self._rebuild_account_tabs()
+            idx = self._account_tab_index.get(aid)
+
+        if idx is None:
+            return False
+
+        self._account_tabs.setCurrentIndex(idx)
+        self._on_account_tab_changed(idx)
+        return True
+
     # ── Onglets fixes ─────────────────────────────────────────────────────────
 
     def _on_fixed_tab_changed(self, index: int) -> None:
@@ -236,8 +280,10 @@ class PersonnesPage(QWidget):
     def _rebuild_account_tabs(self) -> None:
         """Reconstruit les onglets dynamiques selon les comptes de la personne."""
         # Fermer et vider les anciens
-        self._account_tabs.clear()
+        while self._account_tabs.count() > 0:
+            self._account_tabs.removeTab(0)
         self._account_panels.clear()
+        self._account_tab_index.clear()
 
         if self._current_person_id is None:
             return
@@ -268,8 +314,9 @@ class PersonnesPage(QWidget):
                 panel = _make_account_panel(
                     self._conn, self._current_person_id, account_id, account_type
                 )
-                self._account_tabs.addTab(panel, label)
+                tab_index = self._account_tabs.addTab(panel, label)
                 self._account_panels[account_id] = panel
+                self._account_tab_index[account_id] = tab_index
 
         except Exception as e:
             logger.error("Erreur reconstruction onglets comptes : %s", e)

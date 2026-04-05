@@ -384,6 +384,18 @@ class ImportPage(QScrollArea):
         )
         btn_update_pytr.setToolTip("pip install --upgrade pytr")
         btn_row_login.addWidget(btn_update_pytr)
+
+        btn_reset_creds = QPushButton("🗑️  Reset credentials")
+        btn_reset_creds.setStyleSheet(
+            "QPushButton { background: #2a1a1a; color: #f87171; border: 1px solid #7f1d1d; "
+            "border-radius: 6px; padding: 8px 12px; font-size: 12px; }"
+            "QPushButton:hover { background: #3a1a1a; }"
+        )
+        btn_reset_creds.setToolTip(
+            "Supprime ~/.pytr/credentials pour forcer un nouveau login complet.\n"
+            "Utile si la connexion échoue avec 'Expecting value' (credentials périmés)."
+        )
+        btn_row_login.addWidget(btn_reset_creds)
         btn_row_login.addStretch()
         s1v.addLayout(btn_row_login)
 
@@ -610,10 +622,20 @@ class ImportPage(QScrollArea):
                             # Aide contextuelle selon l'erreur
                             recent = log_edit.toPlainText().lower()
                             if "expecting value" in recent:
-                                _log("", "#ef4444")
-                                _log("💡 Cause probable : l'API Trade Republic n'a renvoyé aucune réponse JSON.", "#f59e0b")
-                                _log("👉 Solution : Cliquez sur '🔄 Mettre à jour pytr' pour installer la résolution WAF automatique.", "#f59e0b")
-                                _log("👉 Vérifiez également depuis votre navigateur si TR demande un Captcha manuel.", "#f59e0b")
+                                # Credentials périmés → suppression automatique + retry
+                                from services.tr_import import clear_pytr_credentials, pytr_has_credentials
+                                if pytr_has_credentials():
+                                    _log("", "#f59e0b")
+                                    _log("🔄 Credentials périmés détectés — suppression et nouvelle tentative automatique…", "#f59e0b")
+                                    clear_pytr_credentials()
+                                    btn_login.setEnabled(True)
+                                    w._pytr_proc = None
+                                    _do_login()
+                                    return
+                                else:
+                                    _log("", "#ef4444")
+                                    _log("💡 Cause : réponse vide de l'API Trade Republic (protection anti-bots).", "#f59e0b")
+                                    _log("👉 Vérifiez depuis votre navigateur si TR demande un Captcha manuel.", "#f59e0b")
                             elif "invalid" in recent or "wrong" in recent or "incorrect" in recent:
                                 _log("💡 PIN ou numéro de téléphone incorrect.", "#f59e0b")
                             elif "too many" in recent or "rate" in recent or "429" in recent:
@@ -1012,6 +1034,16 @@ class ImportPage(QScrollArea):
             t.done.connect(_on_upgrade)
             t.start()
 
+        # ── Reset credentials ─────────────────────────────────────────────────
+        def _do_reset_creds() -> None:
+            from services.tr_import import clear_pytr_credentials, get_pytr_credentials_path
+            cred_path = get_pytr_credentials_path()
+            if clear_pytr_credentials():
+                _log(f"✔ Credentials supprimés ({cred_path}).", "#22c55e")
+                _log("Relancez maintenant la connexion (Étape 1).", "#94a3b8")
+            else:
+                _log("ℹ️ Aucun credentials stocké localement.", "#94a3b8")
+
         # ── Connexions signaux ────────────────────────────────────────────────
         btn_save_phone.clicked.connect(_save_phone)
         btn_login.clicked.connect(_do_login)
@@ -1021,6 +1053,7 @@ class ImportPage(QScrollArea):
         btn_import_csv.clicked.connect(_pick_csv)
         btn_confirm.clicked.connect(_confirm_import)
         btn_update_pytr.clicked.connect(_do_update_pytr)
+        btn_reset_creds.clicked.connect(_do_reset_creds)
 
         # Refresh comptes quand personne change
         w._refresh_accounts = lambda person_id: self._refresh_tr_accounts(

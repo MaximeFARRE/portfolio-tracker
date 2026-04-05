@@ -383,7 +383,7 @@ class VueEnsemblePanel(QWidget):
             self._kpi_illiquides.set_content(
                 "Actifs illiquides",
                 _pct(m.get("actifs_illiquides")),
-                subtitle="(Entreprises + PE) / Patrimoine brut",
+                subtitle="(Entreprises + PE + Immobilier) / Patrimoine brut",
                 tone="neutral",
             )
 
@@ -480,24 +480,9 @@ class VueEnsemblePanel(QWidget):
 
     def _fill_perfs(self, m: dict) -> None:
         try:
-            df_snap = m.get("df_snap")
-            if df_snap is None or df_snap.empty:
-                return
-            net   = m["net"]
-            today = pd.Timestamp.today()
-
-            def _perf_pct(weeks_back: int):
-                target = today - pd.Timedelta(weeks=weeks_back)
-                past   = df_snap[df_snap["_dt"] <= target]
-                if past.empty:
-                    return None
-                val_past = float(past.iloc[-1]["patrimoine_net"])
-                if abs(val_past) < 1:
-                    return None
-                return (net - val_past) / abs(val_past) * 100
-
-            p3m  = _perf_pct(13)
-            p12m = _perf_pct(52)
+            p3m = m.get("perf_3m_pct")
+            p12m = m.get("perf_12m_pct")
+            cagr = m.get("cagr_pct")
 
             self._kpi_3m.set_content(
                 "Évolution 3 mois",
@@ -512,19 +497,15 @@ class VueEnsemblePanel(QWidget):
                 delta_positive=(p12m or 0) >= 0,
             )
 
-            if len(df_snap) >= 2:
-                val_first = float(df_snap.iloc[0]["patrimoine_net"])
-                n_years   = (today - df_snap.iloc[0]["_dt"]).days / 365.25
-                if abs(val_first) > 1 and n_years > 0.1 and net / val_first > 0:
-                    cagr = (( net / val_first) ** (1 / n_years) - 1) * 100
-                    self._kpi_cagr.set_content(
-                        "Rendement annualisé",
-                        _pct(cagr),
-                        delta=_pct(cagr),
-                        delta_positive=cagr >= 0,
-                    )
-                else:
-                    self._kpi_cagr.set_content("Rendement annualisé", "—")
+            if cagr is not None:
+                self._kpi_cagr.set_content(
+                    "Rendement annualisé",
+                    _pct(cagr),
+                    delta=_pct(cagr),
+                    delta_positive=cagr >= 0,
+                )
+            else:
+                self._kpi_cagr.set_content("Rendement annualisé", "—")
         except Exception as exc:
             logger.warning("_fill_perfs error: %s", exc)
 

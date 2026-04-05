@@ -71,9 +71,10 @@ def compute_taux_epargne_mensuel(
     conn,
     person_id: int,
     n_mois: int = 24,
+    end_month: str | None = None,
 ) -> pd.DataFrame:
     """
-    Calcule le taux d'épargne mensuel sur les N derniers mois avec données.
+    Calcule le taux d'épargne mensuel sur les N derniers mois calendaires.
 
     Retourne un DataFrame avec les colonnes :
         mois          (str  'YYYY-MM-01')
@@ -81,6 +82,11 @@ def compute_taux_epargne_mensuel(
         depenses      (float)
         epargne       (float = revenus - depenses)
         taux_epargne  (float%, ou None si revenus == 0)
+
+    Notes:
+    - Les mois sans saisie sont conservés (revenus=0, depenses=0).
+    - `end_month` ancre la fenêtre sur un mois précis (YYYY-MM-01) ;
+      sinon on ancre sur le mois courant.
     """
     df_rev = revenus_par_mois(conn, person_id)
     df_dep = pd.read_sql_query(
@@ -98,19 +104,51 @@ def compute_taux_epargne_mensuel(
     df_rev = df_rev.rename(columns={"total": "revenus"})
     df_dep = df_dep.rename(columns={"total": "depenses"})
 
-    # Outer join : garde les mois avec revenus OU dépenses
-    # On remplit colonne par colonne pour éviter le FutureWarning de pandas sur le
-    # downcasting silencieux de fillna() appliqué à un DataFrame entier (objet dtype).
+    # Outer join revenus/dépenses, puis normalisation mensuelle.
     df = pd.merge(df_rev, df_dep, on="mois", how="outer")
-    df["revenus"] = df["revenus"].fillna(0.0)
-    df["depenses"] = df["depenses"].fillna(0.0)
-    df = df.infer_objects(copy=False)
+    df["revenus"] = pd.to_numeric(df["revenus"], errors="coerce")
+    df["depenses"] = pd.to_numeric(df["depenses"], errors="coerce")
+    df["revenus"] = df["revenus"].fillna(0.0).infer_objects(copy=False)
+    df["depenses"] = df["depenses"].fillna(0.0).infer_objects(copy=False)
     df = df[df["mois"].notna()].copy()
     df["mois"] = df["mois"].astype(str)
-    df = df.sort_values("mois")
+    df["mois_dt"] = pd.to_datetime(df["mois"], errors="coerce")
+    df = df.dropna(subset=["mois_dt"])
+    if df.empty:
+        df = pd.DataFrame(columns=["mois_dt", "revenus", "depenses"])
+    else:
+        df["mois_dt"] = df["mois_dt"].dt.to_period("M").dt.to_timestamp()
+        # Sécurité si doublons de mois.
+        df = (
+            df.groupby("mois_dt", as_index=False)[["revenus", "depenses"]]
+            .sum()
+            .sort_values("mois_dt")
+        )
 
-    # Uniquement les mois avec au moins une donnée, derniers N seulement
-    df = df[(df["revenus"] > 0) | (df["depenses"] > 0)].tail(n_mois)
+    if end_month:
+        end_ts = pd.to_datetime(end_month, errors="coerce")
+        if pd.isna(end_ts):
+            end_ts = pd.Timestamp.today()
+    else:
+        end_ts = pd.Timestamp.today()
+    end_ts = pd.Timestamp(end_ts).to_period("M").to_timestamp()
+
+    periods = max(int(n_mois), 1)
+    full_idx = pd.date_range(end=end_ts, periods=periods, freq="MS")
+
+    if df.empty:
+        df = pd.DataFrame(index=full_idx, data={"revenus": 0.0, "depenses": 0.0})
+        df.index.name = "mois_dt"
+        df = df.reset_index()
+    else:
+        df = (
+            df.set_index("mois_dt")
+            .reindex(full_idx, fill_value=0.0)
+            .rename_axis("mois_dt")
+            .reset_index()
+        )
+
+    df["mois"] = df["mois_dt"].dt.strftime("%Y-%m-01")
 
     df["epargne"] = df["revenus"] - df["depenses"]
     df["taux_epargne"] = df.apply(
@@ -118,4 +156,4 @@ def compute_taux_epargne_mensuel(
         axis=1,
     )
 
-    return df.reset_index(drop=True)
+    return df[["mois", "revenus", "depenses", "epargne", "taux_epargne"]].reset_index(drop=True)

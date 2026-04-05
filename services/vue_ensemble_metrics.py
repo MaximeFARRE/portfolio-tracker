@@ -32,11 +32,14 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     """
     Calcule et retourne toutes les métriques du dashboard patrimoine.
 
-    Clés retournées (toutes peuvent être None si données insuffisantes) :
+    Clés retournées (les KPI peuvent être None si données insuffisantes) :
         Snapshot courant :
-            net, brut, liq, bourse, credits, pe_value, ent_value, immobilier_value, week_date
+            net, brut, liq, bourse, credits, pe_value, ent_value, immo_value,
+            week_date, asof_date
         Historiques :
             net_13w, net_52w
+        Performance :
+            perf_3m_pct, perf_12m_pct, cagr_pct
         Santé patrimoniale :
             taux_endettement, part_liquide, exposition_marches, actifs_illiquides
         Progression réelle :
@@ -63,25 +66,42 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     if df_snap.empty:
         return m
 
+    # Valeurs courantes par défaut (avant parsing date, pour robustesse).
     last = df_snap.iloc[-1]
-    m["net"]       = _sf(last.get("patrimoine_net"))
-    m["brut"]      = _sf(last.get("patrimoine_brut"))
-    m["liq"]       = _sf(last.get("liquidites_total"))
-    m["bourse"]    = _sf(last.get("bourse_holdings"))
-    m["credits"]   = _sf(last.get("credits_remaining"))
-    m["pe_value"]  = _sf(last.get("pe_value"))
+    m["net"] = _sf(last.get("patrimoine_net"))
+    m["brut"] = _sf(last.get("patrimoine_brut"))
+    m["liq"] = _sf(last.get("liquidites_total"))
+    m["bourse"] = _sf(last.get("bourse_holdings"))
+    m["credits"] = _sf(last.get("credits_remaining"))
+    m["pe_value"] = _sf(last.get("pe_value"))
     m["ent_value"] = _sf(last.get("ent_value"))
     m["immo_value"] = _sf(last.get("immobilier_value"))
     m["week_date"] = str(last.get("week_date", "—"))
+    m["asof_date"] = m["week_date"]
 
     # ── 2. Patrimoine net historique ──────────────────────────────────────
+    anchor_dt = None
     try:
         df_snap["_dt"] = pd.to_datetime(df_snap["week_date"], errors="coerce")
         df_snap = df_snap.dropna(subset=["_dt"]).sort_values("_dt")
-        today = pd.Timestamp.today()
+        if df_snap.empty:
+            return m
+
+        last = df_snap.iloc[-1]
+        anchor_dt = pd.Timestamp(last["_dt"])
+        m["net"] = _sf(last.get("patrimoine_net"))
+        m["brut"] = _sf(last.get("patrimoine_brut"))
+        m["liq"] = _sf(last.get("liquidites_total"))
+        m["bourse"] = _sf(last.get("bourse_holdings"))
+        m["credits"] = _sf(last.get("credits_remaining"))
+        m["pe_value"] = _sf(last.get("pe_value"))
+        m["ent_value"] = _sf(last.get("ent_value"))
+        m["immo_value"] = _sf(last.get("immobilier_value"))
+        m["week_date"] = str(last.get("week_date", "—"))
+        m["asof_date"] = anchor_dt.date().isoformat()
 
         def _hist_net(weeks_back: int) -> float | None:
-            target = today - pd.Timedelta(weeks=weeks_back)
+            target = anchor_dt - pd.Timedelta(weeks=weeks_back)
             past = df_snap[df_snap["_dt"] <= target]
             return _opt(past.iloc[-1]["patrimoine_net"]) if not past.empty else None
 
@@ -96,7 +116,12 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     # ── 3. Cashflow mensuel (12 mois) ─────────────────────────────────────
     try:
         from services.revenus_repository import compute_taux_epargne_mensuel
-        df_cf = compute_taux_epargne_mensuel(conn, person_id, n_mois=24)
+        df_cf = compute_taux_epargne_mensuel(
+            conn,
+            person_id,
+            n_mois=24,
+            end_month=(anchor_dt.date().isoformat() if anchor_dt is not None else None),
+        )
         m["df_cashflow"] = df_cf if (df_cf is not None and not df_cf.empty) else pd.DataFrame()
     except Exception as exc:
         logger.warning("get_vue_ensemble_metrics: cashflow échoué : %s", exc)
@@ -108,8 +133,10 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
         m["epargne_12m"]       = float(last12["epargne"].sum())
         m["depenses_moy_12m"]  = float(last12["depenses"].mean())
         m["capacite_epargne_avg"] = float(last12["epargne"].mean())
-        valid_rates = last12["taux_epargne"].dropna()
-        m["taux_epargne_avg"]  = float(valid_rates.mean()) if not valid_rates.empty else None
+        rev_sum_12m = float(last12["revenus"].sum())
+        m["taux_epargne_avg"] = (
+            (m["epargne_12m"] / rev_sum_12m * 100) if rev_sum_12m > 0 else None
+        )
     else:
         m["epargne_12m"]          = None
         m["depenses_moy_12m"]     = None
@@ -135,6 +162,32 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     net_52w = m.get("net_52w")
     m["gain_3m"]  = (net - net_13w) if (net is not None and net_13w is not None) else None
     m["gain_12m"] = (net - net_52w) if (net is not None and net_52w is not None) else None
+    m["perf_3m_pct"] = (
+        ((net - net_13w) / abs(net_13w) * 100)
+        if (net is not None and net_13w is not None and abs(net_13w) >= 1)
+        else None
+    )
+    m["perf_12m_pct"] = (
+        ((net - net_52w) / abs(net_52w) * 100)
+        if (net is not None and net_52w is not None and abs(net_52w) >= 1)
+        else None
+    )
+
+    m["cagr_pct"] = None
+    try:
+        if anchor_dt is not None and len(df_snap) >= 2 and net is not None:
+            val_first = _opt(df_snap.iloc[0]["patrimoine_net"])
+            first_dt = pd.Timestamp(df_snap.iloc[0]["_dt"])
+            n_years = (anchor_dt - first_dt).days / 365.25
+            if (
+                val_first is not None
+                and abs(val_first) > 1
+                and n_years > 0.1
+                and (net / val_first) > 0
+            ):
+                m["cagr_pct"] = ((net / val_first) ** (1 / n_years) - 1) * 100
+    except Exception as exc:
+        logger.warning("get_vue_ensemble_metrics: cagr échoué : %s", exc)
 
     gain_12m    = m.get("gain_12m")
     epargne_12m = m.get("epargne_12m")

@@ -156,7 +156,7 @@ def sync_fx_weekly(conn, pairs: list[tuple[str, str]], start_date: str, end_date
             (direct_sym, weeks[0], weeks[-1]),
         ).fetchall()
 
-if rows:
+        if rows:
             # Paire directe disponible → stocker (base, quote, rate)
             for r in rows:
                 mrepo.upsert_fx_rate_weekly(conn, base, quote, r["week_date"], float(r["adj_close"]))

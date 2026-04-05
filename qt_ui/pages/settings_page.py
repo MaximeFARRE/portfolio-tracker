@@ -11,8 +11,8 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGroupBox, QFormLayout, QSpinBox, QComboBox, QLineEdit,
-    QFileDialog, QMessageBox, QScrollArea, QFrame, QSizePolicy
+    QGroupBox, QFormLayout, QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit,
+    QFileDialog, QMessageBox, QScrollArea, QFrame, QSizePolicy, QTabWidget
 )
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtGui import QFont, QClipboard
@@ -25,7 +25,8 @@ from qt_ui.theme import (
     ACCENT_BLUE, COLOR_SUCCESS, COLOR_ERROR, COLOR_WARNING,
     STYLE_BTN_PRIMARY, STYLE_BTN_PRIMARY_BORDERED, STYLE_BTN_SUCCESS,
     STYLE_GROUP, STYLE_INPUT_FOCUS, STYLE_TITLE_LARGE, STYLE_SECTION,
-    STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR,
+    STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR, STYLE_STATUS_WARNING,
+    get_current_theme,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,7 +119,11 @@ class SettingsPage(QWidget):
         # ── Section 4 : Logs ──────────────────────────────────────────────────
         layout.addWidget(self._build_logs())
 
-        # ── Section 5 : À propos ──────────────────────────────────────────────
+        # ── Section 5 : Presets de simulation ────────────────────────────────
+        self._sim_presets_box = self._build_simulation_presets()
+        layout.addWidget(self._sim_presets_box)
+
+        # ── Section 6 : À propos ──────────────────────────────────────────────
         layout.addWidget(self._build_about())
 
         layout.addStretch()
@@ -197,6 +202,19 @@ class SettingsPage(QWidget):
         self._combo_devise.setCurrentText(self._settings.value("devise_defaut", "EUR"))
         self._combo_devise.setMaximumWidth(120)
         form.addRow(lbl_dev, self._combo_devise)
+
+        # Thème UI (appliqué au prochain démarrage)
+        lbl_theme = QLabel("Thème de l'interface :")
+        lbl_theme.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        self._combo_theme = QComboBox()
+        self._combo_theme.setStyleSheet(STYLE_INPUT_FOCUS)
+        self._combo_theme.addItem("Sombre", "dark")
+        self._combo_theme.addItem("Clair", "light")
+        current_theme = str(self._settings.value("ui_theme", get_current_theme())).strip().lower()
+        idx_theme = self._combo_theme.findData("light" if current_theme == "light" else "dark")
+        self._combo_theme.setCurrentIndex(idx_theme if idx_theme >= 0 else 0)
+        self._combo_theme.setMaximumWidth(160)
+        form.addRow(lbl_theme, self._combo_theme)
 
         # Délai rebuild auto (ms)
         lbl_delay = QLabel("Délai rebuild auto (ms) :")
@@ -313,6 +331,155 @@ class SettingsPage(QWidget):
 
         return box
 
+    def _build_simulation_presets(self) -> QGroupBox:
+        """Section de configuration des presets de simulation par scope."""
+        from services.simulation_presets_repository import (
+            PRESET_DEFAULTS, PRESET_KEYS, get_all_presets,
+            initialize_default_presets, update_preset,
+        )
+        from services.goals_projection_repository import list_people_for_scope
+
+        box = QGroupBox("📊  Presets de simulation")
+        box.setStyleSheet(_card_style())
+        v = QVBoxLayout(box)
+        v.setSpacing(12)
+
+        # ── Sélecteur de scope ────────────────────────────────────────────────
+        scope_row = QHBoxLayout()
+        lbl_scope = QLabel("Scope :")
+        lbl_scope.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        scope_combo = QComboBox()
+        scope_combo.setStyleSheet(STYLE_INPUT_FOCUS)
+        scope_combo.setMaximumWidth(200)
+        scope_combo.addItem("Famille", ("family", None))
+        try:
+            people_df = list_people_for_scope(self._conn)
+            if people_df is not None and not people_df.empty:
+                for _, pr in people_df.iterrows():
+                    scope_combo.addItem(str(pr["name"]), ("person", int(pr["id"])))
+        except Exception:
+            pass
+        scope_row.addWidget(lbl_scope)
+        scope_row.addWidget(scope_combo)
+        scope_row.addStretch()
+        v.addLayout(scope_row)
+
+        # ── Onglets par preset ────────────────────────────────────────────────
+        tabs = QTabWidget()
+        tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border: 1px solid {BORDER_SUBTLE}; border-radius: 6px; }}
+            QTabBar::tab {{
+                background: {BG_CARD}; color: {TEXT_SECONDARY};
+                padding: 6px 16px; border: 1px solid {BORDER_SUBTLE};
+                border-bottom: none; border-radius: 4px 4px 0 0;
+            }}
+            QTabBar::tab:selected {{ background: {BG_ACTIVE}; color: {TEXT_PRIMARY}; font-weight: bold; }}
+        """)
+
+        _PRESET_LABELS = {"pessimiste": "Pessimiste", "realiste": "Réaliste", "optimiste": "Optimiste"}
+
+        _FIELDS = [
+            ("return_liquidites_pct",  "Liquidités / épargne (%)",       -20.0, 50.0, " %"),
+            ("return_bourse_pct",      "Bourse (ETF, actions) (%)",       -20.0, 50.0, " %"),
+            ("return_immobilier_pct",  "Immobilier locatif (%)",          -20.0, 50.0, " %"),
+            ("return_pe_pct",          "Private Equity (%)",              -20.0, 50.0, " %"),
+            ("return_entreprises_pct", "Entreprises (%)",                 -20.0, 50.0, " %"),
+            ("inflation_pct",          "Inflation (%)",                    -5.0, 20.0, " %"),
+            ("income_growth_pct",      "Croissance revenus (%)",          -20.0, 20.0, " %"),
+            ("expense_growth_pct",     "Croissance dépenses (%)",         -20.0, 20.0, " %"),
+            ("fire_multiple",          "Multiple FIRE",                     1.0, 200.0, ""),
+            ("savings_factor",         "Facteur épargne (×)",               0.0,   5.0, " ×"),
+        ]
+
+        # {preset_key: {field: QDoubleSpinBox}}
+        preset_spinboxes: dict[str, dict] = {}
+        preset_status_labels: dict[str, QLabel] = {}
+
+        for preset_key in PRESET_KEYS:
+            tab_widget = QWidget()
+            tab_widget.setStyleSheet(f"background: {BG_CARD};")
+            tab_layout = QVBoxLayout(tab_widget)
+            tab_layout.setContentsMargins(12, 12, 12, 12)
+            tab_layout.setSpacing(8)
+
+            form = QFormLayout()
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+            form.setSpacing(8)
+
+            spins: dict[str, QDoubleSpinBox] = {}
+            for field, label, lo, hi, suffix in _FIELDS:
+                sp = QDoubleSpinBox()
+                sp.setRange(lo, hi)
+                sp.setDecimals(2)
+                if suffix:
+                    sp.setSuffix(suffix)
+                sp.setStyleSheet(STYLE_INPUT_FOCUS)
+                sp.setValue(float(PRESET_DEFAULTS[preset_key].get(field, 0.0)))
+                form.addRow(label + " :", sp)
+                spins[field] = sp
+
+            preset_spinboxes[preset_key] = spins
+            tab_layout.addLayout(form)
+
+            status_lbl = QLabel("")
+            status_lbl.setStyleSheet(STYLE_STATUS_SUCCESS)
+            preset_status_labels[preset_key] = status_lbl
+
+            def _make_save_fn(pk):
+                def _save():
+                    scope_data = scope_combo.currentData()
+                    if not scope_data:
+                        return
+                    s_type, s_id = scope_data
+                    params = {f: preset_spinboxes[pk][f].value() for f, *_ in _FIELDS}
+                    try:
+                        update_preset(self._conn, pk, s_type, s_id, params)
+                        preset_status_labels[pk].setStyleSheet(STYLE_STATUS_SUCCESS)
+                        preset_status_labels[pk].setText("Sauvegardé")
+                    except Exception as exc:
+                        preset_status_labels[pk].setStyleSheet(STYLE_STATUS_ERROR)
+                        preset_status_labels[pk].setText(f"Erreur : {exc}")
+                return _save
+
+            btn_save = QPushButton(f"Sauvegarder « {_PRESET_LABELS[preset_key]} »")
+            btn_save.setStyleSheet(STYLE_BTN_PRIMARY_BORDERED)
+            btn_save.clicked.connect(_make_save_fn(preset_key))
+
+            bottom_row = QHBoxLayout()
+            bottom_row.addWidget(btn_save)
+            bottom_row.addWidget(status_lbl)
+            bottom_row.addStretch()
+            tab_layout.addLayout(bottom_row)
+
+            tabs.addTab(tab_widget, _PRESET_LABELS[preset_key])
+
+        v.addWidget(tabs)
+
+        def _load_presets_for_scope():
+            scope_data = scope_combo.currentData()
+            if not scope_data:
+                return
+            s_type, s_id = scope_data
+            try:
+                initialize_default_presets(self._conn, s_type, s_id)
+                all_p = get_all_presets(self._conn, s_type, s_id)
+            except Exception:
+                all_p = {}
+            for pk in PRESET_KEYS:
+                p = all_p.get(pk, PRESET_DEFAULTS[pk])
+                for field, *_ in _FIELDS:
+                    if field in preset_spinboxes[pk]:
+                        preset_spinboxes[pk][field].setValue(
+                            float(p.get(field, PRESET_DEFAULTS[pk].get(field, 0.0)))
+                        )
+                if pk in preset_status_labels:
+                    preset_status_labels[pk].setText("")
+
+        scope_combo.currentIndexChanged.connect(lambda _: _load_presets_for_scope())
+        _load_presets_for_scope()
+
+        return box
+
     def _build_about(self) -> QGroupBox:
         box = QGroupBox("🧾  À propos")
         box.setStyleSheet(_card_style())
@@ -345,15 +512,24 @@ class SettingsPage(QWidget):
     # ── Slots ──────────────────────────────────────────────────────────────────
 
     def _save_preferences(self) -> None:
+        previous_theme = str(self._settings.value("ui_theme", get_current_theme())).strip().lower()
+        new_theme = str(self._combo_theme.currentData() or "dark").strip().lower()
+
         self._settings.setValue("devise_defaut",   self._combo_devise.currentText())
+        self._settings.setValue("ui_theme", new_theme)
         self._settings.setValue("rebuild_delay_ms", self._spin_delay.value())
         self._settings.setValue("backup_max_count", self._spin_nbackup.value())
         self._settings.sync()
-        self._lbl_save_status.setStyleSheet(STYLE_STATUS_SUCCESS)
-        self._lbl_save_status.setText("✅ Enregistré")
+        if previous_theme != new_theme:
+            self._lbl_save_status.setStyleSheet(STYLE_STATUS_WARNING)
+            self._lbl_save_status.setText("✅ Enregistré — redémarre l'app pour appliquer le thème")
+        else:
+            self._lbl_save_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+            self._lbl_save_status.setText("✅ Enregistré")
         logger.info(
-            "Préférences enregistrées: devise=%s, rebuild_delay=%dms, backup_max=%d",
+            "Préférences enregistrées: devise=%s, theme=%s, rebuild_delay=%dms, backup_max=%d",
             self._combo_devise.currentText(),
+            new_theme,
             self._spin_delay.value(),
             self._spin_nbackup.value(),
         )
@@ -439,6 +615,12 @@ class SettingsPage(QWidget):
     def get_rebuild_delay_ms() -> int:
         s = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
         return int(s.value("rebuild_delay_ms", 500))
+
+    @staticmethod
+    def get_ui_theme() -> str:
+        s = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
+        val = str(s.value("ui_theme", get_current_theme())).strip().lower()
+        return "light" if val == "light" else "dark"
 
     @staticmethod
     def get_backup_max_count() -> int:
