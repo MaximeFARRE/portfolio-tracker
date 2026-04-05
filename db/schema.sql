@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS credits (
   updated_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE,
   FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+  FOREIGN KEY(payer_account_id) REFERENCES accounts(id) ON DELETE SET NULL,
   UNIQUE(account_id)                    -- 1 fiche crédit par sous-compte crédit
 );
 
