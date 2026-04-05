@@ -96,8 +96,6 @@ def compute_cagr(series: pd.Series, dates: pd.Series) -> float:
 
     d0 = pd.to_datetime(dates.iloc[0])
     d1 = pd.to_datetime(dates.iloc[-1])
-    # FIX: on vérifie raw_days AVANT le calcul de years (le guard "if years <= 0" après
-    # max(...,1) était du code mort — years ne pouvait jamais être <= 0)
     raw_days = (d1 - d0).days
     if raw_days <= 0:
         return 0.0
