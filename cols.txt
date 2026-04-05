@@ -1,0 +1,10 @@
+Date
+Type
+Valeur
+Note
+ISIN
+Parts
+Frais
+Impôts / Taxes
+ISIN2
+Parts2

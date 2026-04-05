@@ -85,6 +85,11 @@ def update_asset_currency(conn: sqlite3.Connection, asset_id: int, currency: str
     conn.commit()
 
 
+def update_asset_type(conn: sqlite3.Connection, asset_id: int, asset_type: str) -> None:
+    conn.execute("UPDATE assets SET asset_type = ? WHERE id = ?;", (asset_type, asset_id))
+    conn.commit()
+
+
 def get_latest_fx_rate(conn: sqlite3.Connection, base_ccy: str, quote_ccy: str):
     """
     Retourne le dernier taux connu base->quote (ex: USD->EUR).

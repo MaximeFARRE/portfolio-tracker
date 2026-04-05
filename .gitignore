@@ -1,6 +1,38 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+
+# Base de données
 patrimoine.db
+patrimoine_turso.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Données sensibles
+*.csv
+trade_republic_raw.csv
+
+# Sauvegardes et logs
 backups/
+logs/
+
+# Streamlit (legacy)
 .streamlit/
+
+# IDE
+.vscode/
+.idea/
+*.sw[po]
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+*.spec.bak

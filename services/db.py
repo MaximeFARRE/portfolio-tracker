@@ -1,12 +1,20 @@
 import os
 import sqlite3
-import libsql
-import streamlit as st
+import logging
 from pathlib import Path
 
-DB_PATH = Path("patrimoine.db")
-SCHEMA_PATH = Path("db") / "schema.sql"
-MIGRATIONS_PATH = Path("db") / "migrations"
+try:
+    import libsql
+except ImportError:
+    libsql = None
+
+_logger = logging.getLogger(__name__)
+
+# ── Chemins absolus (résistants aux changements de CWD) ──────────────────
+_ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = _ROOT / "patrimoine.db"
+SCHEMA_PATH = _ROOT / "db" / "schema.sql"
+MIGRATIONS_PATH = _ROOT / "db" / "migrations"
 
 # ──────────────────────────────────────────────────────────────
 # Compat libsql ↔ sqlite3 : DictRow + WrappedCursor
@@ -133,49 +141,36 @@ class SyncedLibsqlConn:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        # si pas d'erreur, on commit+sync
+        # Si pas d'erreur, on commit+sync
         if exc_type is None:
             try:
                 self.commit()
             except Exception:
                 pass
-        # on ferme toujours
-        try:
-            self.close()
-        except Exception:
-            pass
-        # False = ne pas masquer les exceptions
+        # ⚠️ On ne ferme PAS ici : singleton partagé.
+        # La fermeture se fait via close_connection() à l'arrêt de l'app.
         return False
 
 
 
 
 def get_conn():
-    # 1) Lire les secrets Streamlit (Cloud) ou env vars (local)
-    url = None
-    token = None
-
-    # Streamlit Cloud: st.secrets
-    try:
-        url = st.secrets.get("TURSO_DATABASE_URL")
-        token = st.secrets.get("TURSO_AUTH_TOKEN")
-    except Exception:
-        url = None
-        token = None
-
-    # fallback env vars (utile en local)
-    url = url or os.getenv("TURSO_DATABASE_URL")
-    token = token or os.getenv("TURSO_AUTH_TOKEN")
+    # Lire les credentials depuis les variables d'environnement
+    url = os.getenv("TURSO_DATABASE_URL")
+    token = os.getenv("TURSO_AUTH_TOKEN")
 
     # 2) Si pas de secrets => fallback sqlite local (utile pour dev)
     if not url or not token:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA cache_size = -64000;")  # 64 MB de cache
+        conn.execute("PRAGMA synchronous = NORMAL;")  # Bon compromis perf/sécurité
+        _logger.info("Connexion SQLite locale : %s (WAL activé)", DB_PATH)
         return conn
 
     # 3) Embedded replica: fichier local + sync_url vers Turso
-    # NB: le fichier local peut être perdu sur Streamlit, mais sync() le rehydrate
     replica_path = str(DB_PATH).replace(".db", "_turso.db")
     conn = libsql.connect(replica_path, sync_url=url, auth_token=token)
 
@@ -278,6 +273,8 @@ def init_db() -> None:
 
         ensure_snapshots_table(conn)
         ensure_weekly_tables(conn)
+        ensure_people_columns(conn)
+        ensure_import_batches_table(conn)
         run_migrations(conn)
 
         conn.commit()
@@ -303,6 +300,7 @@ def ensure_snapshots_table(conn: sqlite3.Connection) -> None:
         bourse_holdings REAL DEFAULT 0,
         pe_value REAL DEFAULT 0,
         ent_value REAL DEFAULT 0,
+        immobilier_value REAL DEFAULT 0,
         credits_remaining REAL DEFAULT 0,
 
         notes TEXT,
@@ -330,8 +328,8 @@ def seed_minimal() -> None:
     Seed V1 :
     - 4 personnes : Papa, Maman, Maxime, Valentin
     - 1 compte BANQUE "Banque principale" par personne (modifiable/supprimable ensuite)
+    ⚠️ Ne pas appeler init_db() ici — c'est fait par get_connection() avant.
     """
-    init_db()
     with get_conn() as conn:
         # People
         row = conn.execute("SELECT COUNT(*) AS c FROM people;").fetchone()
@@ -356,6 +354,54 @@ def seed_minimal() -> None:
                     (person_id, "Banque principale", "BANQUE", None, "EUR"),
                 )
             conn.commit()
+
+def ensure_people_columns(conn) -> None:
+    """Migrations additionnelles sur la table people."""
+    try:
+        conn.execute("ALTER TABLE people ADD COLUMN tr_phone TEXT;")
+        conn.commit()
+    except Exception:
+        pass  # colonne déjà présente
+
+
+def ensure_import_batches_table(conn) -> None:
+    """Crée la table import_batches et ajoute import_batch_id aux tables de données (AM-19)."""
+    # Table des batches d'import
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS import_batches (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          import_type  TEXT NOT NULL,
+          person_id    INTEGER,
+          person_name  TEXT,
+          account_id   INTEGER,
+          account_name TEXT,
+          filename     TEXT,
+          imported_at  TEXT DEFAULT (datetime('now')),
+          nb_rows      INTEGER DEFAULT 0,
+          status       TEXT NOT NULL DEFAULT 'ACTIVE',
+          FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE SET NULL
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_import_batches_person "
+        "ON import_batches(person_id, imported_at);"
+    )
+
+    # Colonne import_batch_id sur transactions, depenses, revenus
+    for table in ("transactions", "depenses", "revenus"):
+        try:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN import_batch_id INTEGER "
+                f"REFERENCES import_batches(id) ON DELETE SET NULL;"
+            )
+        except Exception:
+            pass  # colonne déjà présente
+
+    try:
+        conn.commit()
+    except Exception:
+        pass
+
 
 def ensure_weekly_tables(conn):
     conn.execute("""
@@ -405,6 +451,7 @@ def ensure_weekly_tables(conn):
       bourse_holdings REAL DEFAULT 0,
       pe_value REAL DEFAULT 0,
       ent_value REAL DEFAULT 0,
+      immobilier_value REAL DEFAULT 0,
       credits_remaining REAL DEFAULT 0,
 
       notes TEXT,
@@ -414,7 +461,7 @@ def ensure_weekly_tables(conn):
     );
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_psw_person_week ON patrimoine_snapshots_weekly(person_id, week_date);")
-    
+
     conn.execute("""
     CREATE TABLE IF NOT EXISTS patrimoine_snapshots_family_weekly (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -429,6 +476,7 @@ def ensure_weekly_tables(conn):
     bourse_holdings REAL DEFAULT 0,
     pe_value REAL DEFAULT 0,
     ent_value REAL DEFAULT 0,
+    immobilier_value REAL DEFAULT 0,
     credits_remaining REAL DEFAULT 0,
 
     notes TEXT,
@@ -436,7 +484,26 @@ def ensure_weekly_tables(conn):
     );
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_psfw_family_week ON patrimoine_snapshots_family_weekly(family_id, week_date);")
+
+    # enterprise_history est geree par entreprises_repository.ensure_tables()
+
+    # Migration : immobilier_value dans les snapshots existants
+    for table in ["patrimoine_snapshots", "patrimoine_snapshots_weekly", "patrimoine_snapshots_family_weekly"]:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN immobilier_value REAL DEFAULT 0;")
+        except Exception:
+            pass # déjà présente
+
     # Composite index pour les queries filtrées sur person + account
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tx_person_account_date ON transactions(person_id, account_id, date);")
     conn.commit()
 
+
+def ensure_credits_migrations(conn) -> None:
+    """Ajoute les colonnes manquantes à la table credits (BUG-05)."""
+    try:
+        conn.execute("ALTER TABLE credits ADD COLUMN payer_account_id INTEGER;")
+        conn.commit()
+        _logger.info("Migration : colonne payer_account_id ajoutée à credits.")
+    except Exception:
+        pass  # colonne déjà présente
