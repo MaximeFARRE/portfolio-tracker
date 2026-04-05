@@ -19,9 +19,11 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
+    QGridLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -50,6 +52,12 @@ from services.projections import (
     ScenarioParams, build_standard_scenarios, estimate_fire_reach_date,
     get_projection_base_for_scope, run_projection,
 )
+from services.native_milestones import (
+    NATIVE_MILESTONE_DEFINITIONS,
+    build_native_milestones_for_scope,
+    get_featured_milestone_for_category,
+    get_scope_milestone_metrics,
+)
 from utils.format_monnaie import money
 
 logger = logging.getLogger(__name__)
@@ -72,6 +80,21 @@ _COMBO_STYLE = f"""
     }}
 """
 
+_MILESTONE_PROGRESS_STYLE = f"""
+    QProgressBar {{
+        background: {BG_CARD};
+        border: 1px solid {BORDER_SUBTLE};
+        border-radius: 6px;
+        text-align: center;
+        height: 14px;
+        color: {TEXT_PRIMARY};
+    }}
+    QProgressBar::chunk {{
+        background: {COLOR_SUCCESS};
+        border-radius: 5px;
+    }}
+"""
+
 _PRIORITY_ITEMS = [("Basse", "LOW"), ("Normale", "NORMAL"), ("Haute", "HIGH")]
 _STATUS_ITEMS = [("Actif", "ACTIVE"), ("Atteint", "ACHIEVED"), ("En pause", "PAUSED"), ("Annulé", "CANCELLED")]
 
@@ -83,6 +106,79 @@ def _safe_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+class NativeMilestoneCard(QGroupBox):
+    """Carte compacte pour un jalon natif."""
+
+    def __init__(self, category_label: str, parent=None):
+        super().__init__(category_label, parent)
+        self.setStyleSheet(STYLE_GROUP)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 10)
+        layout.setSpacing(6)
+
+        self._level_label = QLabel("Niveau 0")
+        self._level_label.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 13px; font-weight: bold;")
+        layout.addWidget(self._level_label)
+
+        self._value_label = QLabel("Valeur actuelle : —")
+        self._value_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        layout.addWidget(self._value_label)
+
+        self._next_label = QLabel("Prochain palier : —")
+        self._next_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        layout.addWidget(self._next_label)
+
+        bar_row = QHBoxLayout()
+        bar_row.setSpacing(8)
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setStyleSheet(_MILESTONE_PROGRESS_STYLE)
+        bar_row.addWidget(self._progress_bar, 1)
+        self._progress_label = QLabel("0.0 %")
+        self._progress_label.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 12px;")
+        bar_row.addWidget(self._progress_label)
+        layout.addLayout(bar_row)
+
+        self._subtitle_label = QLabel("—")
+        self._subtitle_label.setWordWrap(True)
+        self._subtitle_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        layout.addWidget(self._subtitle_label)
+
+    def set_milestone_data(self, milestone: Optional[dict]) -> None:
+        if not milestone:
+            self._level_label.setText("Niveau 0")
+            self._value_label.setText("Valeur actuelle : —")
+            self._next_label.setText("Prochain palier : —")
+            self._progress_bar.setValue(0)
+            self._progress_label.setText("0.0 %")
+            self._subtitle_label.setText("Aucune donnée disponible.")
+            return
+
+        level_number = int(milestone.get("level_number", 0))
+        display_value = str(milestone.get("display_value") or "—")
+        progress_pct = max(0.0, min(_safe_float(milestone.get("progress_pct")), 100.0))
+        is_max_level = bool(milestone.get("is_max_level"))
+
+        self._level_label.setText(f"Niveau {level_number}")
+        self._value_label.setText(f"Valeur actuelle : {display_value}")
+        if is_max_level:
+            self._next_label.setText("Prochain palier : niveau maximal atteint")
+        else:
+            next_threshold = milestone.get("next_threshold")
+            unit = str(milestone.get("unit") or "")
+            if next_threshold is None:
+                self._next_label.setText("Prochain palier : —")
+            elif unit == "PCT":
+                self._next_label.setText(f"Prochain palier : {next_threshold:.1f} %")
+            else:
+                self._next_label.setText(f"Prochain palier : {money(next_threshold)}")
+
+        self._progress_bar.setValue(int(round(progress_pct)))
+        self._progress_label.setText(f"{progress_pct:.1f} %")
+        self._subtitle_label.setText(str(milestone.get("subtitle") or ""))
 
 class GoalEditDialog(QDialog):
     def __init__(self, goal_data: Optional[dict] = None, parent=None):
@@ -206,6 +302,9 @@ class GoalsProjectionPage(QWidget):
         self._standard_projection_results: dict[str, pd.DataFrame] = {}
         self._goals_raw_df = pd.DataFrame()
         self._scenarios_raw_df = pd.DataFrame()
+        self._native_milestones: list[dict] = []
+        self._native_metrics: dict = {}
+        self._featured_milestone: Optional[dict] = None
         self._active_scenario_name: str = "Personnalisé"
         self._build_ui()
         self._load_scope_options()
@@ -457,6 +556,11 @@ class GoalsProjectionPage(QWidget):
         self._summary_text.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px; line-height: 1.4;")
         layout.addWidget(self._summary_text)
 
+        self._projection_milestone_hint = QLabel("")
+        self._projection_milestone_hint.setWordWrap(True)
+        self._projection_milestone_hint.setStyleSheet(STYLE_STATUS)
+        layout.addWidget(self._projection_milestone_hint)
+
         layout.addStretch()
         return w
 
@@ -470,6 +574,57 @@ class GoalsProjectionPage(QWidget):
         title = QLabel("Objectifs financiers")
         title.setStyleSheet(STYLE_TITLE)
         layout.addWidget(title)
+
+        self._native_global_box = QGroupBox("Niveau global patrimoine")
+        self._native_global_box.setStyleSheet(STYLE_GROUP)
+        global_layout = QVBoxLayout(self._native_global_box)
+        global_layout.setContentsMargins(10, 10, 10, 10)
+        global_layout.setSpacing(6)
+
+        self._native_global_level = QLabel("Niveau 0")
+        self._native_global_level.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 16px; font-weight: bold;")
+        global_layout.addWidget(self._native_global_level)
+
+        self._native_global_value = QLabel("Valeur actuelle : —")
+        self._native_global_value.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px;")
+        global_layout.addWidget(self._native_global_value)
+
+        self._native_global_next = QLabel("Prochain palier : —")
+        self._native_global_next.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px;")
+        global_layout.addWidget(self._native_global_next)
+
+        global_bar_row = QHBoxLayout()
+        global_bar_row.setSpacing(8)
+        self._native_global_progress = QProgressBar()
+        self._native_global_progress.setRange(0, 100)
+        self._native_global_progress.setStyleSheet(_MILESTONE_PROGRESS_STYLE)
+        global_bar_row.addWidget(self._native_global_progress, 1)
+        self._native_global_progress_label = QLabel("0.0 %")
+        self._native_global_progress_label.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 12px;")
+        global_bar_row.addWidget(self._native_global_progress_label)
+        global_layout.addLayout(global_bar_row)
+
+        self._native_global_subtitle = QLabel("Aucune donnée disponible.")
+        self._native_global_subtitle.setWordWrap(True)
+        self._native_global_subtitle.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        global_layout.addWidget(self._native_global_subtitle)
+        layout.addWidget(self._native_global_box)
+
+        milestones_grid = QGridLayout()
+        milestones_grid.setHorizontalSpacing(10)
+        milestones_grid.setVerticalSpacing(10)
+        self._native_milestone_cards: dict[str, NativeMilestoneCard] = {}
+        for idx, definition in enumerate(NATIVE_MILESTONE_DEFINITIONS):
+            card = NativeMilestoneCard(definition["category_label"])
+            row = idx // 2
+            col = idx % 2
+            milestones_grid.addWidget(card, row, col)
+            self._native_milestone_cards[str(definition["category_key"])] = card
+        layout.addLayout(milestones_grid)
+
+        self._native_milestones_status = QLabel("")
+        self._native_milestones_status.setStyleSheet(STYLE_STATUS)
+        layout.addWidget(self._native_milestones_status)
 
         btn_row = QHBoxLayout()
         self._btn_goal_new = QPushButton("Nouvel objectif")
@@ -571,6 +726,7 @@ class GoalsProjectionPage(QWidget):
             self._projection_status.setStyleSheet(STYLE_STATUS_ERROR)
             self._projection_status.setText(f"Erreur base projection : {exc}")
 
+        self._load_native_milestones()
         self._refresh_goals_tab()
         self._refresh_scenarios_tab()
 
@@ -589,6 +745,89 @@ class GoalsProjectionPage(QWidget):
     def _scope_label(self) -> str:
         return "Famille" if self._scope_type == "family" else self._scope_combo.currentText()
 
+    def _load_native_milestones(self) -> None:
+        try:
+            self._native_metrics = get_scope_milestone_metrics(self._conn, self._scope_type, self._scope_id)
+            self._native_milestones = build_native_milestones_for_scope(
+                self._conn,
+                self._scope_type,
+                self._scope_id,
+                metrics=self._native_metrics,
+            )
+            self._featured_milestone = get_featured_milestone_for_category(self._native_milestones, "net_worth")
+        except Exception as exc:
+            logger.error("Erreur chargement jalons natifs : %s", exc)
+            self._native_milestones = []
+            self._featured_milestone = None
+            self._native_metrics = {}
+            self._native_milestones_status.setStyleSheet(STYLE_STATUS_ERROR)
+            self._native_milestones_status.setText(f"Erreur chargement jalons natifs : {exc}")
+
+    def _refresh_projection_milestone_hint(self) -> None:
+        milestone = self._featured_milestone
+        if not milestone:
+            self._projection_milestone_hint.setStyleSheet(STYLE_STATUS_WARNING)
+            self._projection_milestone_hint.setText("Niveau global patrimoine indisponible pour ce périmètre.")
+            return
+
+        progress_pct = _safe_float(milestone.get("progress_pct"))
+        self._projection_milestone_hint.setStyleSheet(STYLE_STATUS_SUCCESS if progress_pct >= 100 else STYLE_STATUS)
+        self._projection_milestone_hint.setText(
+            f"Niveau global patrimoine : niveau {int(milestone.get('level_number', 0))} "
+            f"({milestone.get('display_value', '—')}). {milestone.get('subtitle', '')}"
+        )
+
+    def _refresh_native_milestones_ui(self) -> None:
+        if not hasattr(self, "_native_global_level"):
+            return
+
+        milestones_map = {str(item.get("category_key")): item for item in self._native_milestones}
+        for key, card in self._native_milestone_cards.items():
+            card.set_milestone_data(milestones_map.get(key))
+
+        featured = self._featured_milestone
+        if not featured:
+            self._native_global_level.setText("Niveau 0")
+            self._native_global_value.setText("Valeur actuelle : —")
+            self._native_global_next.setText("Prochain palier : —")
+            self._native_global_progress.setValue(0)
+            self._native_global_progress_label.setText("0.0 %")
+            self._native_global_subtitle.setText("Aucune donnée disponible pour le niveau global.")
+            self._native_milestones_status.setStyleSheet(STYLE_STATUS_WARNING)
+            self._native_milestones_status.setText("Jalons natifs indisponibles pour ce périmètre.")
+            return
+
+        level_number = int(featured.get("level_number", 0))
+        progress_pct = max(0.0, min(_safe_float(featured.get("progress_pct")), 100.0))
+        self._native_global_level.setText(f"Niveau {level_number}")
+        self._native_global_value.setText(f"Valeur actuelle : {featured.get('display_value', '—')}")
+        if featured.get("is_max_level"):
+            self._native_global_next.setText("Prochain palier : niveau maximal atteint")
+        else:
+            next_threshold = featured.get("next_threshold")
+            if next_threshold is None:
+                self._native_global_next.setText("Prochain palier : —")
+            else:
+                self._native_global_next.setText(f"Prochain palier : {money(next_threshold)}")
+        self._native_global_progress.setValue(int(round(progress_pct)))
+        self._native_global_progress_label.setText(f"{progress_pct:.1f} %")
+        streak = int(_safe_float(self._native_metrics.get("positive_savings_streak"), 0))
+        subtitle = str(featured.get("subtitle") or "")
+        if streak > 0:
+            subtitle = f"{subtitle} Série positive d'épargne : {streak} mois."
+        self._native_global_subtitle.setText(subtitle)
+        has_data = any(_safe_float(m.get("current_value")) > 0 for m in self._native_milestones)
+        if has_data:
+            self._native_milestones_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+            self._native_milestones_status.setText(
+                f"Périmètre {self._scope_label()} : {len(self._native_milestones)} jalons natifs calculés."
+            )
+        else:
+            self._native_milestones_status.setStyleSheet(STYLE_STATUS_WARNING)
+            self._native_milestones_status.setText(
+                f"Périmètre {self._scope_label()} : données insuffisantes, progression initiale à 0 %."
+            )
+
     def _set_projection_empty_state(self, message: str, status_style: str = STYLE_STATUS_WARNING) -> None:
         self._projection_df = pd.DataFrame()
         self._standard_projection_results = {}
@@ -597,6 +836,8 @@ class GoalsProjectionPage(QWidget):
         self._summary_text.setText(message)
         self._projection_status.setStyleSheet(status_style)
         self._projection_status.setText(message)
+        self._projection_milestone_hint.setStyleSheet(STYLE_STATUS_WARNING)
+        self._projection_milestone_hint.setText("Niveau global patrimoine indisponible.")
 
         self._kpi_current_net.set_content("Patrimoine actuel", money(0.0), subtitle=self._scope_label(), tone="blue")
         self._kpi_horizon_net.set_content("Patrimoine projeté à horizon", money(0.0), subtitle="—", tone="neutral")
@@ -698,6 +939,7 @@ class GoalsProjectionPage(QWidget):
             self._projection_chart.set_figure(self._build_projection_chart(self._projection_df))
             self._fire_chart.set_figure(self._build_fire_progress_chart(self._projection_df))
             self._summary_text.setText(self._build_projection_summary(params))
+            self._refresh_projection_milestone_hint()
 
             warnings = []
             if not self._base_data.get("snapshot_week_date"):
@@ -904,6 +1146,7 @@ class GoalsProjectionPage(QWidget):
         return None
 
     def _refresh_goals_tab(self) -> None:
+        self._refresh_native_milestones_ui()
         try:
             self._goals_raw_df = list_goals(self._conn, self._scope_type, self._scope_id)
         except Exception as exc:
