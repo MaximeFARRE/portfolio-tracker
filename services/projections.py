@@ -22,6 +22,40 @@ class ScenarioParams:
     remboursement_mensuel_credit: float = 0.0  # € (amortissement mensuel moyen)
 
 
+_PATRIMOINE_KEYS = {"bank", "bourse", "pe", "ent", "immobilier", "credits"}
+
+
+def _validate_patrimoine_initial(d: dict) -> None:
+    """
+    Vérifie que le dict patrimoine_initial est complet et cohérent.
+
+    Règles :
+    - Toutes les clés de _PATRIMOINE_KEYS doivent être présentes.
+    - Chaque valeur d'actif (bank, bourse, pe, ent, immobilier) doit être >= 0.
+    - credits doit être >= 0 (c'est un CRD, toujours positif ou nul).
+
+    Utiliser load_initial_patrimoine_from_family() pour construire ce dict
+    depuis la base — cela garantit la cohérence assets/dettes.
+    """
+    missing = _PATRIMOINE_KEYS - d.keys()
+    if missing:
+        raise ValueError(
+            f"patrimoine_initial incomplet — clés manquantes : {sorted(missing)}. "
+            "Utilisez load_initial_patrimoine_from_family() pour un dict cohérent."
+        )
+    asset_keys = _PATRIMOINE_KEYS - {"credits"}
+    for k in asset_keys:
+        if float(d[k]) < 0:
+            raise ValueError(
+                f"patrimoine_initial['{k}'] = {d[k]} est négatif — les actifs doivent être >= 0."
+            )
+    if float(d["credits"]) < 0:
+        raise ValueError(
+            f"patrimoine_initial['credits'] = {d['credits']} est négatif — "
+            "credits représente un CRD (toujours positif ou nul)."
+        )
+
+
 def project_patrimoine(
     patrimoine_initial: dict,
     scenario: ScenarioParams,
@@ -30,21 +64,28 @@ def project_patrimoine(
     """
     Projection mensuelle du patrimoine.
 
-    patrimoine_initial keys:
-      - bank (liquidités bancaires)
-      - bourse (holdings bourse)
-      - pe (private equity)
-      - ent (entreprises)
-      - credits (CRD total, positif)
+    patrimoine_initial keys (toutes obligatoires) :
+      - bank       : liquidités bancaires
+      - bourse     : holdings bourse (capitalisé au taux_bourse_annuel)
+      - pe         : private equity (capitalisé au taux_pe_annuel)
+      - ent        : entreprises (statique)
+      - immobilier : valorisation immobilière (statique)
+      - credits    : CRD total, positif — doit correspondre aux dettes réelles
+
+    IMPORTANT : modifier un actif sans ajuster credits produit un patrimoine_net
+    incohérent avec la réalité. Préférer load_initial_patrimoine_from_family()
+    comme point de départ, puis ajuster assets ET credits ensemble si besoin.
 
     Retourne un DataFrame avec colonnes :
-      mois, bank, bourse, pe, ent, credits,
+      mois, annee, bank, bourse, pe, ent, immobilier, credits,
       patrimoine_brut, patrimoine_net, patrimoine_net_reel
     """
+    _validate_patrimoine_initial(patrimoine_initial)
     bank = float(patrimoine_initial.get("bank", 0.0))
     bourse = float(patrimoine_initial.get("bourse", 0.0))
     pe = float(patrimoine_initial.get("pe", 0.0))
     ent = float(patrimoine_initial.get("ent", 0.0))
+    immobilier = float(patrimoine_initial.get("immobilier", 0.0))
     credits = float(patrimoine_initial.get("credits", 0.0))
 
     r_bourse_m = (1 + scenario.taux_bourse_annuel / 100) ** (1 / 12) - 1
@@ -55,7 +96,7 @@ def project_patrimoine(
     rows = []
 
     for m in range(n_mois + 1):
-        brut = bank + bourse + pe + ent
+        brut = bank + bourse + pe + ent + immobilier
         net = brut - credits
         # Patrimoine net en euros constants (début de simulation)
         net_reel = net / (defl_m ** m)
@@ -67,6 +108,7 @@ def project_patrimoine(
             "bourse": round(bourse, 2),
             "pe": round(pe, 2),
             "ent": round(ent, 2),
+            "immobilier": round(immobilier, 2),
             "credits": round(credits, 2),
             "patrimoine_brut": round(brut, 2),
             "patrimoine_net": round(net, 2),
@@ -85,6 +127,35 @@ def project_patrimoine(
     return pd.DataFrame(rows)
 
 
+def load_initial_patrimoine_from_family(conn, family_id: int = 1, person_ids: list[int] | None = None) -> dict:
+    """
+    Charge le dernier snapshot famille (source canonique),
+    avec fallback agrégé personnes si la table famille est vide.
+    """
+    from services import family_snapshots as fs
+
+    df_family = fs.get_family_weekly_series(conn, family_id=family_id, fallback_person_ids=person_ids or [])
+    if df_family is None or df_family.empty:
+        return {
+            "bank": 0.0,
+            "bourse": 0.0,
+            "pe": 0.0,
+            "ent": 0.0,
+            "immobilier": 0.0,
+            "credits": 0.0,
+        }
+
+    last = df_family.iloc[-1]
+    return {
+        "bank": float(last.get("liquidites_total", 0.0)),
+        "bourse": float(last.get("bourse_holdings", 0.0)),
+        "pe": float(last.get("pe_value", 0.0)),
+        "ent": float(last.get("ent_value", 0.0)),
+        "immobilier": float(last.get("immobilier_value", 0.0)),
+        "credits": float(last.get("credits_remaining", 0.0)),
+    }
+
+
 def compute_three_scenarios(
     patrimoine_initial: dict,
     epargne_base: float,
@@ -94,6 +165,10 @@ def compute_three_scenarios(
     """
     Calcule 3 scénarios (pessimiste, base, optimiste).
     Retourne un dict label -> DataFrame.
+
+    patrimoine_initial doit contenir les 6 clés de _PATRIMOINE_KEYS.
+    Construire via load_initial_patrimoine_from_family() garantit la cohérence
+    entre les actifs et les dettes (credits = CRD réel, pas dérivé des assets).
     """
     scenarios = [
         ScenarioParams(
