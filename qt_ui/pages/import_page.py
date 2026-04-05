@@ -133,7 +133,7 @@ class ImportPage(QScrollArea):
         file_row.addWidget(file_lbl, 1)
         gv.addLayout(file_row)
 
-        chk_delete = QCheckBox("Remplacer les données existantes (cette personne)")
+        chk_delete = QCheckBox("Remplacer les données des mois importés (pas l'historique complet)")
         chk_delete.setChecked(True)
         chk_delete.setStyleSheet("color: #94a3b8;")
         gv.addWidget(chk_delete)
