@@ -23,7 +23,7 @@ def upsert_credit(conn, data: Dict[str, Any]) -> int:
     ).fetchone()
 
     fields = [
-        "person_id", "account_id", "nom", "banque", "type_credit",
+        "person_id", "account_id", "payer_account_id", "nom", "banque", "type_credit",
         "capital_emprunte", "taux_nominal", "taeg", "duree_mois",
         "mensualite_theorique", "assurance_mensuelle_theorique",
         "date_debut", "actif",
