@@ -16,7 +16,7 @@ def list_family_weekly_snapshots(conn, family_id: int = 1) -> pd.DataFrame:
         """
         SELECT week_date, created_at, mode,
                patrimoine_net, patrimoine_brut, liquidites_total,
-               bourse_holdings, pe_value, ent_value, credits_remaining
+               bourse_holdings, pe_value, ent_value, immobilier_value, credits_remaining
         FROM patrimoine_snapshots_family_weekly
         WHERE family_id = ?
         ORDER BY week_date ASC
@@ -32,10 +32,10 @@ def upsert_family_snapshot(conn, family_id: int, week_date: str, mode: str, payl
         INSERT INTO patrimoine_snapshots_family_weekly(
             family_id, week_date, created_at, mode,
             patrimoine_net, patrimoine_brut, liquidites_total,
-            bourse_holdings, pe_value, ent_value, credits_remaining,
+            bourse_holdings, pe_value, ent_value, immobilier_value, credits_remaining,
             notes
         )
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(family_id, week_date) DO UPDATE SET
             created_at = excluded.created_at,
             mode = excluded.mode,
@@ -45,6 +45,7 @@ def upsert_family_snapshot(conn, family_id: int, week_date: str, mode: str, payl
             bourse_holdings = excluded.bourse_holdings,
             pe_value = excluded.pe_value,
             ent_value = excluded.ent_value,
+            immobilier_value = excluded.immobilier_value,
             credits_remaining = excluded.credits_remaining,
             notes = excluded.notes
         """,
@@ -59,6 +60,7 @@ def upsert_family_snapshot(conn, family_id: int, week_date: str, mode: str, payl
             float(payload.get("bourse_holdings", 0.0)),
             float(payload.get("pe_value", 0.0)),
             float(payload.get("ent_value", 0.0)),
+            float(payload.get("immobilier_value", 0.0)),
             float(payload.get("credits_remaining", 0.0)),
             payload.get("notes"),
         ),
@@ -84,6 +86,7 @@ def rebuild_family_weekly(conn, person_ids: list[int], lookback_days: int = 90, 
                SUM(bourse_holdings) AS bourse_holdings,
                SUM(pe_value) AS pe_value,
                SUM(ent_value) AS ent_value,
+               SUM(immobilier_value) AS immobilier_value,
                SUM(credits_remaining) AS credits_remaining
         FROM patrimoine_snapshots_weekly
         WHERE person_id IN ({q})
@@ -133,6 +136,7 @@ def rebuild_family_weekly_missing_only(conn, person_ids: list[int], lookback_day
                SUM(bourse_holdings) AS bourse_holdings,
                SUM(pe_value) AS pe_value,
                SUM(ent_value) AS ent_value,
+               SUM(immobilier_value) AS immobilier_value,
                SUM(credits_remaining) AS credits_remaining
         FROM patrimoine_snapshots_weekly
         WHERE person_id IN ({q})
@@ -193,6 +197,7 @@ def rebuild_family_weekly_from_last(
                SUM(bourse_holdings) AS bourse_holdings,
                SUM(pe_value) AS pe_value,
                SUM(ent_value) AS ent_value,
+               SUM(immobilier_value) AS immobilier_value,
                SUM(credits_remaining) AS credits_remaining
         FROM patrimoine_snapshots_weekly
         WHERE person_id IN ({q})
@@ -257,6 +262,7 @@ def rebuild_family_weekly_backdated_aware(
                SUM(bourse_holdings) AS bourse_holdings,
                SUM(pe_value) AS pe_value,
                SUM(ent_value) AS ent_value,
+               SUM(immobilier_value) AS immobilier_value,
                SUM(credits_remaining) AS credits_remaining
         FROM patrimoine_snapshots_weekly
         WHERE person_id IN ({q})

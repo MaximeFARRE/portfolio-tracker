@@ -96,6 +96,7 @@ def get_family_series_from_people_snapshots(conn, person_ids: List[int]) -> pd.D
                SUM(bourse_holdings) AS bourse_holdings,
                SUM(pe_value) AS pe_value,
                SUM(ent_value) AS ent_value,
+               SUM(immobilier_value) AS immobilier_value,
                SUM(credits_remaining) AS credits_remaining
         FROM patrimoine_snapshots_weekly
         WHERE person_id IN ({q})
@@ -145,7 +146,7 @@ def get_person_snapshot_at_week(conn, person_id: int, week: pd.Timestamp) -> Opt
     df = pd.read_sql_query(
         """
         SELECT week_date, patrimoine_net, patrimoine_brut, liquidites_total,
-               bourse_holdings, pe_value, ent_value, credits_remaining
+               bourse_holdings, pe_value, ent_value, immobilier_value, credits_remaining
         FROM patrimoine_snapshots_weekly
         WHERE person_id=? AND week_date=?
         """,
@@ -191,6 +192,7 @@ def compute_allocations_family(df_family: pd.DataFrame) -> Dict:
         "Bourse": float(last.get("bourse_holdings", 0.0)),
         "Private Equity": float(last.get("pe_value", 0.0)),
         "Entreprises": float(last.get("ent_value", 0.0)),
+        "Immobilier": float(last.get("immobilier_value", 0.0)),
     }
     # Nettoyage (pas de négatifs)
     alloc = {k: max(0.0, float(v)) for k, v in alloc.items()}
@@ -212,6 +214,7 @@ def compute_people_table(conn, people: pd.DataFrame, common_week: pd.Timestamp) 
         liq = float(snap.get("liquidites_total", 0.0))
         pe = float(snap.get("pe_value", 0.0))
         ent = float(snap.get("ent_value", 0.0))
+        immo = float(snap.get("immobilier_value", 0.0))
         cred = float(snap.get("credits_remaining", 0.0))
 
         expo_bourse = (bourse / net * 100.0) if net > 0 else 0.0
@@ -224,6 +227,7 @@ def compute_people_table(conn, people: pd.DataFrame, common_week: pd.Timestamp) 
             "Bourse (€)": bourse,
             "PE (€)": pe,
             "Entreprises (€)": ent,
+            "Immobilier (€)": immo,
             "Crédits (€)": cred,
             "% Expo Bourse": round(expo_bourse, 1),
         })
