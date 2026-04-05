@@ -333,5 +333,11 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentWidget(self._page_personnes)
         self._page_personnes.select_person_by_name(name)
 
+    def closeEvent(self, event) -> None:
+        if self._rebuild_thread is not None and self._rebuild_thread.isRunning():
+            self._rebuild_thread.quit()
+            self._rebuild_thread.wait()
+        super().closeEvent(event)
+
     def set_status(self, msg: str) -> None:
         self._status.showMessage(msg)
