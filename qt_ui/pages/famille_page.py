@@ -299,6 +299,9 @@ class FamilleDashboardPanel(QWidget):
         self._progress_bar.show()
         self._rebuild_status.setText("Rebuild en cours...")
 
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait()
         self._thread = RebuildFamilleThread(person_ids)
         self._thread.progress.connect(self._on_rebuild_progress)
         self._thread.finished.connect(self._on_rebuild_done)
@@ -460,6 +463,9 @@ class DataHealthPanel(QWidget):
         self._rebuild_progress.show()
         self._rebuild_status.setText("Rebuild en cours...")
 
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait()
         self._thread = RebuildAllThread(person_ids, safety_weeks)
         self._thread.progress.connect(lambda msg: self._rebuild_status.setText(msg))
         self._thread.finished.connect(self._on_rebuild_done)
