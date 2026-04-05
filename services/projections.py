@@ -657,6 +657,40 @@ def _validate_patrimoine_initial(d: dict) -> None:
         )
 
 
+_PATRIMOINE_KEYS = {"bank", "bourse", "pe", "ent", "immobilier", "credits"}
+
+
+def _validate_patrimoine_initial(d: dict) -> None:
+    """
+    Vérifie que le dict patrimoine_initial est complet et cohérent.
+
+    Règles :
+    - Toutes les clés de _PATRIMOINE_KEYS doivent être présentes.
+    - Chaque valeur d'actif (bank, bourse, pe, ent, immobilier) doit être >= 0.
+    - credits doit être >= 0 (c'est un CRD, toujours positif ou nul).
+
+    Utiliser load_initial_patrimoine_from_family() pour construire ce dict
+    depuis la base — cela garantit la cohérence assets/dettes.
+    """
+    missing = _PATRIMOINE_KEYS - d.keys()
+    if missing:
+        raise ValueError(
+            f"patrimoine_initial incomplet — clés manquantes : {sorted(missing)}. "
+            "Utilisez load_initial_patrimoine_from_family() pour un dict cohérent."
+        )
+    asset_keys = _PATRIMOINE_KEYS - {"credits"}
+    for k in asset_keys:
+        if float(d[k]) < 0:
+            raise ValueError(
+                f"patrimoine_initial['{k}'] = {d[k]} est négatif — les actifs doivent être >= 0."
+            )
+    if float(d["credits"]) < 0:
+        raise ValueError(
+            f"patrimoine_initial['credits'] = {d['credits']} est négatif — "
+            "credits représente un CRD (toujours positif ou nul)."
+        )
+
+
 def project_patrimoine(
     patrimoine_initial: dict,
     scenario: ScenarioParams | dict,
@@ -687,9 +721,11 @@ def project_patrimoine(
 
     immobilier = _to_float(patrimoine_initial.get("immobilier"))
 
-    r_bourse_m = _annual_pct_to_monthly_rate(taux_bourse_annuel)
-    r_pe_m     = _annual_pct_to_monthly_rate(taux_pe_annuel)
-    defl_m     = 1.0 + _annual_pct_to_monthly_rate(inflation_annuelle)
+    for m in range(n_mois + 1):
+        brut = bank + bourse + pe + ent + immobilier
+        net = brut - credits
+        # Patrimoine net en euros constants (début de simulation)
+        net_reel = net / (defl_m ** m)
 
     n_mois = max(int(horizon_ans), 0) * 12
     rows = []
@@ -698,9 +734,12 @@ def project_patrimoine(
         net  = brut - credits
         net_reel = net / (defl_m ** m) if defl_m > 0 else net
         rows.append({
-            "mois": m, "annee": m / 12.0,
-            "bank": round(bank, 2), "bourse": round(bourse, 2),
-            "pe": round(pe, 2), "ent": round(ent, 2),
+            "mois": m,
+            "annee": m / 12,
+            "bank": round(bank, 2),
+            "bourse": round(bourse, 2),
+            "pe": round(pe, 2),
+            "ent": round(ent, 2),
             "immobilier": round(immobilier, 2),
             "credits": round(credits, 2),
             "patrimoine_brut": round(brut, 2),
