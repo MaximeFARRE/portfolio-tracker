@@ -334,20 +334,7 @@ def ensure_weekly_tables(conn):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_psfw_family_week ON patrimoine_snapshots_family_weekly(family_id, week_date);")
 
-    # ── Migration : enterprise_history (BUG-19) ──────────────────────────────
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS enterprise_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        enterprise_id INTEGER NOT NULL,
-        effective_date TEXT NOT NULL,
-        valuation_eur REAL DEFAULT 0,
-        debt_eur REAL DEFAULT 0,
-        notes TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        FOREIGN KEY(enterprise_id) REFERENCES enterprises(id) ON DELETE CASCADE
-    );
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_eh_ent_date ON enterprise_history(enterprise_id, effective_date);")
+    # enterprise_history est geree par entreprises_repository.ensure_tables()
 
     # Migration : immobilier_value dans les snapshots existants
     for table in ["patrimoine_snapshots", "patrimoine_snapshots_weekly", "patrimoine_snapshots_family_weekly"]:
