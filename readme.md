@@ -1,18 +1,51 @@
 ﻿# Patrimoine Desktop
 
-Application **desktop PyQt6** de suivi patrimonial familial.
+<p align="center">
+  <b>Suivi patrimonial familial en desktop</b><br>
+  Centralisez vos comptes, importez vos flux, analysez vos actifs et suivez l'évolution hebdomadaire de votre patrimoine.
+</p>
 
-L'objectif est de centraliser les comptes, transactions, crédits, investissements (bourse, private equity, immobilier, entreprises), puis de produire des vues exploitables:
-- vue famille consolidée,
-- vue détaillée par personne,
-- diagnostics de qualité des données,
-- import assisté des données bancaires et Trading Republic.
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/UI-PyQt6-41CD52?logo=qt&logoColor=white" alt="PyQt6" />
+  <img src="https://img.shields.io/badge/Charts-Plotly-3F4F75?logo=plotly&logoColor=white" alt="Plotly" />
+  <img src="https://img.shields.io/badge/DB-SQLite-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
+  <img src="https://img.shields.io/badge/Sync-Turso%20%28optional%29-111111" alt="Turso optional" />
+  <img src="https://img.shields.io/badge/Status-Active%20Development-16a34a" alt="Status" />
+</p>
 
-## Ce que fait l'application
+## Sommaire
 
-- Suivi multi-personnes et multi-comptes (`BANQUE`, `PEA`, `CTO`, `CRYPTO`, `CREDIT`, etc.).
-- Dashboard famille avec KPIs, évolution hebdomadaire, répartitions et classements.
-- Dashboard individuels par onglet:
+- [Pourquoi cette application](#pourquoi-cette-application)
+- [Fonctionnalités clés](#fonctionnalités-clés)
+- [Aperçu de l'interface](#aperçu-de-linterface)
+- [Architecture](#architecture)
+- [Installation rapide](#installation-rapide)
+- [Configuration](#configuration)
+- [Utilisation](#utilisation)
+- [Tests](#tests)
+- [Build exécutable](#build-exécutable)
+- [Roadmap](#roadmap)
+- [Licence](#licence)
+
+## Pourquoi cette application
+
+`Patrimoine Desktop` répond à un besoin simple: avoir une vue claire, exploitable et consolidée du patrimoine familial, sans dépendre d'un SaaS externe.
+
+Objectifs produit:
+- suivre plusieurs personnes et plusieurs types de comptes,
+- agréger les transactions et les valorisations dans des vues comparables,
+- faciliter les imports de données bancaires/investissement,
+- diagnostiquer rapidement la qualité des données et les manques.
+
+## Fonctionnalités clés
+
+- **Consolidation familiale**
+  - KPIs patrimoine net/brut,
+  - évolution hebdomadaire,
+  - répartition par catégories,
+  - classements par personne.
+- **Analyse par personne**
   - vue d'ensemble,
   - dépenses / revenus,
   - crédits et amortissement,
@@ -21,44 +54,60 @@ L'objectif est de centraliser les comptes, transactions, crédits, investissemen
   - immobilier,
   - liquidités,
   - bourse globale.
-- Import de données:
+- **Gestion multi-comptes**
+  - comptes dynamiques par personne (`BANQUE`, `PEA`, `CTO`, `CRYPTO`, `CREDIT`, etc.).
+- **Imports assistés**
   - CSV dépenses / revenus,
   - CSV Bankin,
-  - Trading Republic (via `pytr`),
-  - configuration crédit + génération d'amortissement.
-- Historique des imports avec rollback (annulation d'un batch).
-- Rebuild automatique des snapshots au lancement pour garder les vues à jour.
-- Sauvegardes automatiques à la fermeture + logs persistants.
+  - Trade Republic via `pytr`,
+  - configuration crédit + génération d'amortissement,
+  - historique des imports avec rollback.
+- **Fiabilité opérationnelle**
+  - rebuild automatique des snapshots au démarrage,
+  - logs persistants,
+  - sauvegardes automatiques à la fermeture,
+  - sauvegardes manuelles dans la page Paramètres.
 
-## Stack technique
+## Aperçu de l'interface
 
-- **UI**: PyQt6
-- **Visualisation**: Plotly (rendu embarqué via QWebEngine)
-- **Données**: SQLite local (WAL)
-- **Sync distant (optionnel)**: Turso/libsql (embedded replica)
-- **Data processing**: pandas, numpy
-- **Marché / FX**: yfinance
+Ajoute ici tes captures pour améliorer la conversion des visiteurs GitHub.
 
-## Architecture (résumé)
+Exemple de structure recommandée:
 
-- `main.py`: point d'entrée, cycle de vie app, logging, backup.
-- `core/`: gestion de connexion DB.
-- `services/`: logique métier (calculs, snapshots, imports, pricing, diagnostics...).
+```text
+/docs/images/
+  famille-dashboard.png
+  personne-vue-ensemble.png
+  import-trade-republic.png
+```
+
+Puis remplace les placeholders:
+
+```md
+![Dashboard Famille](docs/images/famille-dashboard.png)
+![Vue Personne](docs/images/personne-vue-ensemble.png)
+![Import Trade Republic](docs/images/import-trade-republic.png)
+```
+
+## Architecture
+
+- `main.py`: bootstrap de l'app, logging, cycle de vie, backup.
+- `core/`: gestion de connexion base de données.
+- `services/`: logique métier (calculs, snapshots, import, pricing, diagnostics...).
 - `qt_ui/`: interface PyQt6 (pages, panels, widgets).
 - `db/schema.sql`: schéma SQL initial.
-- `tests/`: tests unitaires sur les briques métier.
+- `tests/`: tests unitaires métier.
+- `legacy_streamlit/`: ancien socle Streamlit conservé en archive.
 
-Le code historique Streamlit est archivé dans `legacy_streamlit/`.
-
-## Installation
+## Installation rapide
 
 ### Prérequis
 
-- Python 3.11+ (recommandé)
-- pip
-- Environnement desktop avec support PyQt6/QWebEngine
+- Python `3.11+` recommandé
+- `pip`
+- Environnement desktop compatible PyQt6/QWebEngine
 
-### Setup rapide (Windows PowerShell)
+### Setup (Windows PowerShell)
 
 ```powershell
 python -m venv .venv
@@ -66,28 +115,28 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### Lancement
+### Lancer l'application
 
 ```powershell
 python main.py
 ```
 
-Au premier lancement, la base est initialisée et seedée automatiquement.
+Au premier démarrage, la base locale est initialisée et seedée automatiquement.
 
 ## Configuration
 
-### Base locale (par défaut)
+### Mode local (par défaut)
 
-Aucune variable d'environnement nécessaire.
+Aucune variable d'environnement requise.
 
-### Turso/libsql (optionnel)
+### Mode Turso/libsql (optionnel)
 
-Si ces variables sont présentes, l'application utilise une embedded replica synchronisée:
+Si les variables ci-dessous sont définies, l'app utilise une embedded replica synchronisée:
 
 - `TURSO_DATABASE_URL`
 - `TURSO_AUTH_TOKEN`
 
-Exemple PowerShell:
+Exemple:
 
 ```powershell
 $env:TURSO_DATABASE_URL="libsql://..."
@@ -95,26 +144,40 @@ $env:TURSO_AUTH_TOKEN="..."
 python main.py
 ```
 
-## Données locales, logs et backups
+## Utilisation
 
-Le dossier utilisateur est `~/.patrimoine` avec:
+Workflow conseillé pour une première prise en main:
+
+1. Ouvrir l'app et vérifier les personnes/comptes.
+2. Importer les flux (CSV/Bankin/TR) depuis la page **Import**.
+3. Lancer un rebuild si nécessaire depuis les onglets **Famille > Diagnostic**.
+4. Analyser la vue **Famille** puis les onglets **Personnes**.
+5. Vérifier les logs/backups dans **Paramètres**.
+
+## Données, logs et backups
+
+Dossier utilisateur: `~/.patrimoine`
 
 - `logs/patrimoine.log`: logs applicatifs avec rotation.
-- `backups/`: backups automatiques des bases SQLite.
-
-Un backup est aussi accessible depuis la page **Paramètres**.
+- `backups/`: backups automatiques SQLite (+ exports manuels possibles).
 
 ## Tests
 
-Des tests sont présents dans `tests/` (`calculations`, `credits`, `imports`, `snapshots`).
+Les tests actuels couvrent notamment:
+- `calculations`
+- `credits`
+- `imports`
+- `snapshots`
+
+Commande:
 
 ```powershell
 pytest -q
 ```
 
-## Build exécutable (optionnel)
+## Build exécutable
 
-Des fichiers PyInstaller sont inclus:
+Fichiers PyInstaller disponibles:
 
 - `patrimoine.spec`
 - `Patrimoine Desktop.spec`
@@ -125,12 +188,12 @@ Exemple:
 pyinstaller patrimoine.spec
 ```
 
-## Roadmap courte
+## Roadmap
 
-- Améliorer encore la robustesse des imports hétérogènes.
-- Ajouter plus de contrôle sur les règles de valorisation.
-- Continuer l'industrialisation des diagnostics et tests.
+- Renforcer la robustesse des imports hétérogènes.
+- Ajouter plus de règles de contrôle de valorisation.
+- Étendre la couverture de tests et les diagnostics automatiques.
 
 ## Licence
 
-Projet **privé** à usage personnel/familial.
+Projet privé, usage personnel/familial.
