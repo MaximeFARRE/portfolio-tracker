@@ -623,6 +623,40 @@ def _scenario_get(scenario: Any, key: str, default: Any):
     return getattr(scenario, key, default)
 
 
+_PATRIMOINE_KEYS = {"bank", "bourse", "pe", "ent", "immobilier", "credits"}
+
+
+def _validate_patrimoine_initial(d: dict) -> None:
+    """
+    Vérifie que le dict patrimoine_initial est complet et cohérent.
+
+    Règles :
+    - Toutes les clés de _PATRIMOINE_KEYS doivent être présentes.
+    - Chaque valeur d'actif (bank, bourse, pe, ent, immobilier) doit être >= 0.
+    - credits doit être >= 0 (c'est un CRD, toujours positif ou nul).
+
+    Utiliser load_initial_patrimoine_from_family() pour construire ce dict
+    depuis la base — cela garantit la cohérence assets/dettes.
+    """
+    missing = _PATRIMOINE_KEYS - d.keys()
+    if missing:
+        raise ValueError(
+            f"patrimoine_initial incomplet — clés manquantes : {sorted(missing)}. "
+            "Utilisez load_initial_patrimoine_from_family() pour un dict cohérent."
+        )
+    asset_keys = _PATRIMOINE_KEYS - {"credits"}
+    for k in asset_keys:
+        if float(d[k]) < 0:
+            raise ValueError(
+                f"patrimoine_initial['{k}'] = {d[k]} est négatif — les actifs doivent être >= 0."
+            )
+    if float(d["credits"]) < 0:
+        raise ValueError(
+            f"patrimoine_initial['credits'] = {d['credits']} est négatif — "
+            "credits représente un CRD (toujours positif ou nul)."
+        )
+
+
 def project_patrimoine(
     patrimoine_initial: dict,
     scenario: ScenarioParams | dict,
@@ -651,6 +685,8 @@ def project_patrimoine(
     remboursement_mensuel_credit = _to_float(
         _scenario_get(scenario, "remboursement_mensuel_credit", 0.0), 0.0)
 
+    immobilier = _to_float(patrimoine_initial.get("immobilier"))
+
     r_bourse_m = _annual_pct_to_monthly_rate(taux_bourse_annuel)
     r_pe_m     = _annual_pct_to_monthly_rate(taux_pe_annuel)
     defl_m     = 1.0 + _annual_pct_to_monthly_rate(inflation_annuelle)
@@ -658,13 +694,14 @@ def project_patrimoine(
     n_mois = max(int(horizon_ans), 0) * 12
     rows = []
     for m in range(n_mois + 1):
-        brut = bank + bourse + pe + ent
+        brut = bank + bourse + pe + ent + immobilier
         net  = brut - credits
         net_reel = net / (defl_m ** m) if defl_m > 0 else net
         rows.append({
             "mois": m, "annee": m / 12.0,
             "bank": round(bank, 2), "bourse": round(bourse, 2),
             "pe": round(pe, 2), "ent": round(ent, 2),
+            "immobilier": round(immobilier, 2),
             "credits": round(credits, 2),
             "patrimoine_brut": round(brut, 2),
             "patrimoine_net":  round(net, 2),
@@ -678,13 +715,46 @@ def project_patrimoine(
     return pd.DataFrame(rows)
 
 
+def load_initial_patrimoine_from_family(conn, family_id: int = 1, person_ids: list[int] | None = None) -> dict:
+    """
+    Charge le dernier snapshot famille (source canonique),
+    avec fallback agrégé personnes si la table famille est vide.
+    """
+    from services import family_snapshots as fs
+
+    df_family = fs.get_family_weekly_series(conn, family_id=family_id, fallback_person_ids=person_ids or [])
+    if df_family is None or df_family.empty:
+        return {
+            "bank": 0.0,
+            "bourse": 0.0,
+            "pe": 0.0,
+            "ent": 0.0,
+            "immobilier": 0.0,
+            "credits": 0.0,
+        }
+
+    last = df_family.iloc[-1]
+    return {
+        "bank": float(last.get("liquidites_total", 0.0)),
+        "bourse": float(last.get("bourse_holdings", 0.0)),
+        "pe": float(last.get("pe_value", 0.0)),
+        "ent": float(last.get("ent_value", 0.0)),
+        "immobilier": float(last.get("immobilier_value", 0.0)),
+        "credits": float(last.get("credits_remaining", 0.0)),
+    }
+
+
 def compute_three_scenarios(
     patrimoine_initial: dict,
     epargne_base: float,
     horizon_ans: int = 10,
     remboursement_mensuel: float = 0.0,
 ) -> dict[str, pd.DataFrame]:
-    """Compatibilité minimale avec l'ancienne API 3 scénarios."""
+    """Compatibilité minimale avec l'ancienne API 3 scénarios.
+
+    Construire patrimoine_initial via load_initial_patrimoine_from_family()
+    garantit la cohérence entre actifs et dettes (credits = CRD réel).
+    """
     scenarios = [
         {"label": "Pessimiste", "taux_bourse_annuel": 4.0, "taux_pe_annuel": 5.0,
          "epargne_mensuelle": _to_float(epargne_base) * 0.8, "inflation_annuelle": 3.0,
