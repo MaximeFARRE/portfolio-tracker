@@ -632,12 +632,23 @@ def import_tr_transactions(
         if ticker_account_map and symbol in ticker_account_map:
             effective_account_id = ticker_account_map[symbol]
 
-        # Déduplication
-        existing = conn.execute(
-            """SELECT id FROM transactions
-               WHERE date = ? AND account_id = ? AND type = ? AND ABS(amount - ?) < 0.01""",
-            (date_str, effective_account_id, tx_type, tx_amount),
-        ).fetchone()
+        # Déduplication (inclut l'ISIN via assets pour éviter les faux positifs)
+        if isin:
+            existing = conn.execute(
+                """SELECT t.id FROM transactions t
+                   LEFT JOIN assets a ON t.asset_id = a.id
+                   WHERE t.date = ? AND t.account_id = ? AND t.type = ?
+                     AND ABS(t.amount - ?) < 0.01
+                     AND a.isin = ?""",
+                (date_str, effective_account_id, tx_type, tx_amount, isin),
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                """SELECT id FROM transactions
+                   WHERE date = ? AND account_id = ? AND type = ?
+                     AND ABS(amount - ?) < 0.01 AND asset_id IS NULL""",
+                (date_str, effective_account_id, tx_type, tx_amount),
+            ).fetchone()
         is_duplicate = existing is not None
 
         asset_id = None
