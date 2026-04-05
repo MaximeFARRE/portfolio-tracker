@@ -1,25 +1,179 @@
-# SUIVI DES CORRECTIONS (Changelog)
+﻿# Patrimoine Desktop
 
-## Mois 1
+<p align="center">
+  <b>Suivi patrimonial familial en desktop</b><br>
+  Centralisez vos comptes, importez vos flux, analysez vos actifs et suivez l'évolution hebdomadaire de votre patrimoine.
+</p>
 
-### ✅ Tâche 1 : Sauvegarde automatique & Logs persistants (Terminé)
-- **Logs persistants (BUG-23 / AM-20)** : Configuration du logger vers `~/.patrimoine/logs/patrimoine.log` avec rotation (5 fichiers de 5Mo max). Gère désormais correctement la capture sécurisée des erreurs globales.
-- **Sauvegarde automatique globale (BUG-24 / AM-21)** : Sauvegarde locale déclenchée à la fermeture, copiant les bases `.db` et Turso (`.db-info`) vers `~/.patrimoine/backups/`. Une rétention de 10 copies est configurée localement.
-- **Correction des lookbacks manquants** : Le paramètre `fallback_lookback_days` ajusté de 365 à 3650 jours (10 ans) dans les snapshots de `services/snapshots.py`.
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/UI-PyQt6-41CD52?logo=qt&logoColor=white" alt="PyQt6" />
+  <img src="https://img.shields.io/badge/Charts-Plotly-3F4F75?logo=plotly&logoColor=white" alt="Plotly" />
+  <img src="https://img.shields.io/badge/DB-SQLite-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
+  <img src="https://img.shields.io/badge/Sync-Turso%20%28optional%29-111111" alt="Turso optional" />
+  <img src="https://img.shields.io/badge/Status-Active%20Development-16a34a" alt="Status" />
+</p>
 
----
-*En attente de la prochaine tâche (BUG-01: Connexion DB).*
-###  Tâche 2 : Accès concurrent DB (BUG-01, BUG-17) (Terminé)
-- **Sécurisation des threads (QThread)** : Tous les processus asynchrones longs (Imports TR, Rebuild snapshots famille, Refresh Bourse) génèrent désormais **leur propre connexion locale (with get_conn() as local_conn:)** lors de leur exécution un().
-- **Prévention de corruption SQLite** : Élimination du passage en paramètre et du partage de l'objet global natif self._conn issu du main thread UI.
-###  Tâche 3 : Connexion dynamique Qt (BUG-03) (Terminé)
-- Vérification du code source de qt_ui/pages/import_page.py. Le débordement de mémoire ("Memory Leak") causé par la reconnexion récursive du signal currentIndexChanged était en réalité déjà neutralisé par la condition 
-ot getattr(self, "_person_signal_connected"). J'ai certifié ce correctif et clos le BUG-03.
+## Sommaire
 
-###  Tâche 4 : Migration de Schéma Crédit (BUG-05) (Terminé)
-- Ajout pur et dur de la colonne payer_account_id à la table credits dans db/schema.sql (évitant les crashs lors d'une reconstruction from scratch, la migration dynamique était une rustine mais le schéma racine était erroné).
-###  Tâche 5 : Nettoyage Code Mort (BUG-06) (Terminé)
-- Transfert de l'intégralité du socle Streamlit (pp.py, dossiers ui/ et pages/) dans un dossier d'archive claire legacy_streamlit/ afin que le projet PyQt soit désormais la surface principale non ambiguë et d'éviter que ces vieux scripts bloquent des refactorisations globales avec leurs imports obsolètes.
+- [Pourquoi cette application](#pourquoi-cette-application)
+- [Fonctionnalités clés](#fonctionnalités-clés)
+- [Aperçu de l'interface](#aperçu-de-linterface)
+- [Architecture](#architecture)
+- [Installation rapide](#installation-rapide)
+- [Configuration](#configuration)
+- [Utilisation](#utilisation)
+- [Tests](#tests)
+- [Build exécutable](#build-exécutable)
+- [Roadmap](#roadmap)
+- [Licence](#licence)
 
-###  Tâche 6 : Démarrage DB Optimisé (BUG-07) (Terminé)
-- J'ai procédé à l'audit du fichier services/db.py ainsi que core/db_connection.py. La logique de seeding initial limitait bien les redondances et l'appel cyclique à init_db() n'est plus présent dans le code actuel. 
+## Pourquoi cette application
+
+`Patrimoine Desktop` répond à un besoin simple: avoir une vue claire, exploitable et consolidée du patrimoine familial, sans dépendre d'un SaaS externe.
+
+Objectifs produit:
+- suivre plusieurs personnes et plusieurs types de comptes,
+- agréger les transactions et les valorisations dans des vues comparables,
+- faciliter les imports de données bancaires/investissement,
+- diagnostiquer rapidement la qualité des données et les manques.
+
+## Fonctionnalités clés
+
+- **Consolidation familiale**
+  - KPIs patrimoine net/brut,
+  - évolution hebdomadaire,
+  - répartition par catégories,
+  - classements par personne.
+- **Analyse par personne**
+  - vue d'ensemble,
+  - dépenses / revenus,
+  - crédits et amortissement,
+  - private equity,
+  - entreprises,
+  - immobilier,
+  - liquidités,
+  - bourse globale.
+- **Gestion multi-comptes**
+  - comptes dynamiques par personne (`BANQUE`, `PEA`, `CTO`, `CRYPTO`, `CREDIT`, etc.).
+- **Imports assistés**
+  - CSV dépenses / revenus,
+  - CSV Bankin,
+  - Trade Republic via `pytr`,
+  - configuration crédit + génération d'amortissement,
+  - historique des imports avec rollback.
+- **Fiabilité opérationnelle**
+  - rebuild automatique des snapshots au démarrage,
+  - logs persistants,
+  - sauvegardes automatiques à la fermeture,
+  - sauvegardes manuelles dans la page Paramètres.
+
+
+## Architecture
+
+- `main.py`: bootstrap de l'app, logging, cycle de vie, backup.
+- `core/`: gestion de connexion base de données.
+- `services/`: logique métier (calculs, snapshots, import, pricing, diagnostics...).
+- `qt_ui/`: interface PyQt6 (pages, panels, widgets).
+- `db/schema.sql`: schéma SQL initial.
+- `tests/`: tests unitaires métier.
+- `legacy_streamlit/`: ancien socle Streamlit conservé en archive.
+
+## Installation rapide
+
+### Prérequis
+
+- Python `3.11+` recommandé
+- `pip`
+- Environnement desktop compatible PyQt6/QWebEngine
+
+### Setup (Windows PowerShell)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### Lancer l'application
+
+```powershell
+python main.py
+```
+
+Au premier démarrage, la base locale est initialisée et seedée automatiquement.
+
+## Configuration
+
+### Mode local (par défaut)
+
+Aucune variable d'environnement requise.
+
+### Mode Turso/libsql (optionnel)
+
+Si les variables ci-dessous sont définies, l'app utilise une embedded replica synchronisée:
+
+- `TURSO_DATABASE_URL`
+- `TURSO_AUTH_TOKEN`
+
+Exemple:
+
+```powershell
+$env:TURSO_DATABASE_URL="libsql://..."
+$env:TURSO_AUTH_TOKEN="..."
+python main.py
+```
+
+## Utilisation
+
+Workflow conseillé pour une première prise en main:
+
+1. Ouvrir l'app et vérifier les personnes/comptes.
+2. Importer les flux (CSV/Bankin/TR) depuis la page **Import**.
+3. Lancer un rebuild si nécessaire depuis les onglets **Famille > Diagnostic**.
+4. Analyser la vue **Famille** puis les onglets **Personnes**.
+5. Vérifier les logs/backups dans **Paramètres**.
+
+## Données, logs et backups
+
+Dossier utilisateur: `~/.patrimoine`
+
+- `logs/patrimoine.log`: logs applicatifs avec rotation.
+- `backups/`: backups automatiques SQLite (+ exports manuels possibles).
+
+## Tests
+
+Les tests actuels couvrent notamment:
+- `calculations`
+- `credits`
+- `imports`
+- `snapshots`
+
+Commande:
+
+```powershell
+pytest -q
+```
+
+## Build exécutable
+
+Fichiers PyInstaller disponibles:
+
+- `patrimoine.spec`
+- `Patrimoine Desktop.spec`
+
+Exemple:
+
+```powershell
+pyinstaller patrimoine.spec
+```
+
+## Roadmap
+
+- Renforcer la robustesse des imports hétérogènes.
+- Ajouter plus de règles de contrôle de valorisation.
+- Étendre la couverture de tests et les diagnostics automatiques.
+
+## Licence
+
+Projet privé, usage personnel/familial.

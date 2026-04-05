@@ -11,48 +11,6 @@
 
 ---
 
-## BUG-05 | `payer_account_id` — pas de FK, echec silencieux
-
-| | |
-|---|---|
-| **Gravite** | MOYEN |
-| **Fichier** | `services/credits.py` (L356-360), `db/schema.sql` (L91) |
-| **Statut** | PARTIELLEMENT CORRIGE |
-
-**Description** : La colonne `payer_account_id` existe maintenant dans le schema (via migration dans db.py L365), mais :
-- Pas de contrainte `FOREIGN KEY` vers `accounts(id)`
-- Le code retourne silencieusement `0.0` si `payer_account_id` est NULL (L356-360) au lieu de logger un warning
-
-**Correction** : Ajouter la FK dans le schema et logger un warning quand la valeur est NULL.
-
----
-
-## BUG-07 | `seed_minimal()` double execution schema
-
-| | |
-|---|---|
-| **Gravite** | FAIBLE |
-| **Fichier** | `services/db.py` |
-| **Statut** | A VERIFIER |
-
-**Description** : Verifier si `seed_minimal()` appelle toujours `init_db()` en interne, ce qui doublerait l'execution du schema au demarrage.
-
----
-
-## BUG-08 | `convert_weekly` retourne 0.0 si taux FX manquant
-
-| | |
-|---|---|
-| **Gravite** | ELEVE |
-| **Fichier** | `services/market_history.py` (L234-248) |
-| **Statut** | PARTIELLEMENT CORRIGE |
-
-**Description** : La fonction retourne maintenant `0.0` (au lieu de `amount` brut comme avant) quand le taux FX est introuvable. C'est plus securitaire (pas de surevaluation) mais **silencieux** — un actif USD entier disparait du patrimoine sans alerte visible.
-
-**Correction** : Ajouter un indicateur visuel dans le dashboard quand des taux FX manquent (flag dans le snapshot ou compteur d'alertes).
-
----
-
 ## BUG-09 | Performance snapshots — `.apply(lambda, axis=1)`
 
 | | |

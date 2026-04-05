@@ -689,6 +689,7 @@ class ImportPage(QScrollArea):
             w._export_thread = thread
 
             def _on_export_done(rc: int, msg: str) -> None:
+                w._export_thread = None
                 btn_export.setEnabled(True)
                 if msg:
                     for line in msg.splitlines():
@@ -763,6 +764,7 @@ class ImportPage(QScrollArea):
             w._preview_thread = thread  # garder une référence
 
             def _on_preview_done(result) -> None:
+                w._preview_thread = None
                 btn_export.setEnabled(True)
                 btn_import_csv.setEnabled(True)
                 btn_apply_mapping.setEnabled(True)
@@ -824,6 +826,7 @@ class ImportPage(QScrollArea):
                 result_lbl.setText("")
 
             def _on_preview_error(msg: str) -> None:
+                w._preview_thread = None
                 btn_export.setEnabled(True)
                 btn_import_csv.setEnabled(True)
                 btn_apply_mapping.setEnabled(True)
@@ -868,6 +871,7 @@ class ImportPage(QScrollArea):
                 pred_thread = _PredictionThread(filepath, pid)
                 w._prediction_thread = pred_thread
                 def _on_pred_done(results):
+                    w._prediction_thread = None
                     while multi_item_layout.count():
                         c = multi_item_layout.takeAt(0)
                         if c.widget(): c.widget().deleteLater()
@@ -906,6 +910,7 @@ class ImportPage(QScrollArea):
                     _apply_mapping_and_preview()
                 
                 def _on_pred_error(err):
+                    w._prediction_thread = None
                     _log(f"Erreur prédiction multi-compte : {err}", "#ef4444")
                     _execute_preview(filepath)
                     
@@ -993,6 +998,7 @@ class ImportPage(QScrollArea):
             w._upgrade_thread = t
 
             def _on_upgrade(rc, msg):
+                w._upgrade_thread = None
                 btn_update_pytr.setEnabled(True)
                 from services.tr_import import strip_ansi
                 for line in strip_ansi(msg).splitlines()[-5:]:  # Dernières 5 lignes

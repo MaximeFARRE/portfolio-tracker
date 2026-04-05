@@ -4,7 +4,8 @@ PRAGMA foreign_keys = ON;
 -- People
 CREATE TABLE IF NOT EXISTS people (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL UNIQUE
+  name TEXT NOT NULL UNIQUE,
+  tr_phone TEXT                          -- numéro TR pour export pytr
 );
 
 -- Accounts (onglets dynamiques)
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   amount REAL NOT NULL, -- montant total (positif). Le sens est géré par le type.
   category TEXT,
   note TEXT,
+  import_batch_id INTEGER REFERENCES import_batches(id) ON DELETE SET NULL,
   created_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE,
   FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
@@ -60,6 +62,7 @@ CREATE TABLE IF NOT EXISTS depenses (
     mois TEXT NOT NULL,          -- YYYY-MM-01 (on stocke le mois)
     categorie TEXT NOT NULL,
     montant REAL NOT NULL,
+    import_batch_id INTEGER REFERENCES import_batches(id) ON DELETE SET NULL,
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE
 );
@@ -74,6 +77,7 @@ CREATE TABLE IF NOT EXISTS revenus (
     mois TEXT NOT NULL,          -- YYYY-MM-01 (on stocke le mois)
     categorie TEXT NOT NULL,
     montant REAL NOT NULL,
+    import_batch_id INTEGER REFERENCES import_batches(id) ON DELETE SET NULL,
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE
 );
@@ -104,6 +108,7 @@ CREATE TABLE IF NOT EXISTS credits (
   updated_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE,
   FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+  FOREIGN KEY(payer_account_id) REFERENCES accounts(id) ON DELETE SET NULL,
   UNIQUE(account_id)                    -- 1 fiche crédit par sous-compte crédit
 );
 
@@ -285,6 +290,7 @@ CREATE TABLE IF NOT EXISTS patrimoine_snapshots_weekly (
   bourse_holdings REAL DEFAULT 0,
   pe_value REAL DEFAULT 0,
   ent_value REAL DEFAULT 0,
+  immobilier_value REAL DEFAULT 0,
   credits_remaining REAL DEFAULT 0,
 
   notes TEXT,
@@ -309,6 +315,7 @@ CREATE TABLE IF NOT EXISTS patrimoine_snapshots_family_weekly (
   bourse_holdings REAL DEFAULT 0,
   pe_value REAL DEFAULT 0,
   ent_value REAL DEFAULT 0,
+  immobilier_value REAL DEFAULT 0,
   credits_remaining REAL DEFAULT 0,
 
   notes TEXT,
@@ -320,4 +327,182 @@ ON patrimoine_snapshots_family_weekly(family_id, week_date);
 
 -- =========================================
 -- HISTORIQUE DES IMPORTS (AM-19)
--- 
+-- =========================================
+
+CREATE TABLE IF NOT EXISTS import_batches (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  import_type  TEXT NOT NULL,
+  person_id    INTEGER,
+  person_name  TEXT,
+  account_id   INTEGER,
+  account_name TEXT,
+  filename     TEXT,
+  imported_at  TEXT DEFAULT (datetime('now')),
+  nb_rows      INTEGER DEFAULT 0,
+  status       TEXT NOT NULL DEFAULT 'ACTIVE',
+  FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_batches_person
+ON import_batches(person_id, imported_at);
+
+
+-- =========================================
+-- SCHEMA VERSIONING
+-- =========================================
+
+CREATE TABLE IF NOT EXISTS schema_version (
+  version    INTEGER PRIMARY KEY,
+  applied_at TEXT DEFAULT (datetime('now')),
+  description TEXT
+);
+
+
+-- =========================================
+-- LEGACY SNAPSHOTS (instantanés ponctuels)
+-- =========================================
+
+CREATE TABLE IF NOT EXISTS patrimoine_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id INTEGER NOT NULL,
+  snapshot_date TEXT NOT NULL,        -- 'YYYY-MM-DD'
+  created_at TEXT NOT NULL,           -- ISO datetime
+  mode TEXT DEFAULT 'AUTO',
+
+  patrimoine_net REAL DEFAULT 0,
+  patrimoine_brut REAL DEFAULT 0,
+
+  liquidites_total REAL DEFAULT 0,
+  bank_cash REAL DEFAULT 0,
+  bourse_cash REAL DEFAULT 0,
+  pe_cash REAL DEFAULT 0,
+
+  bourse_holdings REAL DEFAULT 0,
+  pe_value REAL DEFAULT 0,
+  ent_value REAL DEFAULT 0,
+  immobilier_value REAL DEFAULT 0,
+  credits_remaining REAL DEFAULT 0,
+
+  notes TEXT,
+
+  FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE,
+  UNIQUE(person_id, snapshot_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_person_date
+ON patrimoine_snapshots(person_id, snapshot_date);
+
+
+-- =========================================
+-- ENTREPRISES
+-- =========================================
+
+CREATE TABLE IF NOT EXISTS enterprises (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  entity_type TEXT NOT NULL,
+  valuation_eur REAL NOT NULL DEFAULT 0,
+  debt_eur REAL NOT NULL DEFAULT 0,
+  note TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS enterprise_shares (
+  enterprise_id INTEGER NOT NULL,
+  person_id INTEGER NOT NULL,
+  pct REAL NOT NULL DEFAULT 0,
+  initial_invest_eur REAL NOT NULL DEFAULT 0,
+  cca_eur REAL NOT NULL DEFAULT 0,
+  initial_invest_date TEXT,
+  PRIMARY KEY (enterprise_id, person_id),
+  FOREIGN KEY (enterprise_id) REFERENCES enterprises(id) ON DELETE CASCADE,
+  FOREIGN KEY (person_id) REFERENCES people(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS enterprise_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  enterprise_id INTEGER NOT NULL,
+  changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  effective_date TEXT NOT NULL DEFAULT (date('now')),
+  valuation_eur REAL NOT NULL,
+  debt_eur REAL NOT NULL,
+  note TEXT,
+  FOREIGN KEY (enterprise_id) REFERENCES enterprises(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_eh_ent_date
+ON enterprise_history(enterprise_id, effective_date);
+
+
+-- =========================================
+-- IMMOBILIER
+-- =========================================
+
+CREATE TABLE IF NOT EXISTS immobiliers (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  name                TEXT    NOT NULL UNIQUE,
+  property_type       TEXT    NOT NULL DEFAULT 'AUTRE',
+  valuation_eur       REAL    NOT NULL DEFAULT 0,
+  debt_eur            REAL    NOT NULL DEFAULT 0,
+  monthly_rent_eur    REAL    NOT NULL DEFAULT 0,
+  annual_charges_eur  REAL    NOT NULL DEFAULT 0,
+  annual_tax_eur      REAL    NOT NULL DEFAULT 0,
+  note                TEXT,
+  effective_date      TEXT    NOT NULL DEFAULT (date('now')),
+  created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS immobilier_shares (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  property_id       INTEGER NOT NULL,
+  person_id         INTEGER NOT NULL,
+  pct               REAL    NOT NULL DEFAULT 100,
+  initial_invest_eur REAL   NOT NULL DEFAULT 0,
+  initial_date      TEXT,
+  UNIQUE (property_id, person_id),
+  FOREIGN KEY (property_id) REFERENCES immobiliers(id) ON DELETE CASCADE,
+  FOREIGN KEY (person_id)   REFERENCES people(id)      ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS immobilier_history (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  property_id         INTEGER NOT NULL,
+  valuation_eur       REAL    NOT NULL DEFAULT 0,
+  debt_eur            REAL    NOT NULL DEFAULT 0,
+  monthly_rent_eur    REAL    NOT NULL DEFAULT 0,
+  annual_charges_eur  REAL    NOT NULL DEFAULT 0,
+  annual_tax_eur      REAL    NOT NULL DEFAULT 0,
+  note                TEXT,
+  effective_date      TEXT    NOT NULL DEFAULT (date('now')),
+  created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (property_id) REFERENCES immobiliers(id) ON DELETE CASCADE
+);
+
+
+-- =========================================
+-- ISIN TICKER CACHE
+-- =========================================
+
+CREATE TABLE IF NOT EXISTS isin_ticker_cache (
+  isin        TEXT PRIMARY KEY,
+  ticker      TEXT,
+  source      TEXT,
+  resolved_at TEXT DEFAULT (datetime('now'))
+);
+
+
+-- =========================================
+-- REBUILD WATERMARKS
+-- =========================================
+
+CREATE TABLE IF NOT EXISTS rebuild_watermarks (
+  scope TEXT NOT NULL,          -- ex: 'WEEKLY_PERSON'
+  entity_id INTEGER NOT NULL,   -- person_id
+  last_tx_id INTEGER,
+  last_tx_created_at TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(scope, entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rw_scope_entity
+ON rebuild_watermarks(scope, entity_id);

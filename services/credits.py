@@ -1,7 +1,10 @@
+import logging
 import pandas as pd
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------
@@ -379,6 +382,7 @@ def cout_reel_mois_credit_via_bankin(conn, credit_id: int, mois_yyyy_mm_01: str)
     except (TypeError, KeyError):
         payer_val = row[1] if len(row) > 1 else None
     if payer_val is None:
+        logger.warning("cout_reel_mois_credit_via_bankin: credit_id=%s n'a pas de payer_account_id, retour 0.0", credit_id)
         return 0.0
     try:
         person_id = int(row["person_id"])

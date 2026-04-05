@@ -123,7 +123,7 @@ def insert_fx_rate(conn: sqlite3.Connection, base_ccy: str, quote_ccy: str, asof
     conn.commit()
 
 # -------- Transactions --------
-def list_transactions(conn: sqlite3.Connection, person_id: Optional[int] = None, account_id: Optional[int] = None, limit: int = 300) -> pd.DataFrame:
+def list_transactions(conn: sqlite3.Connection, person_id: Optional[int] = None, account_id: Optional[int] = None, limit: int = 300, date_asof: Optional[str] = None) -> pd.DataFrame:
     cols = [
         "id","date","person_id","account_id","type","asset_id","quantity","price","fees","amount","category","note",
         "asset_symbol","asset_name","account_name","person_name"
@@ -148,6 +148,9 @@ def list_transactions(conn: sqlite3.Connection, person_id: Optional[int] = None,
     if account_id is not None:
         where.append("t.account_id = ?")
         params.append(account_id)
+    if date_asof is not None:
+        where.append("t.date <= ?")
+        params.append(str(date_asof))
 
     q = base
     if where:
