@@ -667,10 +667,11 @@ def import_tr_transactions(
             existing = conn.execute(
                 """SELECT t.id FROM transactions t
                    LEFT JOIN assets a ON t.asset_id = a.id
+                   LEFT JOIN asset_meta am ON a.id = am.asset_id
                    WHERE t.date = ? AND t.account_id = ? AND t.type = ?
                      AND ABS(t.amount - ?) < 0.01
-                     AND a.isin = ?""",
-                (date_str, effective_account_id, tx_type, tx_amount, isin),
+                     AND (am.isin = ? OR a.symbol = ?)""",
+                (date_str, effective_account_id, tx_type, tx_amount, isin, isin),
             ).fetchone()
         else:
             existing = conn.execute(
