@@ -7,6 +7,21 @@ from services import repositories as repo
 
 
 # ---------- Helpers perf ----------
+def _has_column(conn, table_name: str, column_name: str) -> bool:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table_name});").fetchall()
+    except Exception:
+        return False
+    for row in rows:
+        try:
+            if str(row["name"]) == column_name:
+                return True
+        except Exception:
+            if len(row) > 1 and str(row[1]) == column_name:
+                return True
+    return False
+
+
 def _pct(a: float, b: float) -> Optional[float]:
     """Perf % entre a (base) et b (final)."""
     if a is None or b is None:
@@ -86,6 +101,9 @@ def get_family_series_from_people_snapshots(conn, person_ids: List[int]) -> pd.D
     if not person_ids:
         return pd.DataFrame()
 
+    has_immo = _has_column(conn, "patrimoine_snapshots_weekly", "immobilier_value")
+    immo_select = "SUM(immobilier_value) AS immobilier_value" if has_immo else "0.0 AS immobilier_value"
+
     q = ",".join(["?"] * len(person_ids))
     df = pd.read_sql_query(
         f"""
@@ -96,6 +114,7 @@ def get_family_series_from_people_snapshots(conn, person_ids: List[int]) -> pd.D
                SUM(bourse_holdings) AS bourse_holdings,
                SUM(pe_value) AS pe_value,
                SUM(ent_value) AS ent_value,
+               {immo_select},
                SUM(credits_remaining) AS credits_remaining
         FROM patrimoine_snapshots_weekly
         WHERE person_id IN ({q})
@@ -142,13 +161,15 @@ def get_last_common_week(conn, person_ids: List[int]) -> Optional[pd.Timestamp]:
 
 
 def get_person_snapshot_at_week(conn, person_id: int, week: pd.Timestamp) -> Optional[Dict]:
+    has_immo = _has_column(conn, "patrimoine_snapshots_weekly", "immobilier_value")
+    immo_select = "immobilier_value" if has_immo else "0.0 AS immobilier_value"
     df = pd.read_sql_query(
         """
         SELECT week_date, patrimoine_net, patrimoine_brut, liquidites_total,
-               bourse_holdings, pe_value, ent_value, credits_remaining
+               bourse_holdings, pe_value, ent_value, {immo_select}, credits_remaining
         FROM patrimoine_snapshots_weekly
         WHERE person_id=? AND week_date=?
-        """,
+        """.format(immo_select=immo_select),
         conn,
         params=(int(person_id), week.strftime("%Y-%m-%d")),
     )
@@ -191,6 +212,7 @@ def compute_allocations_family(df_family: pd.DataFrame) -> Dict:
         "Bourse": float(last.get("bourse_holdings", 0.0)),
         "Private Equity": float(last.get("pe_value", 0.0)),
         "Entreprises": float(last.get("ent_value", 0.0)),
+        "Immobilier": float(last.get("immobilier_value", 0.0)),
     }
     # Nettoyage (pas de négatifs)
     alloc = {k: max(0.0, float(v)) for k, v in alloc.items()}
@@ -212,6 +234,7 @@ def compute_people_table(conn, people: pd.DataFrame, common_week: pd.Timestamp) 
         liq = float(snap.get("liquidites_total", 0.0))
         pe = float(snap.get("pe_value", 0.0))
         ent = float(snap.get("ent_value", 0.0))
+        immo = float(snap.get("immobilier_value", 0.0))
         cred = float(snap.get("credits_remaining", 0.0))
 
         expo_bourse = (bourse / net * 100.0) if net > 0 else 0.0
@@ -224,6 +247,7 @@ def compute_people_table(conn, people: pd.DataFrame, common_week: pd.Timestamp) 
             "Bourse (€)": bourse,
             "PE (€)": pe,
             "Entreprises (€)": ent,
+            "Immobilier (€)": immo,
             "Crédits (€)": cred,
             "% Expo Bourse": round(expo_bourse, 1),
         })

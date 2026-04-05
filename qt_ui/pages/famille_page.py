@@ -5,6 +5,7 @@ Contient 3 onglets : Snapshots weekly, Diagnostic, Flux (V1)
 import logging
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QLabel,
     QPushButton, QScrollArea, QGroupBox, QComboBox, QSizePolicy,
@@ -25,6 +26,23 @@ from qt_ui.theme import (
 from utils.format_monnaie import money
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_var_pct(current: float, previous: float) -> float | None:
+    try:
+        cur = float(current)
+        prev = float(previous)
+    except Exception:
+        return None
+    if prev <= 0:
+        return None
+    return (cur / prev - 1.0) * 100.0
+
+
+def _fmt_var_pct(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{float(value):+.1f}%"
 
 
 # ─── Worker threads ──────────────────────────────────────────────────────────
@@ -179,6 +197,25 @@ class FamilleDashboardPanel(QWidget):
         pie_row.addWidget(right_box)
         self._layout.addLayout(pie_row)
 
+        # Allocation patrimoniale : évolution + détail
+        alloc_row = QHBoxLayout()
+
+        area_box = QGroupBox("📊 Évolution allocation patrimoniale")
+        area_box.setStyleSheet(STYLE_GROUP)
+        area_v = QVBoxLayout(area_box)
+        self._chart_alloc_area = PlotlyView(min_height=300)
+        area_v.addWidget(self._chart_alloc_area)
+
+        tree_box = QGroupBox("🧭 Treemap allocation détaillée")
+        tree_box.setStyleSheet(STYLE_GROUP)
+        tree_v = QVBoxLayout(tree_box)
+        self._chart_alloc_treemap = PlotlyView(min_height=300)
+        tree_v.addWidget(self._chart_alloc_treemap)
+
+        alloc_row.addWidget(area_box)
+        alloc_row.addWidget(tree_box)
+        self._layout.addLayout(alloc_row)
+
         # Leaderboards
         lbl_lead = QLabel("🏆 Classements (famille)")
         lbl_lead.setStyleSheet(STYLE_SECTION)
@@ -198,6 +235,299 @@ class FamilleDashboardPanel(QWidget):
         self._layout.addWidget(self._people_table)
 
         self._layout.addStretch()
+
+    def _build_line_chart(self, df_family: pd.DataFrame) -> None:
+        """Courbe net avec tooltip enrichi (détail + variation hebdo)."""
+        df_plot = df_family.copy()
+        df_plot["week_date"] = pd.to_datetime(df_plot["week_date"], errors="coerce")
+        df_plot = df_plot.dropna(subset=["week_date"]).sort_values("week_date").reset_index(drop=True)
+        if df_plot.empty:
+            return
+
+        for col in [
+            "patrimoine_brut",
+            "liquidites_total",
+            "bourse_holdings",
+            "pe_value",
+            "ent_value",
+            "immobilier_value",
+            "credits_remaining",
+        ]:
+            if col not in df_plot.columns:
+                df_plot[col] = 0.0
+
+        df_plot["var_net_pct"] = df_plot["patrimoine_net"].shift(0).combine(
+            df_plot["patrimoine_net"].shift(1),
+            lambda cur, prev: _compute_var_pct(cur, prev),
+        )
+        df_plot["var_net_txt"] = df_plot["var_net_pct"].apply(_fmt_var_pct)
+
+        custom = df_plot[
+            [
+                "patrimoine_brut",
+                "liquidites_total",
+                "bourse_holdings",
+                "pe_value",
+                "ent_value",
+                "immobilier_value",
+                "credits_remaining",
+                "var_net_txt",
+            ]
+        ].to_numpy()
+
+        fig_line = go.Figure()
+        fig_line.add_trace(
+            go.Scatter(
+                x=df_plot["week_date"],
+                y=df_plot["patrimoine_net"],
+                mode="lines+markers",
+                line=dict(width=2.4),
+                marker=dict(size=6),
+                customdata=custom,
+                hovertemplate=(
+                    "<b>%{x|%d/%m/%Y}</b>"
+                    "<br>Net: %{y:,.0f} €"
+                    "<br>Brut: %{customdata[0]:,.0f} €"
+                    "<br>Liquidités: %{customdata[1]:,.0f} €"
+                    "<br>Bourse: %{customdata[2]:,.0f} €"
+                    "<br>Private Equity: %{customdata[3]:,.0f} €"
+                    "<br>Entreprises: %{customdata[4]:,.0f} €"
+                    "<br>Immobilier: %{customdata[5]:,.0f} €"
+                    "<br>Crédits restants: %{customdata[6]:,.0f} €"
+                    "<br>Variation hebdo: %{customdata[7]}"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        fig_line.update_layout(
+            **plotly_layout(
+                margin=dict(l=0, r=0, t=20, b=0),
+                xaxis_title="Semaine",
+                yaxis_title="Patrimoine net (€)",
+                hovermode="x unified",
+            )
+        )
+        self._chart_line.set_figure(fig_line)
+
+    def _build_alloc_chart(self, alloc: dict, df_family: pd.DataFrame) -> None:
+        """Pie allocation enrichi avec part + variation hebdo par catégorie."""
+        prev_values: dict[str, float] = {}
+        if df_family is not None and len(df_family) >= 2:
+            prev = df_family.iloc[-2]
+            prev_values = {
+                "Liquidités": float(prev.get("liquidites_total", 0.0) or 0.0),
+                "Bourse": float(prev.get("bourse_holdings", 0.0) or 0.0),
+                "Private Equity": float(prev.get("pe_value", 0.0) or 0.0),
+                "Entreprises": float(prev.get("ent_value", 0.0) or 0.0),
+                "Immobilier": float(prev.get("immobilier_value", 0.0) or 0.0),
+            }
+
+        alloc_rows = []
+        for category, value in (alloc or {}).items():
+            amount = float(value or 0.0)
+            if amount <= 0:
+                continue
+            prev_amount = float(prev_values.get(category, 0.0))
+            alloc_rows.append(
+                {
+                    "Catégorie": category,
+                    "Valeur": amount,
+                    "var_txt": _fmt_var_pct(_compute_var_pct(amount, prev_amount)),
+                }
+            )
+
+        alloc_df = pd.DataFrame(alloc_rows)
+        if alloc_df.empty:
+            return
+
+        total = float(alloc_df["Valeur"].sum())
+        alloc_df["part_pct"] = (alloc_df["Valeur"] / total * 100.0).round(2) if total > 0 else 0.0
+
+        fig_alloc = px.pie(alloc_df, names="Catégorie", values="Valeur", hole=0.45)
+        fig_alloc.update_traces(
+            customdata=alloc_df[["part_pct", "var_txt"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{label}</b>"
+                "<br>Montant: %{value:,.0f} €"
+                "<br>Part: %{customdata[0]:.1f}%"
+                "<br>Variation hebdo: %{customdata[1]}"
+                "<extra></extra>"
+            ),
+        )
+        fig_alloc.update_layout(**plotly_layout(margin=dict(l=10, r=10, t=10, b=10)))
+        self._chart_alloc.set_figure(fig_alloc)
+
+    def _build_people_pie(self, df_people: pd.DataFrame) -> None:
+        """Pie par personne enrichi avec part + exposition bourse."""
+        person_alloc = df_people[["Personne", "Net (€)", "Bourse (€)", "% Expo Bourse"]].copy()
+        person_alloc = person_alloc[person_alloc["Net (€)"] > 0]
+        if person_alloc.empty:
+            return
+
+        total_net = float(person_alloc["Net (€)"].sum())
+        person_alloc["part_famille_pct"] = (
+            person_alloc["Net (€)"] / total_net * 100.0
+        ).round(2) if total_net > 0 else 0.0
+
+        fig_p = px.pie(person_alloc, names="Personne", values="Net (€)", hole=0.45)
+        fig_p.update_traces(
+            customdata=person_alloc[["part_famille_pct", "Bourse (€)", "% Expo Bourse"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{label}</b>"
+                "<br>Patrimoine net: %{value:,.0f} €"
+                "<br>Part famille: %{customdata[0]:.1f}%"
+                "<br>Bourse: %{customdata[1]:,.0f} €"
+                "<br>Expo bourse: %{customdata[2]:.1f}%"
+                "<extra></extra>"
+            ),
+        )
+        fig_p.update_layout(**plotly_layout(margin=dict(l=10, r=10, t=10, b=10)))
+        self._chart_people.set_figure(fig_p)
+
+    def _build_allocation_area_chart(self, df_family: pd.DataFrame) -> None:
+        """AM-05 : Stacked area allocation patrimoniale avec tooltips enrichis."""
+        if df_family is None or df_family.empty:
+            return
+
+        df_area = df_family.copy()
+        df_area["week_date"] = pd.to_datetime(df_area["week_date"], errors="coerce")
+        df_area = df_area.dropna(subset=["week_date"]).sort_values("week_date")
+        if df_area.empty:
+            return
+
+        category_map = {
+            "Liquidités": "liquidites_total",
+            "Bourse": "bourse_holdings",
+            "Private Equity": "pe_value",
+            "Entreprises": "ent_value",
+            "Immobilier": "immobilier_value",
+        }
+        for col in category_map.values():
+            if col not in df_area.columns:
+                df_area[col] = 0.0
+
+        melt = df_area[["week_date", *category_map.values()]].rename(columns={v: k for k, v in category_map.items()})
+        melt = melt.melt(id_vars="week_date", var_name="Catégorie", value_name="Valeur")
+        melt["Valeur"] = melt["Valeur"].fillna(0.0).clip(lower=0.0)
+        melt = melt.sort_values(["Catégorie", "week_date"]).reset_index(drop=True)
+
+        totals = melt.groupby("week_date")["Valeur"].transform("sum")
+        melt["part_pct"] = (melt["Valeur"] / totals * 100.0).where(totals > 0, 0.0)
+        melt["var_pct"] = melt.groupby("Catégorie")["Valeur"].pct_change() * 100.0
+        melt["var_txt"] = melt["var_pct"].apply(_fmt_var_pct)
+
+        fig_area = px.area(
+            melt,
+            x="week_date",
+            y="Valeur",
+            color="Catégorie",
+            category_orders={"Catégorie": list(category_map.keys())},
+            labels={"week_date": "Semaine", "Valeur": "Montant (€)"},
+        )
+
+        for trace in fig_area.data:
+            cat = trace.name
+            dcat = melt[melt["Catégorie"] == cat].sort_values("week_date")
+            trace.customdata = dcat[["part_pct", "var_txt"]].to_numpy()
+            trace.hovertemplate = (
+                "<b>%{x|%d/%m/%Y}</b>"
+                "<br>%{fullData.name}: %{y:,.0f} €"
+                "<br>Part du total: %{customdata[0]:.1f}%"
+                "<br>Variation hebdo: %{customdata[1]}"
+                "<extra></extra>"
+            )
+
+        fig_area.update_layout(
+            **plotly_layout(
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title="Semaine",
+                yaxis_title="Montant (€)",
+                hovermode="x unified",
+                legend_title_text="Catégorie",
+            )
+        )
+        self._chart_alloc_area.set_figure(fig_area)
+
+    def _build_allocation_treemap(
+        self,
+        df_people: pd.DataFrame,
+        df_people_prev: pd.DataFrame | None = None,
+    ) -> None:
+        """AM-06 : Treemap allocation détaillée par personne et catégorie."""
+        if df_people is None or df_people.empty:
+            return
+
+        category_cols = {
+            "Liquidités": "Liquidités (€)",
+            "Bourse": "Bourse (€)",
+            "Private Equity": "PE (€)",
+            "Entreprises": "Entreprises (€)",
+            "Immobilier": "Immobilier (€)",
+        }
+
+        prev_map: dict[tuple[str, str], float] = {}
+        if df_people_prev is not None and not df_people_prev.empty:
+            for _, row in df_people_prev.iterrows():
+                name = str(row.get("Personne", ""))
+                for category, col in category_cols.items():
+                    prev_map[(name, category)] = float(row.get(col, 0.0) or 0.0)
+
+        rows = []
+        for _, row in df_people.iterrows():
+            person = str(row.get("Personne", ""))
+            person_total = 0.0
+            values = {}
+            for category, col in category_cols.items():
+                value = max(0.0, float(row.get(col, 0.0) or 0.0))
+                values[category] = value
+                person_total += value
+            if person_total <= 0:
+                continue
+
+            for category, value in values.items():
+                if value <= 0:
+                    continue
+                prev_val = prev_map.get((person, category))
+                rows.append(
+                    {
+                        "Portefeuille": "Famille",
+                        "Personne": person,
+                        "Catégorie": category,
+                        "Valeur": value,
+                        "Part personne (%)": value / person_total * 100.0,
+                        "var_txt": _fmt_var_pct(_compute_var_pct(value, prev_val)) if prev_val is not None else "n/a",
+                    }
+                )
+
+        tree_df = pd.DataFrame(rows)
+        if tree_df.empty:
+            return
+
+        total = float(tree_df["Valeur"].sum())
+        tree_df["Part famille (%)"] = (
+            tree_df["Valeur"] / total * 100.0
+        ).round(2) if total > 0 else 0.0
+
+        fig_tree = px.treemap(
+            tree_df,
+            path=["Portefeuille", "Personne", "Catégorie"],
+            values="Valeur",
+            color="Catégorie",
+            custom_data=["Part famille (%)", "Part personne (%)", "var_txt"],
+        )
+        fig_tree.update_traces(
+            hovertemplate=(
+                "<b>%{label}</b>"
+                "<br>Montant: %{value:,.0f} €"
+                "<br>Part parent: %{percentParent}"
+                "<br>Part famille: %{customdata[0]}%"
+                "<br>Part personne: %{customdata[1]}%"
+                "<br>Variation hebdo: %{customdata[2]}"
+                "<extra></extra>"
+            ),
+        )
+        fig_tree.update_layout(**plotly_layout(margin=dict(l=10, r=10, t=10, b=10)))
+        self._chart_alloc_treemap.set_figure(fig_tree)
 
     def refresh(self) -> None:
         try:
@@ -232,34 +562,35 @@ class FamilleDashboardPanel(QWidget):
             self._kpi_12m.set_content("Évolution 12 mois", f"{p12m:.1f}%" if p12m is not None else "—")
             self._kpi_cagr.set_content("Rendement annualisé", f"{cagr:.1f}%" if cagr is not None else "—")
 
-            # Courbe
-            df_plot = df_family.copy()
-            df_plot["week_date"] = pd.to_datetime(df_plot["week_date"])
-            fig_line = px.line(df_plot, x="week_date", y="patrimoine_net",
-                               template="plotly_dark",
-                               labels={"week_date": "Semaine", "patrimoine_net": "Patrimoine net (€)"})
-            fig_line.update_layout(**plotly_layout(margin=dict(l=0, r=0, t=20, b=0)))
-            self._chart_line.set_figure(fig_line)
+            # Courbe (tooltips enrichis)
+            self._build_line_chart(df_family)
 
-            # Pie allocation
+            # Pie allocation (tooltips enrichis)
             alloc = fd.compute_allocations_family(df_family)
-            alloc_df = pd.DataFrame([{"Catégorie": k, "Valeur": v} for k, v in alloc.items() if v > 0])
-            if not alloc_df.empty:
-                fig_alloc = px.pie(alloc_df, names="Catégorie", values="Valeur", hole=0.45, template="plotly_dark")
-                fig_alloc.update_layout(**plotly_layout(margin=dict(l=10, r=10, t=10, b=10)))
-                self._chart_alloc.set_figure(fig_alloc)
+            self._build_alloc_chart(alloc, df_family)
+            self._build_allocation_area_chart(df_family)
 
             # Pie personnes
+            df_people = pd.DataFrame()
             if common_week is not None:
                 df_people = fd.compute_people_table(self._conn, people, common_week)
                 if not df_people.empty:
-                    person_alloc = df_people[["Personne", "Net (€)"]].copy()
-                    person_alloc = person_alloc[person_alloc["Net (€)"] > 0]
-                    if not person_alloc.empty:
-                        fig_p = px.pie(person_alloc, names="Personne", values="Net (€)", hole=0.45, template="plotly_dark")
-                        fig_p.update_layout(**plotly_layout(margin=dict(l=10, r=10, t=10, b=10)))
-                        self._chart_people.set_figure(fig_p)
+                    self._build_people_pie(df_people)
                     self._people_table.set_dataframe(df_people)
+
+            # Treemap détaillée (avec variation hebdo si semaine précédente dispo)
+            if not df_people.empty:
+                prev_week = None
+                if len(df_family) >= 2:
+                    df_dates = pd.to_datetime(df_family["week_date"], errors="coerce").dropna().sort_values().unique()
+                    if len(df_dates) >= 2:
+                        prev_week = pd.Timestamp(df_dates[-2])
+                df_people_prev = (
+                    fd.compute_people_table(self._conn, people, prev_week)
+                    if prev_week is not None
+                    else pd.DataFrame()
+                )
+                self._build_allocation_treemap(df_people, df_people_prev)
 
             # Leaderboards
             if common_week is not None:
