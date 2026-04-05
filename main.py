@@ -46,6 +46,7 @@ QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
 from core.db_connection import get_connection, close_connection
 from qt_ui.main_window import MainWindow
+from qt_ui.theme import app_style_sheet, get_current_theme
 
 
 # ── Exception handler global ──────────────────────────────────────────────
@@ -139,45 +140,9 @@ def main():
     app.setApplicationName("Patrimoine Desktop")
     app.setOrganizationName("Famille")
 
-    # Style global (dark theme)
-    app.setStyleSheet("""
-        QWidget {
-            font-family: 'Segoe UI', Arial, sans-serif;
-            font-size: 13px;
-            color: #e2e8f0;
-        }
-        QLabel { color: #e2e8f0; }
-        QScrollBar:vertical {
-            background: #0f1623;
-            width: 8px;
-            border-radius: 4px;
-        }
-        QScrollBar::handle:vertical {
-            background: #334155;
-            border-radius: 4px;
-            min-height: 20px;
-        }
-        QScrollBar::handle:vertical:hover { background: #475569; }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-        QScrollBar:horizontal {
-            background: #0f1623;
-            height: 8px;
-            border-radius: 4px;
-        }
-        QScrollBar::handle:horizontal {
-            background: #334155;
-            border-radius: 4px;
-            min-width: 20px;
-        }
-        QScrollBar::handle:horizontal:hover { background: #475569; }
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
-        QToolTip {
-            background: #1e2538;
-            color: #e2e8f0;
-            border: 1px solid #2a3040;
-            padding: 4px;
-        }
-    """)
+    # Style global selon le thème choisi dans les préférences.
+    app.setStyleSheet(app_style_sheet())
+    logger.info("Thème UI chargé : %s", get_current_theme())
 
     # Connexion DB
     try:

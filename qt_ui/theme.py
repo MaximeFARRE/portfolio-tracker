@@ -3,70 +3,203 @@ Theme centralisé pour l'application Patrimoine Desktop.
 Toutes les couleurs, styles et constantes visuelles sont définies ici.
 """
 
+from __future__ import annotations
+
+from PyQt6.QtCore import QSettings
+
+_SETTINGS_ORG = "Famille"
+_SETTINGS_APP = "PatrimoineDesktop"
+_THEME_KEY = "ui_theme"
+
+THEME_DARK = "dark"
+THEME_LIGHT = "light"
+AVAILABLE_THEMES = (THEME_DARK, THEME_LIGHT)
+
+
+def _normalize_theme(value: object) -> str:
+    mode = str(value or "").strip().lower()
+    return THEME_LIGHT if mode == THEME_LIGHT else THEME_DARK
+
+
+def get_saved_theme() -> str:
+    try:
+        settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
+        return _normalize_theme(settings.value(_THEME_KEY, THEME_DARK))
+    except Exception:
+        return THEME_DARK
+
+
+def set_saved_theme(theme_mode: str) -> str:
+    mode = _normalize_theme(theme_mode)
+    settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
+    settings.setValue(_THEME_KEY, mode)
+    settings.sync()
+    return mode
+
+
+def get_current_theme() -> str:
+    return _ACTIVE_THEME
+
+
+def is_dark_theme() -> bool:
+    return _ACTIVE_THEME == THEME_DARK
+
+
+_PALETTE_DARK = {
+    "BG_PRIMARY": "#0e1117",
+    "BG_SIDEBAR": "#0f1623",
+    "BG_CARD": "#1a1f2e",
+    "BG_CARD_ALT": "#151b27",
+    "BG_HOVER": "#1e2538",
+    "BG_ACTIVE": "#1e3a5f",
+    "BG_ACTIVE_HOVER": "#1e4a7f",
+    "BORDER_DEFAULT": "#2a3040",
+    "BORDER_SUBTLE": "#1e2538",
+    "TEXT_PRIMARY": "#e2e8f0",
+    "TEXT_SECONDARY": "#94a3b8",
+    "TEXT_MUTED": "#64748b",
+    "TEXT_DISABLED": "#475569",
+    "TEXT_DARK": "#334155",
+    "ACCENT_BLUE": "#60a5fa",
+    "ACCENT_BLUE_BORDER": "#2563eb",
+    "COLOR_SUCCESS": "#22c55e",
+    "COLOR_ERROR": "#ef4444",
+    "COLOR_WARNING": "#f59e0b",
+    "COLOR_SELECTION": "#2563eb",
+    "COLOR_UNDO_BG": "#431407",
+    "COLOR_UNDO_FG": "#fb923c",
+    "COLOR_UNDO_HOVER": "#7c2d12",
+    "COLOR_BTN_SUCCESS_BG": "#166534",
+    "COLOR_BTN_SUCCESS_FG": "#86efac",
+    "COLOR_BTN_SUCCESS_HOVER": "#14532d",
+    "COLOR_DANGER_BG": "#7f1d1d",
+    "COLOR_DANGER_FG": "#fca5a5",
+    "COLOR_DANGER_HOVER": "#991b1b",
+    "CHART_GREEN": "#22c55e",
+    "CHART_RED": "#ef4444",
+    "CHART_BLUE": "#60a5fa",
+    "CHART_PURPLE": "#a78bfa",
+    "CHART_SANKEY": "rgba(37,99,235,0.3)",
+}
+
+_PALETTE_LIGHT = {
+    "BG_PRIMARY": "#f4f7fb",
+    "BG_SIDEBAR": "#ecf1f8",
+    "BG_CARD": "#ffffff",
+    "BG_CARD_ALT": "#f8fafc",
+    "BG_HOVER": "#dde6f2",
+    "BG_ACTIVE": "#dbeafe",
+    "BG_ACTIVE_HOVER": "#bfdbfe",
+    "BORDER_DEFAULT": "#cbd5e1",
+    "BORDER_SUBTLE": "#d7e0ed",
+    "TEXT_PRIMARY": "#0f172a",
+    "TEXT_SECONDARY": "#334155",
+    "TEXT_MUTED": "#475569",
+    "TEXT_DISABLED": "#64748b",
+    "TEXT_DARK": "#94a3b8",
+    "ACCENT_BLUE": "#2563eb",
+    "ACCENT_BLUE_BORDER": "#1d4ed8",
+    "COLOR_SUCCESS": "#16a34a",
+    "COLOR_ERROR": "#dc2626",
+    "COLOR_WARNING": "#d97706",
+    "COLOR_SELECTION": "#93c5fd",
+    "COLOR_UNDO_BG": "#ffedd5",
+    "COLOR_UNDO_FG": "#c2410c",
+    "COLOR_UNDO_HOVER": "#fed7aa",
+    "COLOR_BTN_SUCCESS_BG": "#dcfce7",
+    "COLOR_BTN_SUCCESS_FG": "#166534",
+    "COLOR_BTN_SUCCESS_HOVER": "#bbf7d0",
+    "COLOR_DANGER_BG": "#fee2e2",
+    "COLOR_DANGER_FG": "#b91c1c",
+    "COLOR_DANGER_HOVER": "#fecaca",
+    "CHART_GREEN": "#16a34a",
+    "CHART_RED": "#dc2626",
+    "CHART_BLUE": "#2563eb",
+    "CHART_PURPLE": "#7c3aed",
+    "CHART_SANKEY": "rgba(37,99,235,0.25)",
+}
+
+_ACTIVE_THEME = get_saved_theme()
+_PALETTE = _PALETTE_LIGHT if _ACTIVE_THEME == THEME_LIGHT else _PALETTE_DARK
+
 # ─── Couleurs de base ──────────────────────────────────────────────────────
 
-BG_PRIMARY = "#0e1117"       # Fond principal de l'application
-BG_SIDEBAR = "#0f1623"       # Fond sidebar / headers
-BG_CARD = "#1a1f2e"          # Fond des cartes, inputs, tableaux (alt row)
-BG_CARD_ALT = "#151b27"      # Fond alterné des lignes de tableaux
-BG_HOVER = "#1e2538"         # Fond hover des éléments interactifs
-BG_ACTIVE = "#1e3a5f"        # Fond des éléments actifs (boutons, sélection)
-BG_ACTIVE_HOVER = "#1e4a7f"  # Fond hover des éléments actifs
+BG_PRIMARY = _PALETTE["BG_PRIMARY"]       # Fond principal de l'application
+BG_SIDEBAR = _PALETTE["BG_SIDEBAR"]       # Fond sidebar / headers
+BG_CARD = _PALETTE["BG_CARD"]             # Fond des cartes, inputs, tableaux (alt row)
+BG_CARD_ALT = _PALETTE["BG_CARD_ALT"]     # Fond alterné des lignes de tableaux
+BG_HOVER = _PALETTE["BG_HOVER"]           # Fond hover des éléments interactifs
+BG_ACTIVE = _PALETTE["BG_ACTIVE"]         # Fond des éléments actifs (boutons, sélection)
+BG_ACTIVE_HOVER = _PALETTE["BG_ACTIVE_HOVER"]  # Fond hover des éléments actifs
 
-BORDER_DEFAULT = "#2a3040"   # Bordures des inputs, tableaux
-BORDER_SUBTLE = "#1e2538"    # Bordures subtiles (séparateurs, groupbox)
+BORDER_DEFAULT = _PALETTE["BORDER_DEFAULT"]   # Bordures des inputs, tableaux
+BORDER_SUBTLE = _PALETTE["BORDER_SUBTLE"]     # Bordures subtiles (séparateurs, groupbox)
 
-TEXT_PRIMARY = "#e2e8f0"      # Texte principal
-TEXT_SECONDARY = "#94a3b8"    # Texte secondaire (labels, titres de section)
-TEXT_MUTED = "#64748b"        # Texte discret (statuts, hints)
-TEXT_DISABLED = "#475569"     # Texte désactivé
-TEXT_DARK = "#334155"         # Texte très discret (version)
+TEXT_PRIMARY = _PALETTE["TEXT_PRIMARY"]      # Texte principal
+TEXT_SECONDARY = _PALETTE["TEXT_SECONDARY"]  # Texte secondaire (labels, titres de section)
+TEXT_MUTED = _PALETTE["TEXT_MUTED"]          # Texte discret (statuts, hints)
+TEXT_DISABLED = _PALETTE["TEXT_DISABLED"]    # Texte désactivé
+TEXT_DARK = _PALETTE["TEXT_DARK"]            # Texte très discret (version)
 
-ACCENT_BLUE = "#60a5fa"      # Accent principal (onglets actifs, liens)
-ACCENT_BLUE_BORDER = "#2563eb"
+ACCENT_BLUE = _PALETTE["ACCENT_BLUE"]      # Accent principal (onglets actifs, liens)
+ACCENT_BLUE_BORDER = _PALETTE["ACCENT_BLUE_BORDER"]
 
-COLOR_SUCCESS = "#22c55e"    # Vert succès
-COLOR_ERROR = "#ef4444"      # Rouge erreur
-COLOR_WARNING = "#f59e0b"    # Orange avertissement
-COLOR_SELECTION = "#2563eb"  # Bleu sélection tableau
+COLOR_SUCCESS = _PALETTE["COLOR_SUCCESS"]    # Vert succès
+COLOR_ERROR = _PALETTE["COLOR_ERROR"]        # Rouge erreur
+COLOR_WARNING = _PALETTE["COLOR_WARNING"]    # Orange avertissement
+COLOR_SELECTION = _PALETTE["COLOR_SELECTION"]  # Bleu sélection tableau
 
 # ─── Couleurs KPI tones ───────────────────────────────────────────────────
 
-KPI_TONES = {
-    "primary": ("#111827", "#E5E7EB"),
-    "blue":    ("#1E3A8A", "#DBEAFE"),
-    "green":   ("#0B3B2E", "#D1FAE5"),
-    "purple":  ("#4C1D95", "#EDE9FE"),
-    "neutral": (BG_CARD, TEXT_SECONDARY),
-    "red":     ("#7F1D1D", "#FEE2E2"),
-    "bank":    ("#0B3B2E", "#D1FAE5"),
-    "broker":  ("#1E3A8A", "#DBEAFE"),
-    "pe":      ("#4C1D95", "#EDE9FE"),
-    # Tones dynamiques (gain/perte)
-    "success": ("#0a2e1a", "#4ade80"),
-    "alert":   ("#2e0a0a", "#f87171"),
-}
+if _ACTIVE_THEME == THEME_LIGHT:
+    KPI_TONES = {
+        "primary": ("#dbeafe", "#1e3a8a"),
+        "blue":    ("#dbeafe", "#1e3a8a"),
+        "green":   ("#dcfce7", "#166534"),
+        "purple":  ("#ede9fe", "#5b21b6"),
+        "neutral": (BG_CARD, TEXT_SECONDARY),
+        "red":     ("#fee2e2", "#991b1b"),
+        "bank":    ("#dcfce7", "#166534"),
+        "broker":  ("#dbeafe", "#1e3a8a"),
+        "pe":      ("#ede9fe", "#5b21b6"),
+        "success": ("#dcfce7", "#166534"),
+        "alert":   ("#fee2e2", "#b91c1c"),
+    }
+else:
+    KPI_TONES = {
+        "primary": ("#111827", "#E5E7EB"),
+        "blue":    ("#1E3A8A", "#DBEAFE"),
+        "green":   ("#0B3B2E", "#D1FAE5"),
+        "purple":  ("#4C1D95", "#EDE9FE"),
+        "neutral": (BG_CARD, TEXT_SECONDARY),
+        "red":     ("#7F1D1D", "#FEE2E2"),
+        "bank":    ("#0B3B2E", "#D1FAE5"),
+        "broker":  ("#1E3A8A", "#DBEAFE"),
+        "pe":      ("#4C1D95", "#EDE9FE"),
+        "success": ("#0a2e1a", "#4ade80"),
+        "alert":   ("#2e0a0a", "#f87171"),
+    }
 
 # ─── Couleurs spécifiques ─────────────────────────────────────────────────
 
-COLOR_UNDO_BG = "#431407"
-COLOR_UNDO_FG = "#fb923c"
-COLOR_UNDO_HOVER = "#7c2d12"
+COLOR_UNDO_BG = _PALETTE["COLOR_UNDO_BG"]
+COLOR_UNDO_FG = _PALETTE["COLOR_UNDO_FG"]
+COLOR_UNDO_HOVER = _PALETTE["COLOR_UNDO_HOVER"]
 
-COLOR_BTN_SUCCESS_BG = "#166534"
-COLOR_BTN_SUCCESS_FG = "#86efac"
-COLOR_BTN_SUCCESS_HOVER = "#14532d"
+COLOR_BTN_SUCCESS_BG = _PALETTE["COLOR_BTN_SUCCESS_BG"]
+COLOR_BTN_SUCCESS_FG = _PALETTE["COLOR_BTN_SUCCESS_FG"]
+COLOR_BTN_SUCCESS_HOVER = _PALETTE["COLOR_BTN_SUCCESS_HOVER"]
 
-COLOR_DANGER_BG = "#7f1d1d"
-COLOR_DANGER_FG = "#fca5a5"
-COLOR_DANGER_HOVER = "#991b1b"
+COLOR_DANGER_BG = _PALETTE["COLOR_DANGER_BG"]
+COLOR_DANGER_FG = _PALETTE["COLOR_DANGER_FG"]
+COLOR_DANGER_HOVER = _PALETTE["COLOR_DANGER_HOVER"]
 
 # Couleurs des graphiques
-CHART_GREEN = "#22c55e"
-CHART_RED = "#ef4444"
-CHART_BLUE = "#60a5fa"
-CHART_PURPLE = "#a78bfa"
-CHART_SANKEY = "rgba(37,99,235,0.3)"
+CHART_GREEN = _PALETTE["CHART_GREEN"]
+CHART_RED = _PALETTE["CHART_RED"]
+CHART_BLUE = _PALETTE["CHART_BLUE"]
+CHART_PURPLE = _PALETTE["CHART_PURPLE"]
+CHART_SANKEY = _PALETTE["CHART_SANKEY"]
 
 # ─── Styles réutilisables ─────────────────────────────────────────────────
 
@@ -168,7 +301,7 @@ STYLE_TAB_INNER = f"""
 STYLE_TABLE = f"""
     QTableView {{
         background-color: {BG_CARD_ALT};
-        color: #e0e0e0;
+        color: {TEXT_PRIMARY};
         gridline-color: {BORDER_DEFAULT};
         border: 1px solid {BORDER_DEFAULT};
         selection-background-color: {COLOR_SELECTION};
@@ -231,12 +364,55 @@ STYLE_STATUS_WARNING = f"color: {COLOR_WARNING}; font-size: 12px;"
 
 STYLE_FORM_LABEL = f"color: {TEXT_SECONDARY}; font-size: 13px;"
 
+# ─── Styles globaux application ────────────────────────────────────────────
+
+def app_style_sheet() -> str:
+    """Styles globaux Qt appliqués au lancement de l'application."""
+    return f"""
+        QWidget {{
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 13px;
+            color: {TEXT_PRIMARY};
+        }}
+        QLabel {{ color: {TEXT_PRIMARY}; }}
+        QScrollBar:vertical {{
+            background: {BG_SIDEBAR};
+            width: 8px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {TEXT_DARK};
+            border-radius: 4px;
+            min-height: 20px;
+        }}
+        QScrollBar::handle:vertical:hover {{ background: {TEXT_MUTED}; }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        QScrollBar:horizontal {{
+            background: {BG_SIDEBAR};
+            height: 8px;
+            border-radius: 4px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {TEXT_DARK};
+            border-radius: 4px;
+            min-width: 20px;
+        }}
+        QScrollBar::handle:horizontal:hover {{ background: {TEXT_MUTED}; }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+        QToolTip {{
+            background: {BG_HOVER};
+            color: {TEXT_PRIMARY};
+            border: 1px solid {BORDER_DEFAULT};
+            padding: 4px;
+        }}
+    """
+
 # ─── Plotly layout commun ─────────────────────────────────────────────────
 
 PLOTLY_LAYOUT = dict(
     paper_bgcolor=BG_PRIMARY,
     plot_bgcolor=BG_PRIMARY,
-    template="plotly_dark",
+    template=("plotly_dark" if is_dark_theme() else "plotly_white"),
     margin=dict(l=0, r=0, t=10, b=0),
 )
 
@@ -248,7 +424,7 @@ PLOTLY_RANGE_SELECTOR = dict(
         dict(count=1, label="1Y", step="year", stepmode="backward"),
         dict(step="all", label="ALL")
     ]),
-    bgcolor="rgba(30, 41, 59, 0.4)",
+    bgcolor=("rgba(30, 41, 59, 0.4)" if is_dark_theme() else "rgba(148,163,184,0.25)"),
     activecolor=ACCENT_BLUE,
     font=dict(size=11, color=TEXT_PRIMARY),
     borderwidth=1,

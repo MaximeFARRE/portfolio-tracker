@@ -342,6 +342,8 @@ def list_scenarios(
                 horizon_years, expected_return_pct, inflation_pct,
                 income_growth_pct, expense_growth_pct, monthly_savings_override,
                 fire_multiple, use_real_snapshot_base, initial_net_worth_override,
+                return_liquidites_pct, return_bourse_pct, return_immobilier_pct,
+                return_pe_pct, return_entreprises_pct, exclude_primary_residence,
                 created_at, updated_at
             FROM projection_scenarios
             WHERE {' AND '.join(where)}
@@ -352,44 +354,26 @@ def list_scenarios(
     except sqlite3.OperationalError:
         return pd.DataFrame(
             columns=[
-                "id",
-                "name",
-                "scope_type",
-                "scope_id",
-                "is_default",
-                "horizon_years",
-                "expected_return_pct",
-                "inflation_pct",
-                "income_growth_pct",
-                "expense_growth_pct",
-                "monthly_savings_override",
-                "fire_multiple",
-                "use_real_snapshot_base",
-                "initial_net_worth_override",
-                "created_at",
-                "updated_at",
+                "id", "name", "scope_type", "scope_id", "is_default",
+                "horizon_years", "expected_return_pct", "inflation_pct",
+                "income_growth_pct", "expense_growth_pct", "monthly_savings_override",
+                "fire_multiple", "use_real_snapshot_base", "initial_net_worth_override",
+                "return_liquidites_pct", "return_bourse_pct", "return_immobilier_pct",
+                "return_pe_pct", "return_entreprises_pct", "exclude_primary_residence",
+                "created_at", "updated_at",
             ]
         )
 
     return df_from_rows(
         rows,
         [
-            "id",
-            "name",
-            "scope_type",
-            "scope_id",
-            "is_default",
-            "horizon_years",
-            "expected_return_pct",
-            "inflation_pct",
-            "income_growth_pct",
-            "expense_growth_pct",
-            "monthly_savings_override",
-            "fire_multiple",
-            "use_real_snapshot_base",
-            "initial_net_worth_override",
-            "created_at",
-            "updated_at",
+            "id", "name", "scope_type", "scope_id", "is_default",
+            "horizon_years", "expected_return_pct", "inflation_pct",
+            "income_growth_pct", "expense_growth_pct", "monthly_savings_override",
+            "fire_multiple", "use_real_snapshot_base", "initial_net_worth_override",
+            "return_liquidites_pct", "return_bourse_pct", "return_immobilier_pct",
+            "return_pe_pct", "return_entreprises_pct", "exclude_primary_residence",
+            "created_at", "updated_at",
         ],
     )
 
@@ -416,6 +400,13 @@ def create_scenario(conn: sqlite3.Connection, data: dict) -> int:
             data.get("fire_multiple", 25.0), "Le multiple FIRE", 1.0, 200.0, 25.0
         ),
         "use_real_snapshot_base": 1 if _to_int(data.get("use_real_snapshot_base", 1)) else 0,
+        # Rendements par classe
+        "return_liquidites_pct":  _validate_float_range(data.get("return_liquidites_pct",  2.0), "Rendement liquidités",  -20.0, 50.0, 2.0),
+        "return_bourse_pct":      _validate_float_range(data.get("return_bourse_pct",      7.0), "Rendement bourse",      -20.0, 50.0, 7.0),
+        "return_immobilier_pct":  _validate_float_range(data.get("return_immobilier_pct",  3.5), "Rendement immobilier",  -20.0, 50.0, 3.5),
+        "return_pe_pct":          _validate_float_range(data.get("return_pe_pct",         10.0), "Rendement PE",          -20.0, 50.0, 10.0),
+        "return_entreprises_pct": _validate_float_range(data.get("return_entreprises_pct", 5.0), "Rendement entreprises", -20.0, 50.0, 5.0),
+        "exclude_primary_residence": 1 if data.get("exclude_primary_residence") else 0,
     }
     if payload["horizon_years"] < 1:
         raise ValueError("L'horizon doit être supérieur ou égal à 1 an.")
@@ -440,9 +431,11 @@ def create_scenario(conn: sqlite3.Connection, data: dict) -> int:
             horizon_years, expected_return_pct, inflation_pct,
             income_growth_pct, expense_growth_pct, monthly_savings_override,
             fire_multiple, use_real_snapshot_base, initial_net_worth_override,
+            return_liquidites_pct, return_bourse_pct, return_immobilier_pct,
+            return_pe_pct, return_entreprises_pct, exclude_primary_residence,
             created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
         """,
         (
             payload["name"],
@@ -458,6 +451,12 @@ def create_scenario(conn: sqlite3.Connection, data: dict) -> int:
             payload["fire_multiple"],
             payload["use_real_snapshot_base"],
             payload["initial_net_worth_override"],
+            payload["return_liquidites_pct"],
+            payload["return_bourse_pct"],
+            payload["return_immobilier_pct"],
+            payload["return_pe_pct"],
+            payload["return_entreprises_pct"],
+            payload["exclude_primary_residence"],
         ),
     )
     conn.commit()
@@ -527,6 +526,18 @@ def update_scenario(conn: sqlite3.Connection, scenario_id: int, data: dict) -> N
             1_000_000_000_000.0,
             0.0,
         )
+    # Rendements par classe
+    for field, label, default in [
+        ("return_liquidites_pct",  "Rendement liquidités",  2.0),
+        ("return_bourse_pct",      "Rendement bourse",      7.0),
+        ("return_immobilier_pct",  "Rendement immobilier",  3.5),
+        ("return_pe_pct",          "Rendement PE",         10.0),
+        ("return_entreprises_pct", "Rendement entreprises", 5.0),
+    ]:
+        if field in payload:
+            payload[field] = _validate_float_range(payload.get(field), label, -20.0, 50.0, default)
+    if "exclude_primary_residence" in payload:
+        payload["exclude_primary_residence"] = 1 if payload.get("exclude_primary_residence") else 0
 
     allowed_fields = [
         "name",
@@ -542,6 +553,12 @@ def update_scenario(conn: sqlite3.Connection, scenario_id: int, data: dict) -> N
         "fire_multiple",
         "use_real_snapshot_base",
         "initial_net_worth_override",
+        "return_liquidites_pct",
+        "return_bourse_pct",
+        "return_immobilier_pct",
+        "return_pe_pct",
+        "return_entreprises_pct",
+        "exclude_primary_residence",
     ]
 
     set_parts = []

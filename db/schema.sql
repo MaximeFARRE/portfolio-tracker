@@ -382,7 +382,7 @@ CREATE TABLE IF NOT EXISTS projection_scenarios (
   scope_id INTEGER,
   is_default INTEGER NOT NULL DEFAULT 0,
   horizon_years INTEGER NOT NULL DEFAULT 10,
-  expected_return_pct REAL NOT NULL DEFAULT 6.0,
+  expected_return_pct REAL NOT NULL DEFAULT 6.0,   -- moyenne pondérée calculée (lecture seule)
   inflation_pct REAL NOT NULL DEFAULT 2.0,
   income_growth_pct REAL NOT NULL DEFAULT 0.0,
   expense_growth_pct REAL NOT NULL DEFAULT 0.0,
@@ -390,6 +390,13 @@ CREATE TABLE IF NOT EXISTS projection_scenarios (
   fire_multiple REAL NOT NULL DEFAULT 25.0,
   use_real_snapshot_base INTEGER NOT NULL DEFAULT 1,
   initial_net_worth_override REAL,
+  -- Rendements par classe d'actif (%)
+  return_liquidites_pct   REAL DEFAULT 2.0,
+  return_bourse_pct       REAL DEFAULT 7.0,
+  return_immobilier_pct   REAL DEFAULT 3.5,
+  return_pe_pct           REAL DEFAULT 10.0,
+  return_entreprises_pct  REAL DEFAULT 5.0,
+  exclude_primary_residence INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now')),
   CHECK (
@@ -405,6 +412,35 @@ ON projection_scenarios(scope_type, scope_id);
 CREATE INDEX IF NOT EXISTS idx_projection_scenarios_scope_default
 ON projection_scenarios(scope_type, scope_id, is_default);
 
+
+-- =========================================
+-- PRESETS DE SIMULATION
+-- =========================================
+
+CREATE TABLE IF NOT EXISTS simulation_preset_settings (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope_type      TEXT NOT NULL CHECK(scope_type IN ('family', 'person')),
+  scope_id        INTEGER,
+  preset          TEXT NOT NULL CHECK(preset IN ('pessimiste', 'realiste', 'optimiste')),
+  return_liquidites_pct   REAL NOT NULL DEFAULT 2.0,
+  return_bourse_pct       REAL NOT NULL DEFAULT 7.0,
+  return_immobilier_pct   REAL NOT NULL DEFAULT 3.5,
+  return_pe_pct           REAL NOT NULL DEFAULT 10.0,
+  return_entreprises_pct  REAL NOT NULL DEFAULT 5.0,
+  inflation_pct       REAL NOT NULL DEFAULT 2.0,
+  income_growth_pct   REAL NOT NULL DEFAULT 1.0,
+  expense_growth_pct  REAL NOT NULL DEFAULT 1.0,
+  fire_multiple       REAL NOT NULL DEFAULT 25.0,
+  savings_factor      REAL NOT NULL DEFAULT 1.0,
+  CHECK (
+    (scope_type = 'family' AND scope_id IS NULL)
+    OR (scope_type = 'person' AND scope_id IS NOT NULL)
+  ),
+  FOREIGN KEY(scope_id) REFERENCES people(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_sim_presets_scope
+ON simulation_preset_settings(scope_type, scope_id);
 
 -- =========================================
 -- SCHEMA VERSIONING

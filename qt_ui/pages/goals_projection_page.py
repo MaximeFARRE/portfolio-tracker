@@ -49,8 +49,12 @@ from services.goals_projection_repository import (
     update_goal, update_scenario,
 )
 from services.projections import (
-    ScenarioParams, build_standard_scenarios, estimate_fire_reach_date,
+    ScenarioParams, build_standard_scenarios, compute_weighted_return,
+    estimate_fire_reach_date, get_primary_residence_value_for_scope,
     get_projection_base_for_scope, run_projection,
+)
+from services.simulation_presets_repository import (
+    get_all_presets, initialize_default_presets, PRESET_DEFAULTS,
 )
 from services.native_milestones import (
     NATIVE_MILESTONE_DEFINITIONS,
@@ -306,6 +310,9 @@ class GoalsProjectionPage(QWidget):
         self._native_metrics: dict = {}
         self._featured_milestone: Optional[dict] = None
         self._active_scenario_name: str = "Personnalisé"
+        self._active_preset: Optional[str] = None   # 'pessimiste' | 'realiste' | 'optimiste' | None
+        self._presets_cache: dict = {}               # {preset_key: params_dict}
+        self._rp_value_for_scope: float = 0.0       # valeur RP pour affichage
         self._build_ui()
         self._load_scope_options()
 
@@ -445,18 +452,81 @@ class GoalsProjectionPage(QWidget):
         params_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         params_form.setSpacing(8)
 
+        # ── Mode de simulation (presets) ──────────────────────────────────────
+        preset_widget = QWidget()
+        preset_widget.setStyleSheet("background: transparent;")
+        preset_layout = QHBoxLayout(preset_widget)
+        preset_layout.setContentsMargins(0, 0, 0, 0)
+        preset_layout.setSpacing(6)
+
+        _PRESET_BTN_BASE = f"""
+            QPushButton {{
+                background: {BG_CARD}; color: {TEXT_PRIMARY};
+                border: 1px solid {BORDER_DEFAULT}; border-radius: 4px;
+                padding: 5px 14px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {BG_ACTIVE}; }}
+        """
+        self._btn_preset_pessimiste = QPushButton("Pessimiste")
+        self._btn_preset_realiste   = QPushButton("Réaliste")
+        self._btn_preset_optimiste  = QPushButton("Optimiste")
+        for btn in (self._btn_preset_pessimiste, self._btn_preset_realiste, self._btn_preset_optimiste):
+            btn.setStyleSheet(_PRESET_BTN_BASE)
+        self._btn_preset_pessimiste.clicked.connect(lambda: self._apply_preset("pessimiste"))
+        self._btn_preset_realiste.clicked.connect(lambda: self._apply_preset("realiste"))
+        self._btn_preset_optimiste.clicked.connect(lambda: self._apply_preset("optimiste"))
+        preset_layout.addWidget(self._btn_preset_pessimiste)
+        preset_layout.addWidget(self._btn_preset_realiste)
+        preset_layout.addWidget(self._btn_preset_optimiste)
+        self._lbl_active_preset = QLabel("Personnalisé")
+        self._lbl_active_preset.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px; font-style: italic;")
+        preset_layout.addWidget(self._lbl_active_preset)
+        preset_layout.addStretch()
+        params_form.addRow("Mode :", preset_widget)
+
+        # ── Durée ─────────────────────────────────────────────────────────────
         self._spin_horizon_years = QSpinBox()
         self._spin_horizon_years.setRange(1, 50)
         self._spin_horizon_years.setStyleSheet(STYLE_INPUT_FOCUS)
         params_form.addRow("Durée :", self._spin_horizon_years)
 
-        self._spin_expected_return = QDoubleSpinBox()
-        self._spin_expected_return.setRange(-20.0, 30.0)
-        self._spin_expected_return.setDecimals(2)
-        self._spin_expected_return.setSuffix(" %")
-        self._spin_expected_return.setStyleSheet(STYLE_INPUT_FOCUS)
-        params_form.addRow("Rendement attendu :", self._spin_expected_return)
+        # ── Rendements par classe d'actif ─────────────────────────────────────
+        returns_group = QGroupBox("Rendements par classe d'actif")
+        returns_group.setStyleSheet(STYLE_GROUP)
+        returns_form = QFormLayout(returns_group)
+        returns_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        returns_form.setSpacing(6)
 
+        def _make_return_spin(default_val: float) -> QDoubleSpinBox:
+            s = QDoubleSpinBox()
+            s.setRange(-20.0, 50.0)
+            s.setDecimals(2)
+            s.setSuffix(" %")
+            s.setValue(default_val)
+            s.setStyleSheet(STYLE_INPUT_FOCUS)
+            return s
+
+        self._spin_return_liq   = _make_return_spin(2.0)
+        self._spin_return_bourse= _make_return_spin(7.0)
+        self._spin_return_immo  = _make_return_spin(3.5)
+        self._spin_return_pe    = _make_return_spin(10.0)
+        self._spin_return_ent   = _make_return_spin(5.0)
+
+        returns_form.addRow("Liquidités / épargne :", self._spin_return_liq)
+        returns_form.addRow("Bourse (ETF, actions) :", self._spin_return_bourse)
+        returns_form.addRow("Immobilier locatif :",    self._spin_return_immo)
+        returns_form.addRow("Private Equity :",        self._spin_return_pe)
+        returns_form.addRow("Entreprises :",           self._spin_return_ent)
+
+        self._lbl_weighted_return = QLabel("Rendement global effectif : — %")
+        self._lbl_weighted_return.setStyleSheet(
+            f"color: {TEXT_PRIMARY}; font-size: 13px; font-weight: bold; padding: 4px 0;"
+        )
+        returns_form.addRow(self._lbl_weighted_return)
+
+        params_form.addRow(returns_group)
+
+        # ── Macro ─────────────────────────────────────────────────────────────
         self._spin_inflation = QDoubleSpinBox()
         self._spin_inflation.setRange(-5.0, 20.0)
         self._spin_inflation.setDecimals(2)
@@ -478,6 +548,7 @@ class GoalsProjectionPage(QWidget):
         self._spin_expense_growth.setStyleSheet(STYLE_INPUT_FOCUS)
         params_form.addRow("Croissance dépenses :", self._spin_expense_growth)
 
+        # ── Overrides ─────────────────────────────────────────────────────────
         savings_row = QWidget()
         savings_layout = QHBoxLayout(savings_row)
         savings_layout.setContentsMargins(0, 0, 0, 0)
@@ -509,11 +580,30 @@ class GoalsProjectionPage(QWidget):
         params_form.addRow("Patrimoine initial personnalisé :", net_row)
 
         self._spin_fire_multiple = QDoubleSpinBox()
-        self._spin_fire_multiple.setRange(1.0, 100.0)
+        self._spin_fire_multiple.setRange(1.0, 200.0)
         self._spin_fire_multiple.setDecimals(2)
         self._spin_fire_multiple.setStyleSheet(STYLE_INPUT_FOCUS)
         params_form.addRow("Multiple FIRE :", self._spin_fire_multiple)
 
+        # ── Résidence principale ──────────────────────────────────────────────
+        rp_row = QWidget()
+        rp_row.setStyleSheet("background: transparent;")
+        rp_layout = QHBoxLayout(rp_row)
+        rp_layout.setContentsMargins(0, 0, 0, 0)
+        rp_layout.setSpacing(8)
+        self._chk_exclude_rp = QCheckBox("Exclure la/les résidence(s) principale(s)")
+        self._chk_exclude_rp.setToolTip(
+            "Retire la valeur des biens marqués 'RP' du patrimoine de simulation.\n"
+            "Utile pour projeter uniquement les actifs financiers productifs."
+        )
+        self._lbl_rp_amount = QLabel("")
+        self._lbl_rp_amount.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
+        rp_layout.addWidget(self._chk_exclude_rp)
+        rp_layout.addWidget(self._lbl_rp_amount)
+        rp_layout.addStretch()
+        params_form.addRow("Résidence principale :", rp_row)
+
+        # ── Affichage / boutons ───────────────────────────────────────────────
         self._chk_show_standard = QCheckBox("Afficher aussi Pessimiste / Médian / Optimiste")
         params_form.addRow("Affichage :", self._chk_show_standard)
 
@@ -536,8 +626,13 @@ class GoalsProjectionPage(QWidget):
 
         layout.addWidget(params_box)
 
+        # Connexions
         self._chk_savings_override.toggled.connect(self._spin_savings_override.setEnabled)
         self._chk_net_override.toggled.connect(self._spin_net_override.setEnabled)
+        self._chk_exclude_rp.toggled.connect(self._on_exclude_rp_changed)
+        for _spin in (self._spin_return_liq, self._spin_return_bourse, self._spin_return_immo,
+                      self._spin_return_pe, self._spin_return_ent):
+            _spin.valueChanged.connect(self._on_params_changed)
 
         lbl_chart = QLabel("Courbe de projection")
         lbl_chart.setStyleSheet(STYLE_SECTION)
@@ -700,9 +795,30 @@ class GoalsProjectionPage(QWidget):
         return w
 
     def _load_scope_data(self) -> None:
-        self._base_data = {}
+        # Charger les presets pour ce scope (initialise les défauts si absents)
         try:
-            self._base_data = get_projection_base_for_scope(self._conn, self._scope_type, self._scope_id)
+            initialize_default_presets(self._conn, self._scope_type, self._scope_id)
+            self._presets_cache = get_all_presets(self._conn, self._scope_type, self._scope_id)
+        except Exception as exc:
+            logger.warning("Impossible de charger les presets : %s", exc)
+            self._presets_cache = {}
+
+        # Valeur RP pour affichage dans le toggle
+        try:
+            self._rp_value_for_scope = get_primary_residence_value_for_scope(
+                self._conn, self._scope_type, self._scope_id
+            )
+        except Exception:
+            self._rp_value_for_scope = 0.0
+        self._update_rp_toggle_state()
+
+        self._base_data = {}
+        exclude_rp = self._chk_exclude_rp.isChecked() if hasattr(self, "_chk_exclude_rp") else False
+        try:
+            self._base_data = get_projection_base_for_scope(
+                self._conn, self._scope_type, self._scope_id,
+                exclude_primary_residence=exclude_rp,
+            )
         except Exception as exc:
             logger.error("Erreur base projection: %s", exc)
             self._base_data = {
@@ -741,6 +857,118 @@ class GoalsProjectionPage(QWidget):
             self._reset_projection_inputs_to_real_data()
 
         self._refresh_projection_tab()
+
+    # ── Presets ───────────────────────────────────────────────────────────────
+
+    def _apply_preset(self, preset_key: str) -> None:
+        """Remplit tous les spinboxes de paramètres avec les valeurs du preset."""
+        params = self._presets_cache.get(preset_key) or PRESET_DEFAULTS.get(preset_key, {})
+        if not params:
+            return
+
+        # Bloquer _on_params_changed pendant le remplissage
+        for _spin in (self._spin_return_liq, self._spin_return_bourse, self._spin_return_immo,
+                      self._spin_return_pe, self._spin_return_ent, self._spin_inflation,
+                      self._spin_income_growth, self._spin_expense_growth, self._spin_fire_multiple):
+            _spin.blockSignals(True)
+
+        self._spin_return_liq.setValue(float(params.get("return_liquidites_pct",  2.0)))
+        self._spin_return_bourse.setValue(float(params.get("return_bourse_pct",   7.0)))
+        self._spin_return_immo.setValue(float(params.get("return_immobilier_pct", 3.5)))
+        self._spin_return_pe.setValue(float(params.get("return_pe_pct",          10.0)))
+        self._spin_return_ent.setValue(float(params.get("return_entreprises_pct",  5.0)))
+        self._spin_inflation.setValue(float(params.get("inflation_pct",           2.0)))
+        self._spin_income_growth.setValue(float(params.get("income_growth_pct",   1.0)))
+        self._spin_expense_growth.setValue(float(params.get("expense_growth_pct", 1.0)))
+        self._spin_fire_multiple.setValue(float(params.get("fire_multiple",       25.0)))
+
+        for _spin in (self._spin_return_liq, self._spin_return_bourse, self._spin_return_immo,
+                      self._spin_return_pe, self._spin_return_ent, self._spin_inflation,
+                      self._spin_income_growth, self._spin_expense_growth, self._spin_fire_multiple):
+            _spin.blockSignals(False)
+
+        self._active_preset = preset_key
+        self._update_preset_buttons_style()
+        self._update_weighted_return_label()
+
+    def _update_preset_buttons_style(self) -> None:
+        """Surligne le bouton du preset actif; grise les autres."""
+        _ACTIVE_STYLES = {
+            "pessimiste": f"QPushButton {{ background: #ef4444; color: white; border: none; border-radius: 4px; padding: 5px 14px; font-size: 13px; font-weight: bold; }}",
+            "realiste":   f"QPushButton {{ background: #22c55e; color: white; border: none; border-radius: 4px; padding: 5px 14px; font-size: 13px; font-weight: bold; }}",
+            "optimiste":  f"QPushButton {{ background: #60a5fa; color: white; border: none; border-radius: 4px; padding: 5px 14px; font-size: 13px; font-weight: bold; }}",
+        }
+        _BASE_STYLE = f"""
+            QPushButton {{
+                background: {BG_CARD}; color: {TEXT_PRIMARY};
+                border: 1px solid {BORDER_DEFAULT}; border-radius: 4px;
+                padding: 5px 14px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {BG_ACTIVE}; }}
+        """
+        pairs = [
+            ("pessimiste", self._btn_preset_pessimiste),
+            ("realiste",   self._btn_preset_realiste),
+            ("optimiste",  self._btn_preset_optimiste),
+        ]
+        for key, btn in pairs:
+            btn.setStyleSheet(_ACTIVE_STYLES[key] if key == self._active_preset else _BASE_STYLE)
+
+        if self._active_preset is None:
+            self._lbl_active_preset.setText("Personnalisé")
+            self._lbl_active_preset.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px; font-style: italic;")
+        else:
+            labels = {"pessimiste": "Pessimiste", "realiste": "Réaliste", "optimiste": "Optimiste"}
+            self._lbl_active_preset.setText(f"Mode : {labels[self._active_preset]}")
+            self._lbl_active_preset.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 12px;")
+
+    def _on_params_changed(self) -> None:
+        """Appelé quand un spinbox de rendement est modifié manuellement."""
+        self._active_preset = None
+        self._update_preset_buttons_style()
+        self._update_weighted_return_label()
+
+    def _update_weighted_return_label(self) -> None:
+        """Met à jour le label de rendement global effectif (moyenne pondérée)."""
+        if not hasattr(self, "_lbl_weighted_return"):
+            return
+        params = self._build_projection_params()
+        if self._base_data:
+            weighted = compute_weighted_return(self._base_data, params)
+        else:
+            weighted = params.expected_return_pct
+        self._lbl_weighted_return.setText(f"Rendement global effectif : {weighted:.2f} %")
+
+    # ── Résidence principale ──────────────────────────────────────────────────
+
+    def _update_rp_toggle_state(self) -> None:
+        """Active/désactive le toggle RP et affiche le montant."""
+        if not hasattr(self, "_chk_exclude_rp"):
+            return
+        has_rp = self._rp_value_for_scope > 0.0
+        self._chk_exclude_rp.setEnabled(has_rp)
+        if has_rp:
+            self._lbl_rp_amount.setText(f"(-\u00a0{self._rp_value_for_scope:,.0f}\u00a0€ si exclu)")
+            self._chk_exclude_rp.setToolTip(
+                f"Retire {self._rp_value_for_scope:,.0f}\u00a0€ de résidence(s) principale(s) "
+                f"du patrimoine de simulation."
+            )
+        else:
+            self._lbl_rp_amount.setText("Aucune résidence principale détectée")
+            self._lbl_rp_amount.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px; font-style: italic;")
+
+    def _on_exclude_rp_changed(self, checked: bool) -> None:
+        """Recharge la base de projection avec ou sans RP."""
+        try:
+            self._base_data = get_projection_base_for_scope(
+                self._conn, self._scope_type, self._scope_id,
+                exclude_primary_residence=checked,
+            )
+            self._update_weighted_return_label()
+        except Exception as exc:
+            logger.error("Erreur rechargement base projection (RP) : %s", exc)
+
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _scope_label(self) -> str:
         return "Famille" if self._scope_type == "family" else self._scope_combo.currentText()
@@ -850,10 +1078,9 @@ class GoalsProjectionPage(QWidget):
 
     def _reset_projection_inputs_to_real_data(self) -> None:
         avg_savings = _safe_float(self._base_data.get("avg_monthly_savings"))
-        base_net = _safe_float(self._base_data.get("net_worth"))
+        base_net    = _safe_float(self._base_data.get("net_worth"))
 
         self._spin_horizon_years.setValue(10)
-        self._spin_expected_return.setValue(6.0)
         self._spin_inflation.setValue(2.0)
         self._spin_income_growth.setValue(1.0)
         self._spin_expense_growth.setValue(1.0)
@@ -867,16 +1094,37 @@ class GoalsProjectionPage(QWidget):
         self._spin_net_override.setValue(base_net)
         self._spin_net_override.setEnabled(False)
 
+        # Applique le preset "réaliste" comme point de départ
+        self._apply_preset("realiste")
         self._active_scenario_name = "Personnalisé"
 
     def _apply_scenario_to_projection_inputs(self, scenario_row: dict) -> None:
         self._active_scenario_name = str(scenario_row.get("name") or "Scénario")
         self._spin_horizon_years.setValue(max(int(_safe_float(scenario_row.get("horizon_years"), 10)), 1))
-        self._spin_expected_return.setValue(_safe_float(scenario_row.get("expected_return_pct"), 6.0))
         self._spin_inflation.setValue(_safe_float(scenario_row.get("inflation_pct"), 2.0))
         self._spin_income_growth.setValue(_safe_float(scenario_row.get("income_growth_pct"), 1.0))
         self._spin_expense_growth.setValue(_safe_float(scenario_row.get("expense_growth_pct"), 1.0))
         self._spin_fire_multiple.setValue(_safe_float(scenario_row.get("fire_multiple"), 25.0))
+
+        # Rendements par classe — avec fallback sur expected_return_pct pour anciens scénarios
+        fallback_return = _safe_float(scenario_row.get("expected_return_pct"), 6.0)
+        self._spin_return_liq.setValue(_safe_float(scenario_row.get("return_liquidites_pct"),  fallback_return * 0.3))
+        self._spin_return_bourse.setValue(_safe_float(scenario_row.get("return_bourse_pct"),   fallback_return))
+        self._spin_return_immo.setValue(_safe_float(scenario_row.get("return_immobilier_pct"), fallback_return * 0.6))
+        self._spin_return_pe.setValue(_safe_float(scenario_row.get("return_pe_pct"),           fallback_return * 1.5))
+        self._spin_return_ent.setValue(_safe_float(scenario_row.get("return_entreprises_pct"), fallback_return * 0.8))
+
+        # RP exclusion
+        exclude_rp = bool(int(_safe_float(scenario_row.get("exclude_primary_residence"), 0)))
+        self._chk_exclude_rp.blockSignals(True)
+        self._chk_exclude_rp.setChecked(exclude_rp and self._rp_value_for_scope > 0.0)
+        self._chk_exclude_rp.blockSignals(False)
+        if exclude_rp and self._rp_value_for_scope > 0.0:
+            self._on_exclude_rp_changed(True)
+
+        self._active_preset = None
+        self._update_preset_buttons_style()
+        self._update_weighted_return_label()
 
         savings_override = scenario_row.get("monthly_savings_override")
         has_savings = savings_override is not None
@@ -898,21 +1146,30 @@ class GoalsProjectionPage(QWidget):
 
     def _build_projection_params(self) -> ScenarioParams:
         savings_override = float(self._spin_savings_override.value()) if self._chk_savings_override.isChecked() else None
-        net_override = float(self._spin_net_override.value()) if self._chk_net_override.isChecked() else None
+        net_override     = float(self._spin_net_override.value())     if self._chk_net_override.isChecked()     else None
         return ScenarioParams(
             label=self._active_scenario_name,
             horizon_years=int(self._spin_horizon_years.value()),
-            expected_return_pct=float(self._spin_expected_return.value()),
-            inflation_pct=float(self._spin_inflation.value()),
-            income_growth_pct=float(self._spin_income_growth.value()),
-            expense_growth_pct=float(self._spin_expense_growth.value()),
+            return_liquidites_pct=  float(self._spin_return_liq.value()),
+            return_bourse_pct=      float(self._spin_return_bourse.value()),
+            return_immobilier_pct=  float(self._spin_return_immo.value()),
+            return_pe_pct=          float(self._spin_return_pe.value()),
+            return_entreprises_pct= float(self._spin_return_ent.value()),
+            inflation_pct=          float(self._spin_inflation.value()),
+            income_growth_pct=      float(self._spin_income_growth.value()),
+            expense_growth_pct=     float(self._spin_expense_growth.value()),
             monthly_savings_override=savings_override,
-            fire_multiple=float(self._spin_fire_multiple.value()),
+            fire_multiple=          float(self._spin_fire_multiple.value()),
             initial_net_worth_override=net_override,
+            exclude_primary_residence=self._chk_exclude_rp.isChecked(),
         )
 
     def _on_run_projection_clicked(self) -> None:
-        self._active_scenario_name = "Personnalisé"
+        if self._active_preset:
+            labels = {"pessimiste": "Pessimiste", "realiste": "Réaliste", "optimiste": "Optimiste"}
+            self._active_scenario_name = labels.get(self._active_preset, "Personnalisé")
+        else:
+            self._active_scenario_name = "Personnalisé"
         self._refresh_projection_tab()
 
     def _on_reset_projection_clicked(self) -> None:
@@ -932,8 +1189,12 @@ class GoalsProjectionPage(QWidget):
                 return
             self._standard_projection_results = {}
             if self._chk_show_standard.isChecked():
-                for sc in build_standard_scenarios(self._base_data, int(params.horizon_years)):
+                for sc in build_standard_scenarios(
+                    self._base_data, int(params.horizon_years),
+                    presets=self._presets_cache or None,
+                ):
                     self._standard_projection_results[sc.label] = run_projection(self._base_data, sc)
+            self._update_weighted_return_label()
 
             self._update_projection_kpis(params)
             self._projection_chart.set_figure(self._build_projection_chart(self._projection_df))
@@ -1300,10 +1561,12 @@ class GoalsProjectionPage(QWidget):
                 "Nom": str(sc.get("name") or ""),
                 "Par défaut": "Oui" if int(_safe_float(sc.get("is_default"), 0)) == 1 else "",
                 "Horizon": int(_safe_float(sc.get("horizon_years"), 10)),
-                "Rendement %": round(_safe_float(sc.get("expected_return_pct"), 0.0), 2),
+                "Rdt. global %": round(_safe_float(sc.get("expected_return_pct"), 0.0), 2),
+                "Bourse %": round(_safe_float(sc.get("return_bourse_pct"), 0.0), 2),
+                "Immo %": round(_safe_float(sc.get("return_immobilier_pct"), 0.0), 2),
+                "PE %": round(_safe_float(sc.get("return_pe_pct"), 0.0), 2),
+                "Excl. RP": "Oui" if int(_safe_float(sc.get("exclude_primary_residence"), 0)) else "",
                 "Inflation %": round(_safe_float(sc.get("inflation_pct"), 0.0), 2),
-                "Croiss. revenus %": round(_safe_float(sc.get("income_growth_pct"), 0.0), 2),
-                "Croiss. dépenses %": round(_safe_float(sc.get("expense_growth_pct"), 0.0), 2),
                 "Épargne personnalisée": ("—" if sc.get("monthly_savings_override") is None else round(_safe_float(sc.get("monthly_savings_override")), 2)),
                 "Multiple FIRE": round(_safe_float(sc.get("fire_multiple"), 25.0), 2),
                 "Mis à jour": str(sc.get("updated_at") or ""),
@@ -1338,7 +1601,7 @@ class GoalsProjectionPage(QWidget):
             "scope_id": self._scope_id,
             "is_default": 0,
             "horizon_years": int(params.horizon_years),
-            "expected_return_pct": float(params.expected_return_pct),
+            "expected_return_pct": float(params.expected_return_pct),  # moyenne calculée
             "inflation_pct": float(params.inflation_pct),
             "income_growth_pct": float(params.income_growth_pct),
             "expense_growth_pct": float(params.expense_growth_pct),
@@ -1346,6 +1609,12 @@ class GoalsProjectionPage(QWidget):
             "fire_multiple": float(params.fire_multiple),
             "use_real_snapshot_base": 1 if params.initial_net_worth_override is None else 0,
             "initial_net_worth_override": params.initial_net_worth_override,
+            "return_liquidites_pct":  float(params.return_liquidites_pct),
+            "return_bourse_pct":      float(params.return_bourse_pct),
+            "return_immobilier_pct":  float(params.return_immobilier_pct),
+            "return_pe_pct":          float(params.return_pe_pct),
+            "return_entreprises_pct": float(params.return_entreprises_pct),
+            "exclude_primary_residence": params.exclude_primary_residence,
         }
         try:
             create_scenario(self._conn, payload)
