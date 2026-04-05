@@ -1091,7 +1091,7 @@ class ImportPage(QScrollArea):
     # ------------------------------------------------------------------
 
     _HISTORY_COLS = ["#", "Type", "Personne", "Compte / Fichier", "Date", "Lignes", "Statut", "Action"]
-    _TYPE_ICONS = {"TR": "📈", "BANKIN": "🏦", "DEPENSES": "💸", "REVENUS": "💰"}
+    _TYPE_ICONS = {"TR": "📈", "BANKIN": "🏦", "DEPENSES": "💸", "REVENUS": "💰", "CREDIT": "🏠"}
 
     def _build_history_panel(self) -> QGroupBox:
         grp = QGroupBox("📋  Historique des imports")
@@ -1174,8 +1174,13 @@ class ImportPage(QScrollArea):
             status_item.setForeground(QColor("#22c55e" if not rolled_back else "#64748b"))
             tbl.setItem(ri, 6, status_item)
 
-            # Colonne 7 — bouton Annuler (seulement si actif et lignes présentes)
-            if not rolled_back and b["alive_rows"] > 0:
+            # Colonne 7 — bouton Annuler (seulement si actif, lignes présentes, et type annulable)
+            if not rolled_back and itype == "CREDIT":
+                lbl = QTableWidgetItem("⚠️ Manuel")
+                lbl.setForeground(QColor("#f59e0b"))
+                lbl.setToolTip("Les crédits ne peuvent pas être annulés automatiquement.\nSupprimez le crédit manuellement depuis la page Crédits.")
+                tbl.setItem(ri, 7, lbl)
+            elif not rolled_back and b["alive_rows"] > 0:
                 btn = QPushButton("🗑️ Annuler")
                 btn.setStyleSheet(
                     "QPushButton { background: #3b0000; color: #f87171; border: 1px solid #7f1d1d; "
@@ -1488,6 +1493,17 @@ class ImportPage(QScrollArea):
             payer_account_id = self._payer_account_combo.currentData()
             date_debut = self._c_date_debut.date().toString("yyyy-MM-dd")
 
+            account_name = self._credit_account_combo.currentText()
+            from services.import_history import create_batch, close_batch
+            batch_id = create_batch(
+                self._conn,
+                import_type="CREDIT",
+                person_id=person_id,
+                person_name=person,
+                account_id=account_id,
+                account_name=account_name,
+            )
+
             from services.credits import CreditParams, build_amortissement, replace_amortissement, upsert_credit
             credit_id = upsert_credit(self._conn, {
                 "person_id": person_id,
@@ -1522,6 +1538,7 @@ class ImportPage(QScrollArea):
             )
             rows = build_amortissement(params)
             n = replace_amortissement(self._conn, credit_id, rows)
+            close_batch(self._conn, batch_id, n)
 
             self._credit_result.setStyleSheet("color: #22c55e; font-size: 12px;")
             self._credit_result.setText(f"Crédit enregistré ✅ | Amortissement généré ✅ ({n} lignes)")

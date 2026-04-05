@@ -114,6 +114,19 @@ def _count_alive_rows(conn, batch_id: int, import_type: str) -> int:
         table = "depenses"
     elif import_type == "REVENUS":
         table = "revenus"
+    elif import_type == "CREDIT":
+        try:
+            r = conn.execute(
+                "SELECT account_id FROM import_batches WHERE id = ?", (batch_id,)
+            ).fetchone()
+            if not r or r[0] is None:
+                return 0
+            r2 = conn.execute(
+                "SELECT COUNT(*) FROM credits WHERE account_id = ?", (r[0],)
+            ).fetchone()
+            return int(r2[0]) if r2 else 0
+        except Exception:
+            return 0
     else:
         return 0
     try:
@@ -170,6 +183,12 @@ def rollback_batch(conn, batch_id: int) -> dict[str, Any]:
             "DELETE FROM revenus WHERE import_batch_id = ?", (batch_id,)
         )
         deleted["revenus"] = cur.rowcount
+    elif import_type == "CREDIT":
+        raise ValueError(
+            "Les crédits ne peuvent pas être annulés automatiquement : "
+            "la fiche crédit et son amortissement doivent être supprimés "
+            "manuellement depuis la page Crédits."
+        )
 
     conn.execute(
         "UPDATE import_batches SET status = 'ROLLED_BACK' WHERE id = ?",
