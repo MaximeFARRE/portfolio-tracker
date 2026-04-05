@@ -265,6 +265,15 @@ class VueEnsemblePanel(QWidget):
         self._semaine_label.setStyleSheet(STYLE_STATUS)
         layout.addWidget(self._semaine_label)
 
+        # ── Alerte FX manquants ───────────────────────────────────────────
+        self._fx_alert_label = QLabel()
+        self._fx_alert_label.setStyleSheet(
+            "color: #f59e0b; background: #1c1a10; border: 1px solid #f59e0b; "
+            "border-radius: 4px; padding: 4px 8px; font-size: 12px;"
+        )
+        self._fx_alert_label.setVisible(False)
+        layout.addWidget(self._fx_alert_label)
+
         layout.addStretch()
 
         self._overlay = LoadingOverlay(self)
@@ -438,6 +447,18 @@ class VueEnsemblePanel(QWidget):
             self._build_alloc_chart(m)
             self._build_cashflow_chart(m)
             self._build_epargne_chart(m)
+
+            # ── Alerte taux FX manquants ──────────────────────────────────
+            from services import market_history as _mh
+            missing_fx = _mh.get_and_clear_missing_fx()
+            if missing_fx:
+                pairs_str = ", ".join(f"{a}→{b}" for a, b in sorted(missing_fx))
+                self._fx_alert_label.setText(
+                    f"⚠️  Taux FX manquants — certains actifs valorisés à 0 € : {pairs_str}"
+                )
+                self._fx_alert_label.setVisible(True)
+            else:
+                self._fx_alert_label.setVisible(False)
 
         except Exception as exc:
             logger.exception("VueEnsemblePanel._load_data error")
