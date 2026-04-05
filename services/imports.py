@@ -322,22 +322,38 @@ def import_bankin_csv(
 
     # Option : remplir depenses/revenus (mensuel)
     if also_fill_monthly_tables:
-        # On ne purge pas tout : on “merge” par (person_id, mois, categorie)
+        # Purge les mois importés pour éviter les doublons en cas de re-import
+        dep_months = sorted(set(m for (m, _) in monthly_dep.keys()))
+        rev_months = sorted(set(m for (m, _) in monthly_rev.keys()))
+
+        if dep_months:
+            placeholders = “,”.join([“?”] * len(dep_months))
+            conn.execute(
+                f”DELETE FROM depenses WHERE person_id = ? AND mois IN ({placeholders})”,
+                (person_id, *dep_months),
+            )
+        if rev_months:
+            placeholders = “,”.join([“?”] * len(rev_months))
+            conn.execute(
+                f”DELETE FROM revenus WHERE person_id = ? AND mois IN ({placeholders})”,
+                (person_id, *rev_months),
+            )
+
         for (mois, cat), total in monthly_dep.items():
             conn.execute(
-                """
+                “””
                 INSERT INTO depenses(person_id, mois, categorie, montant)
                 VALUES (?, ?, ?, ?)
-                """,
+                “””,
                 (person_id, mois, cat, float(total)),
             )
 
         for (mois, cat), total in monthly_rev.items():
             conn.execute(
-                """
+                “””
                 INSERT INTO revenus(person_id, mois, categorie, montant)
                 VALUES (?, ?, ?, ?)
-                """,
+                “””,
                 (person_id, mois, cat, float(total)),
             )
         conn.commit()
