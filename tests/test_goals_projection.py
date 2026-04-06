@@ -137,13 +137,16 @@ def test_build_standard_scenarios():
     assert [s.label for s in scenarios] == ["Pessimiste", "Médian", "Optimiste"]
 
     pessimiste, median, optimiste = scenarios
-    assert pessimiste.expected_return_pct == pytest.approx(3.0)
+    # pessimiste: (1.5 + 4.0 + 2.0 + 5.0 + 3.0) / 5 = 3.1
+    assert pessimiste.expected_return_pct == pytest.approx(3.1)
     assert pessimiste.inflation_pct == pytest.approx(3.0)
     assert pessimiste.monthly_savings_override == pytest.approx(850.0)
 
-    assert median.expected_return_pct == pytest.approx(6.0)
+    # médian: (2.0 + 7.0 + 3.5 + 10.0 + 5.0) / 5 = 5.5
+    assert median.expected_return_pct == pytest.approx(5.5)
     assert median.monthly_savings_override is None
 
+    # optimiste: (3.0 + 9.0 + 5.0 + 15.0 + 8.0) / 5 = 8.0
     assert optimiste.expected_return_pct == pytest.approx(8.0)
     assert optimiste.inflation_pct == pytest.approx(1.5)
     assert optimiste.monthly_savings_override == pytest.approx(1_150.0)

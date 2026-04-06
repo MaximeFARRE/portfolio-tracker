@@ -721,11 +721,9 @@ def project_patrimoine(
 
     immobilier = _to_float(patrimoine_initial.get("immobilier"))
 
-    for m in range(n_mois + 1):
-        brut = bank + bourse + pe + ent + immobilier
-        net = brut - credits
-        # Patrimoine net en euros constants (début de simulation)
-        net_reel = net / (defl_m ** m)
+    r_bourse_m = _annual_pct_to_monthly_rate(taux_bourse_annuel)
+    r_pe_m     = _annual_pct_to_monthly_rate(taux_pe_annuel)
+    defl_m     = 1.0 + _annual_pct_to_monthly_rate(inflation_annuelle)
 
     n_mois = max(int(horizon_ans), 0) * 12
     rows = []
