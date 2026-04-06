@@ -74,11 +74,13 @@ def test_get_family_weekly_series_fallback_people_includes_immobilier(conn):
 def test_project_patrimoine_includes_immobilier_in_brut_and_net():
     scenario = ScenarioParams(
         label="Test",
-        taux_bourse_annuel=0.0,
-        taux_pe_annuel=0.0,
-        epargne_mensuelle=0.0,
-        inflation_annuelle=0.0,
-        remboursement_mensuel_credit=0.0,
+        return_bourse_pct=0.0,
+        return_pe_pct=0.0,
+        return_liquidites_pct=0.0,
+        return_immobilier_pct=0.0,
+        return_entreprises_pct=0.0,
+        inflation_pct=0.0,
+        monthly_savings_override=0.0,
     )
 
     df = project_patrimoine(
