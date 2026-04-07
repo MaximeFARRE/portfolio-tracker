@@ -994,3 +994,75 @@ def get_person_weekly_series(conn, person_id: int) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
     return df[PERSON_WEEKLY_COLUMNS].reset_index(drop=True)
+
+
+def get_latest_person_snapshot(conn, person_id: int) -> dict | None:
+    """
+    Retourne le dernier snapshot hebdomadaire d'une personne.
+
+    Point d'entrée officiel pour obtenir l'état patrimonial le plus
+    récent d'une personne sans charger toute la série.
+
+    Retourne un dictionnaire avec les clés :
+        week_date           str   (format YYYY-MM-DD)
+        patrimoine_net      float
+        patrimoine_brut     float
+        liquidites_total    float
+        bourse_holdings     float
+        pe_value            float
+        ent_value           float
+        immobilier_value    float
+        credits_remaining   float
+
+    Retourne None si aucun snapshot n'existe.
+    """
+    if person_id is None:
+        _logger.warning("get_latest_person_snapshot: person_id est None")
+        return None
+
+    try:
+        row = conn.execute(
+            """
+            SELECT week_date, patrimoine_net, patrimoine_brut,
+                   liquidites_total, bourse_holdings, immobilier_value,
+                   pe_value, ent_value, credits_remaining
+            FROM patrimoine_snapshots_weekly
+            WHERE person_id = ?
+            ORDER BY week_date DESC, id DESC
+            LIMIT 1
+            """,
+            (int(person_id),),
+        ).fetchone()
+    except Exception:
+        _logger.error(
+            "get_latest_person_snapshot: erreur lecture pour person_id=%s",
+            person_id, exc_info=True,
+        )
+        return None
+
+    if row is None:
+        _logger.info(
+            "get_latest_person_snapshot: aucun snapshot pour person_id=%s",
+            person_id,
+        )
+        return None
+
+    def _val(key: str) -> float:
+        """Extrait une valeur numérique de la Row SQLite."""
+        try:
+            v = row[key]
+            return float(v) if v is not None else 0.0
+        except (KeyError, IndexError, TypeError, ValueError):
+            return 0.0
+
+    return {
+        "week_date":        str(row["week_date"]) if row["week_date"] else None,
+        "patrimoine_net":   _val("patrimoine_net"),
+        "patrimoine_brut":  _val("patrimoine_brut"),
+        "liquidites_total": _val("liquidites_total"),
+        "bourse_holdings":  _val("bourse_holdings"),
+        "immobilier_value": _val("immobilier_value"),
+        "pe_value":         _val("pe_value"),
+        "ent_value":        _val("ent_value"),
+        "credits_remaining": _val("credits_remaining"),
+    }

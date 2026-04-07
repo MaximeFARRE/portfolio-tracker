@@ -155,36 +155,10 @@ def _compute_average_income_expenses(
 # ── Snapshots ─────────────────────────────────────────────────────────────────
 
 def get_latest_person_snapshot(conn, person_id: int) -> dict:
-    if person_id is None:
-        return {}
-    try:
-        row = conn.execute(
-            """
-            SELECT week_date, patrimoine_net, patrimoine_brut,
-                   liquidites_total, bourse_holdings, immobilier_value,
-                   pe_value, ent_value, credits_remaining
-            FROM patrimoine_snapshots_weekly
-            WHERE person_id = ?
-            ORDER BY week_date DESC, id DESC
-            LIMIT 1
-            """,
-            (int(person_id),),
-        ).fetchone()
-    except Exception:
-        return {}
-    if row is None:
-        return {}
-    return {
-        "week_date":        _row_get(row, "week_date"),
-        "patrimoine_net":   _to_float(_row_get(row, "patrimoine_net")),
-        "patrimoine_brut":  _to_float(_row_get(row, "patrimoine_brut")),
-        "liquidites_total": _to_float(_row_get(row, "liquidites_total")),
-        "bourse_holdings":  _to_float(_row_get(row, "bourse_holdings")),
-        "immobilier_value": _to_float(_row_get(row, "immobilier_value")),
-        "pe_value":         _to_float(_row_get(row, "pe_value")),
-        "ent_value":        _to_float(_row_get(row, "ent_value")),
-        "credits_remaining":_to_float(_row_get(row, "credits_remaining")),
-    }
+    """Délègue à services.snapshots (SSOT). Retourne {} si aucun snapshot."""
+    from services.snapshots import get_latest_person_snapshot as _snap_latest
+    result = _snap_latest(conn, person_id)
+    return result if result is not None else {}
 
 
 def get_latest_family_snapshot(conn) -> dict:
