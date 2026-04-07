@@ -186,6 +186,126 @@ def _empty_savings_result() -> dict:
     }
 
 
+def get_family_flux_summary(
+    conn,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+) -> dict:
+    """
+    Résumé des flux famille basé sur la table ``transactions``.
+
+    Ce point d'entrée encapsule les calculs autrefois dispersés dans
+    ``FluxPanel`` (famille_page.py) : solde global, cashflow du mois,
+    ventilation par personne et par compte, dernières opérations.
+
+    Paramètres
+    ----------
+    year, month : int ou None
+        Année et mois du cashflow mensuel affiché.
+        Si None, utilise le mois courant.
+
+    Retourne un dictionnaire :
+        solde_total          float   — solde global famille (toutes tx)
+        cashflow_mois        float   — flux net du mois year/month
+        n_operations         int     — nombre total de transactions chargées
+        par_personne         DataFrame[Personne, Solde (flux), Opérations]
+        par_compte           DataFrame[Personne, Compte, Solde (flux), Opérations]
+        dernieres_operations DataFrame — 50 dernières opérations (colonnes dispo)
+    """
+    from services import repositories as repo
+    from services import calculations as calc
+
+    today = pd.Timestamp.today()
+    yr = int(year) if year is not None else int(today.year)
+    mo = int(month) if month is not None else int(today.month)
+
+    # ── Chargement des données ────────────────────────────────────────────
+    people = repo.list_people(conn)
+    if people is None or people.empty:
+        logger.warning("get_family_flux_summary: aucune personne en base")
+        return _empty_flux_result()
+
+    accounts = repo.list_accounts(conn)
+    tx_all = repo.list_transactions(conn, limit=20000)
+
+    if tx_all is None or tx_all.empty:
+        logger.info("get_family_flux_summary: aucune transaction disponible")
+        return _empty_flux_result()
+
+    # ── KPIs globaux ─────────────────────────────────────────────────────
+    solde_total = calc.solde_compte(tx_all)
+    cashflow_du_mois = calc.cashflow_mois(tx_all, yr, mo)
+    n_ops = len(tx_all)
+
+    # ── Ventilation par personne ──────────────────────────────────────────
+    lignes_p = []
+    for _, p in people.iterrows():
+        pid = int(p["id"])
+        tx_p = tx_all[tx_all["person_id"] == pid].copy()
+        lignes_p.append({
+            "Personne": str(p["name"]),
+            "Solde (flux)": calc.solde_compte(tx_p),
+            "Opérations": len(tx_p),
+        })
+    df_par_personne = (
+        pd.DataFrame(lignes_p)
+        .sort_values("Solde (flux)", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    # ── Ventilation par compte ────────────────────────────────────────────
+    df_par_compte = pd.DataFrame()
+    if accounts is not None and not accounts.empty:
+        lignes_c = []
+        for _, a in accounts.iterrows():
+            acc_id = int(a["id"])
+            pid = int(a["person_id"])
+            person_name = (
+                str(people.loc[people["id"] == pid, "name"].iloc[0])
+                if pid in people["id"].values
+                else "?"
+            )
+            tx_c = tx_all[tx_all["account_id"] == acc_id].copy()
+            lignes_c.append({
+                "Personne": person_name,
+                "Compte": str(a["name"]),
+                "Solde (flux)": calc.solde_compte(tx_c),
+                "Opérations": len(tx_c),
+            })
+        df_par_compte = (
+            pd.DataFrame(lignes_c)
+            .sort_values("Solde (flux)", ascending=False)
+            .reset_index(drop=True)
+        )
+
+    # ── Dernières opérations ──────────────────────────────────────────────
+    cols_last = ["date", "person_name", "account_name", "type",
+                 "asset_symbol", "amount", "fees", "category", "note"]
+    cols_present = [c for c in cols_last if c in tx_all.columns]
+    df_dernieres = tx_all[cols_present].head(50).copy() if cols_present else pd.DataFrame()
+
+    return {
+        "solde_total":           solde_total,
+        "cashflow_mois":         cashflow_du_mois,
+        "n_operations":          n_ops,
+        "par_personne":          df_par_personne,
+        "par_compte":            df_par_compte,
+        "dernieres_operations":  df_dernieres,
+    }
+
+
+def _empty_flux_result() -> dict:
+    """Résultat vide retourné par get_family_flux_summary en cas d'erreur."""
+    return {
+        "solde_total":          0.0,
+        "cashflow_mois":        0.0,
+        "n_operations":         0,
+        "par_personne":         pd.DataFrame(columns=["Personne", "Solde (flux)", "Opérations"]),
+        "par_compte":           pd.DataFrame(columns=["Personne", "Compte", "Solde (flux)", "Opérations"]),
+        "dernieres_operations": pd.DataFrame(),
+    }
+
+
 def _compute_savings_kpis_from_cashflow(monthly_df: pd.DataFrame) -> dict:
     """
     Calcule les KPIs agrégés à partir d'un DataFrame cashflow

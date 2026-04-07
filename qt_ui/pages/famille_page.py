@@ -867,52 +867,30 @@ class FluxPanel(QWidget):
 
     def refresh(self) -> None:
         try:
-            from services import repositories as repo
-            from services import calculations as calc
+            from services import cashflow as cf
 
-            people = repo.list_people(self._conn)
-            accounts = repo.list_accounts(self._conn)
-            tx_all = repo.list_transactions(self._conn, limit=20000)
-
-            if people.empty:
-                return
-
-            solde_total = calc.solde_compte(tx_all)
             today = pd.Timestamp.today()
-            cashflow_mois = calc.cashflow_mois(tx_all, int(today.year), int(today.month))
+            summary = cf.get_family_flux_summary(
+                self._conn, year=int(today.year), month=int(today.month)
+            )
 
+            solde_total = summary["solde_total"]
+            cashflow_mois = summary["cashflow_mois"]
             self._kpi_solde.set_content("Solde famille (flux)", f"{solde_total:,.2f} €".replace(",", " "))
             self._kpi_cashflow.set_content("Cashflow du mois", f"{cashflow_mois:,.2f} €".replace(",", " "))
-            self._kpi_ops.set_content("Opérations", str(len(tx_all)))
+            self._kpi_ops.set_content("Opérations", str(summary["n_operations"]))
 
-            # Tableau personnes
-            lignes = []
-            for _, p in people.iterrows():
-                pid = int(p["id"])
-                tx_p = tx_all[tx_all["person_id"] == pid].copy() if not tx_all.empty else pd.DataFrame()
-                lignes.append({"Personne": str(p["name"]), "Solde (flux)": calc.solde_compte(tx_p), "Opérations": len(tx_p)})
-            df_people = pd.DataFrame(lignes).sort_values("Solde (flux)", ascending=False)
-            self._people_table.set_dataframe(df_people)
+            df_par_personne = summary["par_personne"]
+            if not df_par_personne.empty:
+                self._people_table.set_dataframe(df_par_personne)
 
-            # Tableau comptes
-            if not accounts.empty:
-                lignes_c = []
-                for _, a in accounts.iterrows():
-                    acc_id = int(a["id"])
-                    pid = int(a["person_id"])
-                    person_name = str(people.loc[people["id"] == pid, "name"].iloc[0]) if pid in people["id"].values else "?"
-                    tx_c = tx_all[tx_all["account_id"] == acc_id].copy() if not tx_all.empty else pd.DataFrame()
-                    lignes_c.append({"Personne": person_name, "Compte": str(a["name"]),
-                                     "Solde (flux)": calc.solde_compte(tx_c), "Opérations": len(tx_c)})
-                df_accounts = pd.DataFrame(lignes_c).sort_values("Solde (flux)", ascending=False)
-                self._accounts_table.set_dataframe(df_accounts)
+            df_par_compte = summary["par_compte"]
+            if not df_par_compte.empty:
+                self._accounts_table.set_dataframe(df_par_compte)
 
-            # Dernières ops
-            if not tx_all.empty:
-                cols = ["date", "person_name", "account_name", "type", "asset_symbol", "amount", "fees", "category", "note"]
-                cols = [c for c in cols if c in tx_all.columns]
-                df_last = tx_all[cols].head(50).copy()
-                self._last_table.set_dataframe(df_last)
+            df_dernieres = summary["dernieres_operations"]
+            if not df_dernieres.empty:
+                self._last_table.set_dataframe(df_dernieres)
 
         except Exception as e:
             logger.error("Erreur chargement Flux : %s", e)
