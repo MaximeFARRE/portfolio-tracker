@@ -900,3 +900,97 @@ def rebuild_snapshots_person_backdated_aware(
         "n_ok": n_ok,
         "truncated": truncated
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lecture de la série hebdomadaire personne (SSOT)
+# ─────────────────────────────────────────────────────────────────────────────
+
+PERSON_WEEKLY_COLUMNS = [
+    "week_date",
+    "patrimoine_net",
+    "patrimoine_brut",
+    "liquidites_total",
+    "bourse_holdings",
+    "pe_value",
+    "ent_value",
+    "immobilier_value",
+    "credits_remaining",
+]
+
+
+def get_person_weekly_series(conn, person_id: int) -> pd.DataFrame:
+    """
+    Point d'entrée officiel (SSOT) pour lire la série hebdomadaire
+    de patrimoine d'une personne.
+
+    Symétrique à ``family_snapshots.get_family_weekly_series``.
+
+    Retourne un DataFrame avec les colonnes :
+        week_date           datetime64
+        patrimoine_net      float
+        patrimoine_brut     float
+        liquidites_total    float
+        bourse_holdings     float
+        pe_value            float
+        ent_value           float
+        immobilier_value    float
+        credits_remaining   float
+
+    Les lignes sont triées par ``week_date`` croissant.
+    Retourne un DataFrame vide (avec les colonnes) si aucun snapshot.
+    """
+    empty = pd.DataFrame(columns=PERSON_WEEKLY_COLUMNS)
+
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT week_date,
+                   patrimoine_net,
+                   patrimoine_brut,
+                   liquidites_total,
+                   bourse_holdings,
+                   pe_value,
+                   ent_value,
+                   immobilier_value,
+                   credits_remaining
+            FROM patrimoine_snapshots_weekly
+            WHERE person_id = ?
+            ORDER BY week_date ASC
+            """,
+            conn,
+            params=(int(person_id),),
+        )
+    except Exception:
+        _logger.error(
+            "get_person_weekly_series: erreur lecture snapshots pour person_id=%s",
+            person_id, exc_info=True,
+        )
+        return empty
+
+    if df is None or df.empty:
+        _logger.info(
+            "get_person_weekly_series: aucun snapshot pour person_id=%s", person_id,
+        )
+        return empty
+
+    # Normalisation (même logique que family_snapshots._normalize_family_weekly_series)
+    df["week_date"] = pd.to_datetime(df["week_date"], errors="coerce")
+    n_before = len(df)
+    df = df.dropna(subset=["week_date"]).sort_values("week_date")
+    n_dropped = n_before - len(df)
+    if n_dropped > 0:
+        _logger.warning(
+            "get_person_weekly_series: %d ligne(s) ignorée(s) (date invalide) "
+            "pour person_id=%s", n_dropped, person_id,
+        )
+
+    for col in PERSON_WEEKLY_COLUMNS:
+        if col == "week_date":
+            continue
+        if col not in df.columns:
+            df[col] = 0.0
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    return df[PERSON_WEEKLY_COLUMNS].reset_index(drop=True)
