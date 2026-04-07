@@ -52,8 +52,8 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     m: dict = {}
 
     # ── 1. Snapshots hebdomadaires ────────────────────────────────────────
+    from services.snapshots import get_person_weekly_series
     try:
-        from services.snapshots import get_person_weekly_series
         df_snap = get_person_weekly_series(conn, person_id)
     except Exception as exc:
         logger.warning("get_vue_ensemble_metrics: lecture snapshots échouée : %s", exc)
