@@ -120,18 +120,14 @@ def get_last_common_week(conn, person_ids: List[int]) -> Optional[pd.Timestamp]:
     if not person_ids:
         return None
 
+    from services import snapshots as wk_snap
+
     weeks_sets = []
     for pid in person_ids:
-        d = pd.read_sql_query(
-            "SELECT week_date FROM patrimoine_snapshots_weekly WHERE person_id=?",
-            conn,
-            params=(int(pid),),
-        )
-        if d is None or d.empty:
+        df_p = wk_snap.get_person_weekly_series(conn, person_id=pid)
+        if df_p.empty:
             return None
-        d["week_date"] = pd.to_datetime(d["week_date"], errors="coerce")
-        d = d.dropna(subset=["week_date"])
-        weeks_sets.append(set(d["week_date"].tolist()))
+        weeks_sets.append(set(df_p["week_date"].tolist()))
 
     common = set.intersection(*weeks_sets) if weeks_sets else set()
     if not common:
@@ -252,26 +248,17 @@ def compute_leaderboards(conn, people: pd.DataFrame, person_ids: List[int], comm
         return {}
 
     # Perf windows par personne (sur net)
+    from services import snapshots as wk_snap
+
     perf3 = []
     perf12 = []
     for _, p in people.iterrows():
         pid = int(p["id"])
         name = str(p["name"])
 
-        df_p = pd.read_sql_query(
-            """
-            SELECT week_date, patrimoine_net
-            FROM patrimoine_snapshots_weekly
-            WHERE person_id=?
-            ORDER BY week_date ASC
-            """,
-            conn,
-            params=(pid,),
-        )
-        if df_p is None or df_p.empty:
+        df_p = wk_snap.get_person_weekly_series(conn, person_id=pid)
+        if df_p.empty:
             continue
-        df_p["week_date"] = pd.to_datetime(df_p["week_date"], errors="coerce")
-        df_p = df_p.dropna(subset=["week_date"]).sort_values("week_date")
 
         # On force end = common_week
         df_p = df_p[df_p["week_date"] <= common_week]
@@ -303,19 +290,17 @@ def compute_family_debug(conn, people: pd.DataFrame, common_week: Optional[pd.Ti
     """
     Debug : dernière snapshot par personne, écart vs common week.
     """
+    from services import snapshots as wk_snap
+
     rows = []
     for _, p in people.iterrows():
         pid = int(p["id"])
         name = str(p["name"])
 
-        df = pd.read_sql_query(
-            "SELECT MAX(week_date) AS last_week FROM patrimoine_snapshots_weekly WHERE person_id=?",
-            conn,
-            params=(pid,),
-        )
-        last_week = None
-        if df is not None and not df.empty:
-            last_week = pd.to_datetime(df.iloc[0]["last_week"], errors="coerce")
+        df_p = wk_snap.get_person_weekly_series(conn, person_id=pid)
+        last_week = df_p["week_date"].max() if not df_p.empty else None
+        if last_week is not None and pd.isna(last_week):
+            last_week = None
 
         delta = None
         if common_week is not None and last_week is not None and pd.notna(last_week):
