@@ -311,37 +311,13 @@ class FamilleDashboardPanel(QWidget):
 
     def _build_alloc_chart(self, alloc: dict, df_family: pd.DataFrame) -> None:
         """Pie allocation enrichi avec part + variation hebdo par catégorie."""
-        prev_values: dict[str, float] = {}
-        if df_family is not None and len(df_family) >= 2:
-            prev = df_family.iloc[-2]
-            prev_values = {
-                "Liquidités": float(prev.get("liquidites_total", 0.0) or 0.0),
-                "Bourse": float(prev.get("bourse_holdings", 0.0) or 0.0),
-                "Private Equity": float(prev.get("pe_value", 0.0) or 0.0),
-                "Entreprises": float(prev.get("ent_value", 0.0) or 0.0),
-                "Immobilier": float(prev.get("immobilier_value", 0.0) or 0.0),
-            }
+        from services import family_dashboard as fd
 
-        alloc_rows = []
-        for category, value in (alloc or {}).items():
-            amount = float(value or 0.0)
-            if amount <= 0:
-                continue
-            prev_amount = float(prev_values.get(category, 0.0))
-            alloc_rows.append(
-                {
-                    "Catégorie": category,
-                    "Valeur": amount,
-                    "var_txt": _fmt_var_pct(_compute_var_pct(amount, prev_amount)),
-                }
-            )
-
-        alloc_df = pd.DataFrame(alloc_rows)
+        alloc_df = fd.prepare_family_alloc_pie_data(df_family, alloc)
         if alloc_df.empty:
             return
 
-        total = float(alloc_df["Valeur"].sum())
-        alloc_df["part_pct"] = (alloc_df["Valeur"] / total * 100.0).round(2) if total > 0 else 0.0
+        alloc_df["var_txt"] = alloc_df["var_pct"].apply(_fmt_var_pct)
 
         fig_alloc = px.pie(alloc_df, names="Catégorie", values="Valeur", hole=0.45)
         fig_alloc.update_traces(
@@ -386,34 +362,12 @@ class FamilleDashboardPanel(QWidget):
 
     def _build_allocation_area_chart(self, df_family: pd.DataFrame) -> None:
         """AM-05 : Stacked area allocation patrimoniale avec tooltips enrichis."""
-        if df_family is None or df_family.empty:
+        from services import family_dashboard as fd
+
+        melt = fd.prepare_family_area_chart_data(df_family)
+        if melt.empty:
             return
 
-        df_area = df_family.copy()
-        df_area["week_date"] = pd.to_datetime(df_area["week_date"], errors="coerce")
-        df_area = df_area.dropna(subset=["week_date"]).sort_values("week_date")
-        if df_area.empty:
-            return
-
-        category_map = {
-            "Liquidités": "liquidites_total",
-            "Bourse": "bourse_holdings",
-            "Private Equity": "pe_value",
-            "Entreprises": "ent_value",
-            "Immobilier": "immobilier_value",
-        }
-        for col in category_map.values():
-            if col not in df_area.columns:
-                df_area[col] = 0.0
-
-        melt = df_area[["week_date", *category_map.values()]].rename(columns={v: k for k, v in category_map.items()})
-        melt = melt.melt(id_vars="week_date", var_name="Catégorie", value_name="Valeur")
-        melt["Valeur"] = melt["Valeur"].fillna(0.0).clip(lower=0.0)
-        melt = melt.sort_values(["Catégorie", "week_date"]).reset_index(drop=True)
-
-        totals = melt.groupby("week_date")["Valeur"].transform("sum")
-        melt["part_pct"] = (melt["Valeur"] / totals * 100.0).where(totals > 0, 0.0)
-        melt["var_pct"] = melt.groupby("Catégorie")["Valeur"].pct_change() * 100.0
         melt["var_txt"] = melt["var_pct"].apply(_fmt_var_pct)
 
         fig_area = px.area(
@@ -421,7 +375,7 @@ class FamilleDashboardPanel(QWidget):
             x="week_date",
             y="Valeur",
             color="Catégorie",
-            category_orders={"Catégorie": list(category_map.keys())},
+            category_orders={"Catégorie": list(fd.ALLOC_CATEGORY_MAP.keys())},
             labels={"week_date": "Semaine", "Valeur": "Montant (€)"},
         )
 

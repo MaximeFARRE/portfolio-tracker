@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import logging
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
 
 from services import repositories as repo
+
+_logger = logging.getLogger(__name__)
+
+# Mapping stable catégorie → colonne SSOT (famille weekly).
+# Utilisé par prepare_family_area_chart_data et prepare_family_alloc_pie_data.
+ALLOC_CATEGORY_MAP: Dict[str, str] = {
+    "Liquidités":     "liquidites_total",
+    "Bourse":         "bourse_holdings",
+    "Private Equity": "pe_value",
+    "Entreprises":    "ent_value",
+    "Immobilier":     "immobilier_value",
+}
 
 
 def _pct(a: float, b: float) -> Optional[float]:
@@ -288,3 +301,127 @@ def compute_family_debug(conn, people: pd.DataFrame, common_week: Optional[pd.Ti
         })
 
     return pd.DataFrame(rows)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Préparation de données pour les graphiques famille
+# ──────────────────────────────────────────────────────────────────────────────
+
+def prepare_family_area_chart_data(df_family: pd.DataFrame) -> pd.DataFrame:
+    """
+    Prépare les données du graphique stacked-area d'allocation patrimoniale.
+
+    Transforme la série famille hebdomadaire en format long (melt) et enrichit
+    chaque ligne avec la part du total hebdomadaire et la variation par rapport
+    à la semaine précédente — logique autrefois inline dans ``_build_allocation_area_chart``.
+
+    Paramètres
+    ----------
+    df_family : DataFrame retourné par ``get_family_weekly_series`` ou ``get_family_series``.
+
+    Retourne un DataFrame en format long avec les colonnes :
+        week_date   datetime64
+        Catégorie   str   (Liquidités / Bourse / Private Equity / Entreprises / Immobilier)
+        Valeur      float (≥ 0)
+        part_pct    float (% du total de la semaine)
+        var_pct     float (variation % vs semaine précédente, NaN si première semaine)
+
+    Retourne un DataFrame vide (avec les colonnes) si l'entrée est vide ou invalide.
+    """
+    empty = pd.DataFrame(columns=["week_date", "Catégorie", "Valeur", "part_pct", "var_pct"])
+
+    if df_family is None or df_family.empty:
+        _logger.info("prepare_family_area_chart_data: série famille vide")
+        return empty
+
+    df = df_family.copy()
+    df["week_date"] = pd.to_datetime(df["week_date"], errors="coerce")
+    df = df.dropna(subset=["week_date"]).sort_values("week_date")
+
+    if df.empty:
+        _logger.warning("prepare_family_area_chart_data: aucune date valide après nettoyage")
+        return empty
+
+    # Colonnes manquantes → 0.0 (défensif)
+    for col in ALLOC_CATEGORY_MAP.values():
+        if col not in df.columns:
+            _logger.warning(
+                "prepare_family_area_chart_data: colonne '%s' absente, remplacée par 0", col
+            )
+            df[col] = 0.0
+
+    # Pivot wide → long avec renommage catégories
+    melt = (
+        df[["week_date", *ALLOC_CATEGORY_MAP.values()]]
+        .rename(columns={v: k for k, v in ALLOC_CATEGORY_MAP.items()})
+        .melt(id_vars="week_date", var_name="Catégorie", value_name="Valeur")
+    )
+    melt["Valeur"] = melt["Valeur"].fillna(0.0).clip(lower=0.0)
+    melt = melt.sort_values(["Catégorie", "week_date"]).reset_index(drop=True)
+
+    # Part de chaque catégorie dans le total de la semaine
+    totals = melt.groupby("week_date")["Valeur"].transform("sum")
+    melt["part_pct"] = (melt["Valeur"] / totals * 100.0).where(totals > 0, 0.0)
+
+    # Variation hebdomadaire par catégorie (NaN pour la première semaine)
+    melt["var_pct"] = melt.groupby("Catégorie")["Valeur"].pct_change() * 100.0
+
+    return melt.reset_index(drop=True)
+
+
+def prepare_family_alloc_pie_data(
+    df_family: pd.DataFrame,
+    alloc: Dict[str, float],
+) -> pd.DataFrame:
+    """
+    Prépare les données du pie chart d'allocation patrimoniale par catégorie.
+
+    Calcule pour chaque catégorie : la part dans le total courant et la variation
+    par rapport à la semaine précédente — logique autrefois inline dans ``_build_alloc_chart``.
+
+    Paramètres
+    ----------
+    df_family : DataFrame retourné par ``get_family_weekly_series``.
+    alloc     : dict {catégorie: valeur} retourné par ``compute_allocations_family``.
+
+    Retourne un DataFrame avec les colonnes :
+        Catégorie   str
+        Valeur      float (valeur courante, > 0)
+        part_pct    float (% du total)
+        var_pct     float ou None (variation % vs semaine précédente)
+
+    Retourne un DataFrame vide (avec les colonnes) si alloc est vide ou invalide.
+    """
+    _COLS = ["Catégorie", "Valeur", "part_pct", "var_pct"]
+    empty = pd.DataFrame(columns=_COLS)
+
+    if not alloc:
+        _logger.info("prepare_family_alloc_pie_data: allocation vide")
+        return empty
+
+    # Valeurs de la semaine précédente pour le calcul de variation
+    prev_values: Dict[str, float] = {}
+    if df_family is not None and len(df_family) >= 2:
+        prev_row = df_family.iloc[-2]
+        for cat, col in ALLOC_CATEGORY_MAP.items():
+            prev_values[cat] = float(prev_row.get(col, 0.0) or 0.0)
+
+    rows = []
+    for category, value in alloc.items():
+        amount = float(value or 0.0)
+        if amount <= 0:
+            continue
+        prev_amount = prev_values.get(category, 0.0)
+        # _pct(base, final) → variation %
+        var_pct = _pct(prev_amount, amount)
+        rows.append({"Catégorie": category, "Valeur": amount, "var_pct": var_pct})
+
+    if not rows:
+        _logger.info("prepare_family_alloc_pie_data: aucune catégorie avec valeur positive")
+        return empty
+
+    df = pd.DataFrame(rows)
+    total = float(df["Valeur"].sum())
+    df["part_pct"] = (df["Valeur"] / total * 100.0).round(2) if total > 0 else 0.0
+
+    return df[_COLS].reset_index(drop=True)
