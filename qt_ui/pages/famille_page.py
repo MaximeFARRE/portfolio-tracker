@@ -741,24 +741,14 @@ class DataHealthPanel(QWidget):
     def refresh(self) -> None:
         try:
             from services import diagnostics_global as dg
-            from services import repositories as repo
 
-            people = repo.list_people(self._conn)
-            person_ids = [int(x) for x in people["id"].tolist()] if people is not None and not people.empty else []
             safety_weeks = int(self._safety_combo.currentText())
 
-            rows = []
-            for pid in person_ids:
-                name = str(people.loc[people["id"] == pid, "name"].iloc[0])
-                stt = dg.person_weekly_status(self._conn, person_id=pid, safety_weeks=safety_weeks)
-                rows.append({
-                    "Personne": name,
-                    "Dernière semaine": stt.get("last_week") or "—",
-                    "Cible": stt.get("target_week") or "—",
-                    "Statut": "✅ À jour" if stt.get("suggested") == "UP_TO_DATE" else "⚠️ À rebuild",
-                })
-            if rows:
-                self._status_table.set_dataframe(pd.DataFrame(rows))
+            # Tableau de statuts par personne
+            health = dg.get_family_health_summary(self._conn, safety_weeks=safety_weeks)
+            status_df = health["status_df"]
+            if not status_df.empty:
+                self._status_table.set_dataframe(status_df)
 
             # Marché
             dates = dg.last_market_dates(self._conn)
@@ -782,9 +772,9 @@ class DataHealthPanel(QWidget):
 
     def _on_rebuild_all(self) -> None:
         try:
-            from services import repositories as repo
-            people = repo.list_people(self._conn)
-            person_ids = [int(x) for x in people["id"].tolist()]
+            from services import diagnostics_global as dg
+            people = dg.list_people(self._conn)
+            person_ids = [int(x) for x in people["id"].tolist()] if not people.empty else []
         except Exception as e:
             logger.error("Erreur récupération personnes pour rebuild all : %s", e)
             person_ids = []

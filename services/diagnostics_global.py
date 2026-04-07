@@ -1,20 +1,11 @@
 from __future__ import annotations
+import logging
 import pandas as pd
 from datetime import datetime
 import pytz
+from services import snapshots
 
-
-def _get_val(row, key: str, idx: int = 0):
-    """Compat sqlite3.Row (accès par clé) et tuples libsql (accès par index)."""
-    if row is None:
-        return None
-    try:
-        return row[key]
-    except Exception:
-        try:
-            return row[idx]
-        except Exception:
-            return None
+_logger = logging.getLogger(__name__)
 
 
 def _paris_today() -> pd.Timestamp:
@@ -57,18 +48,59 @@ def last_snapshot_week_by_person(conn) -> pd.DataFrame:
     Dernière semaine snapshot par personne.
     """
     try:
-        return pd.read_sql_query(
-            """
-            SELECT p.id AS person_id, p.name AS person_name,
-                   MAX(s.week_date) AS last_week
-            FROM people p
-            LEFT JOIN patrimoine_snapshots_weekly s ON s.person_id = p.id
-            GROUP BY p.id, p.name
-            ORDER BY p.id
-            """,
-            conn,
-        )
+        people = list_people(conn)
     except Exception:
+        _logger.error("last_snapshot_week_by_person: erreur lecture people", exc_info=True)
+        return pd.DataFrame(columns=["person_id", "person_name", "last_week"])
+
+    if people is None or people.empty:
+        return pd.DataFrame(columns=["person_id", "person_name", "last_week"])
+
+    rows = []
+    for _, p in people.iterrows():
+        person_id = int(p["id"])
+        person_name = p.get("name")
+        snap = snapshots.get_latest_person_snapshot(conn, person_id)
+
+        last_week = None
+        if snap is None:
+            _logger.info(
+                "last_snapshot_week_by_person: aucun snapshot pour person_id=%s",
+                person_id,
+            )
+        else:
+            week_date = snap.get("week_date")
+            if not week_date:
+                _logger.warning(
+                    "last_snapshot_week_by_person: date absente pour person_id=%s",
+                    person_id,
+                )
+            else:
+                week_ts = pd.to_datetime(week_date, errors="coerce")
+                if pd.isna(week_ts):
+                    _logger.warning(
+                        "last_snapshot_week_by_person: date incohérente pour "
+                        "person_id=%s week_date=%r",
+                        person_id, week_date,
+                    )
+                else:
+                    last_week = week_ts.strftime("%Y-%m-%d")
+
+        rows.append(
+            {
+                "person_id": person_id,
+                "person_name": person_name,
+                "last_week": last_week,
+            }
+        )
+
+    try:
+        return pd.DataFrame(rows, columns=["person_id", "person_name", "last_week"])
+    except Exception:
+        _logger.error(
+            "last_snapshot_week_by_person: erreur construction dataframe",
+            exc_info=True,
+        )
         return pd.DataFrame(columns=["person_id", "person_name", "last_week"])
 
 
@@ -81,14 +113,37 @@ def missing_snapshot_weeks(conn, person_id: int, lookback_days: int = 90) -> pd.
 
     all_weeks = pd.date_range(start=start, end=end, freq="W-MON")
     try:
-        df = pd.read_sql_query(
-            "SELECT week_date FROM patrimoine_snapshots_weekly WHERE person_id=?",
-            conn,
-            params=(int(person_id),),
-        )
-        df["week_date"] = pd.to_datetime(df["week_date"], errors="coerce")
-        have = set(df.dropna(subset=["week_date"])["week_date"].dt.normalize().tolist())
+        df = snapshots.get_person_weekly_series(conn, int(person_id))
+        if df is None or df.empty:
+            _logger.info(
+                "missing_snapshot_weeks: aucun snapshot disponible pour person_id=%s",
+                person_id,
+            )
+            have = set()
+        elif "week_date" not in df.columns:
+            _logger.warning(
+                "missing_snapshot_weeks: colonne week_date absente, diagnostic ignoré "
+                "pour person_id=%s",
+                person_id,
+            )
+            have = set()
+        else:
+            week_dates = pd.to_datetime(df["week_date"], errors="coerce")
+            invalid_count = int(week_dates.isna().sum())
+            if invalid_count > 0:
+                _logger.warning(
+                    "missing_snapshot_weeks: %s date(s) incohérente(s) ignorée(s) "
+                    "pour person_id=%s",
+                    invalid_count,
+                    person_id,
+                )
+            have = set(week_dates.dropna().dt.normalize().tolist())
     except Exception:
+        _logger.error(
+            "missing_snapshot_weeks: erreur lecture snapshots pour person_id=%s",
+            person_id,
+            exc_info=True,
+        )
         have = set()
 
     missing = [w for w in all_weeks if w.normalize() not in have]
@@ -168,17 +223,31 @@ def person_weekly_status(conn, person_id: int, safety_weeks: int = 4) -> dict:
     - suggested_action
     """
     end = _week_monday(_paris_today())
-    row = conn.execute(
-        "SELECT MAX(week_date) AS d FROM patrimoine_snapshots_weekly WHERE person_id=?",
-        (int(person_id),),
-    ).fetchone()
+    snap = snapshots.get_latest_person_snapshot(conn, int(person_id))
 
     last = None
-    d_val = _get_val(row, "d", 0)
-    if row and d_val:
-        last = pd.to_datetime(d_val, errors="coerce")
-        if pd.isna(last):
-            last = None
+    if snap is None:
+        _logger.info(
+            "person_weekly_status: aucun snapshot disponible pour person_id=%s",
+            person_id,
+        )
+    else:
+        d_val = snap.get("week_date")
+        if not d_val:
+            _logger.warning(
+                "person_weekly_status: date absente pour person_id=%s",
+                person_id,
+            )
+        else:
+            last = pd.to_datetime(d_val, errors="coerce")
+            if pd.isna(last):
+                _logger.warning(
+                    "person_weekly_status: date incohérente pour person_id=%s "
+                    "week_date=%r (diagnostic ignoré)",
+                    person_id,
+                    d_val,
+                )
+                last = None
 
     if last is None:
         return {
@@ -204,6 +273,68 @@ def person_weekly_status(conn, person_id: int, safety_weeks: int = 4) -> dict:
         "missing_weeks": int(missing_count),
         "suggested": "UP_TO_DATE" if missing_count == 0 else "FROM_LAST",
         "safety_weeks": int(safety_weeks),
+    }
+
+
+def get_family_health_summary(conn, safety_weeks: int = 4) -> dict:
+    """
+    Résumé de santé des données famille, prêt pour l'affichage dans le
+    tableau de diagnostic.
+
+    Encapsule l'assemblage autrefois fait directement dans ``DataHealthPanel`` :
+    lecture des personnes, appel à ``person_weekly_status`` pour chacune,
+    construction du DataFrame de statuts.
+
+    Paramètres
+    ----------
+    safety_weeks : int
+        Nombre de semaines de tolérance passé à ``person_weekly_status``.
+
+    Retourne un dictionnaire :
+        status_df   DataFrame[Personne, Dernière semaine, Cible, Statut]
+                    — prêt pour l'affichage (libellés et indicateurs inclus)
+        person_ids  list[int]
+                    — liste des person_id détectés (utile pour les rebuilds)
+    """
+    _EMPTY_STATUS_DF = pd.DataFrame(
+        columns=["Personne", "Dernière semaine", "Cible", "Statut"]
+    )
+
+    people = list_people(conn)
+    if people is None or people.empty:
+        _logger.warning("get_family_health_summary: aucune personne en base")
+        return {"status_df": _EMPTY_STATUS_DF, "person_ids": []}
+
+    person_ids = [int(x) for x in people["id"].tolist()]
+    rows = []
+    for pid in person_ids:
+        name_series = people.loc[people["id"] == pid, "name"]
+        if name_series.empty:
+            _logger.warning(
+                "get_family_health_summary: person_id=%s introuvable dans people",
+                pid,
+            )
+            continue
+        name = str(name_series.iloc[0])
+        stt = person_weekly_status(conn, person_id=pid, safety_weeks=safety_weeks)
+        statut = "✅ À jour" if stt.get("suggested") == "UP_TO_DATE" else "⚠️ À rebuild"
+        rows.append({
+            "Personne":          name,
+            "Dernière semaine":  stt.get("last_week") or "—",
+            "Cible":             stt.get("target_week") or "—",
+            "Statut":            statut,
+        })
+
+    if not rows:
+        _logger.info(
+            "get_family_health_summary: aucune ligne de diagnostic disponible "
+            "(safety_weeks=%s)", safety_weeks,
+        )
+        return {"status_df": _EMPTY_STATUS_DF, "person_ids": person_ids}
+
+    return {
+        "status_df":  pd.DataFrame(rows),
+        "person_ids": person_ids,
     }
 
 
