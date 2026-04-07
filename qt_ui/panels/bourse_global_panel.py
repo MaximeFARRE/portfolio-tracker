@@ -447,8 +447,8 @@ class BourseGlobalPanel(QWidget):
         self._overlay.start("Analyse du portefeuille global…", blur=True)
         try:
             from services import repositories as repo
-            from services import portfolio
             from services.bourse_analytics import (
+                get_live_bourse_positions,
                 get_bourse_performance_metrics, compute_invested_series,
                 get_tickers_diagnostic_df, get_bourse_state_asof
             )
@@ -480,24 +480,11 @@ class BourseGlobalPanel(QWidget):
                 
             else:
                 # ── MODE LIVE ──
-                all_pos = []
-                for _, row in df_b.iterrows():
-                    account_id = int(row["id"])
-                    acc_ccy    = str(row.get("currency") or "EUR").upper()
-                    tx_acc     = repo.list_transactions(self._conn, account_id=account_id, limit=10000)
-                    asset_ids  = repo.list_account_asset_ids(self._conn, account_id=account_id)
-                    prices     = repo.get_latest_prices(self._conn, asset_ids)
-                    pos        = portfolio.compute_positions_v2_fx(self._conn, tx_acc, prices, acc_ccy)
-                    if not pos.empty:
-                        pos["compte"] = str(row["name"])
-                        pos["type"]   = str(row["account_type"])
-                        all_pos.append(pos)
+                df_all = get_live_bourse_positions(self._conn, self._person_id)
 
-                if not all_pos:
+                if df_all.empty:
                     self._table_pos.set_dataframe(pd.DataFrame([{"Info": "Aucune position ouverte."}]))
                     return
-
-                df_all    = pd.concat(all_pos, ignore_index=True)
                 total_val = float(df_all["value"].sum())       if "value"      in df_all.columns else 0.0
                 total_pnl = float(df_all["pnl_latent"].sum())  if "pnl_latent" in df_all.columns else 0.0
                 nb_pos    = len(df_all[df_all["quantity"] > 0]) if "quantity"  in df_all.columns else len(df_all)

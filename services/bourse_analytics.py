@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import pandas as pd
 
@@ -7,6 +8,8 @@ from services import repositories as repo
 from services import positions
 from services import market_history
 from services import market_repository as mrepo
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_float(x, default=0.0) -> float:
@@ -669,6 +672,135 @@ def get_tickers_diagnostic_df(conn, person_id: int) -> pd.DataFrame:
         })
 
     return pd.DataFrame(rows)
+
+
+def get_live_bourse_positions(conn, person_id: int) -> pd.DataFrame:
+    """
+    Point d'entrée unique pour obtenir les positions bourse live consolidées
+    d'une personne, tous comptes confondus (PEA, CTO, CRYPTO).
+
+    Encapsule :
+    - la récupération des comptes bourse
+    - l'appel à portfolio.compute_positions_v2_fx pour chaque compte
+    - l'agrégation des positions de tous les comptes
+
+    Colonnes retournées :
+        asset_id, symbol, name, asset_type, quantity, pru, last_price,
+        value, pnl_latent, asset_ccy, compte, type
+
+    Retourne un DataFrame vide (avec les colonnes) si aucune position.
+    """
+    from services import portfolio
+
+    empty_cols = [
+        "asset_id", "symbol", "name", "asset_type", "quantity", "pru",
+        "last_price", "value", "pnl_latent", "asset_ccy", "compte", "type",
+    ]
+
+    accounts = repo.list_accounts(conn, person_id=person_id)
+    if accounts is None or accounts.empty:
+        logger.info("get_live_bourse_positions: aucun compte pour person_id=%s", person_id)
+        return pd.DataFrame(columns=empty_cols)
+
+    bourse_types = {"PEA", "CTO", "CRYPTO"}
+    df_b = accounts[accounts["account_type"].astype(str).str.upper().isin(bourse_types)]
+    if df_b.empty:
+        logger.info("get_live_bourse_positions: aucun compte bourse pour person_id=%s", person_id)
+        return pd.DataFrame(columns=empty_cols)
+
+    all_pos = []
+    for _, row in df_b.iterrows():
+        account_id = int(row["id"])
+        acc_name = str(row.get("name") or row.get("nom") or f"Compte {account_id}")
+        acc_type = str(row.get("account_type") or "")
+        acc_ccy = str(row.get("currency") or "EUR").upper()
+
+        tx_acc = repo.list_transactions(conn, account_id=account_id, limit=10000)
+        asset_ids = repo.list_account_asset_ids(conn, account_id=account_id)
+        prices = repo.get_latest_prices(conn, asset_ids)
+
+        pos = portfolio.compute_positions_v2_fx(conn, tx_acc, prices, acc_ccy)
+
+        if pos.empty:
+            logger.debug(
+                "get_live_bourse_positions: aucune position pour compte '%s' (id=%s)",
+                acc_name, account_id,
+            )
+            continue
+
+        # Vérifier les prix manquants
+        if "last_price" in pos.columns:
+            missing_px = pos[pos["last_price"].fillna(0.0) == 0.0]
+            for _, mp in missing_px.iterrows():
+                logger.warning(
+                    "get_live_bourse_positions: prix live absent pour %s (compte '%s')",
+                    mp.get("symbol", "?"), acc_name,
+                )
+
+        pos["compte"] = acc_name
+        pos["type"] = acc_type
+        all_pos.append(pos)
+
+    if not all_pos:
+        logger.info("get_live_bourse_positions: aucune position ouverte pour person_id=%s", person_id)
+        return pd.DataFrame(columns=empty_cols)
+
+    df_all = pd.concat(all_pos, ignore_index=True)
+    return df_all
+
+
+def get_live_bourse_positions_for_account(conn, account_id: int) -> pd.DataFrame:
+    """
+    Retourne les positions bourse live d'un seul compte.
+
+    Encapsule l'appel à portfolio.compute_positions_v2_fx pour un
+    account_id donné, sans que l'UI ait à manipuler transactions,
+    prix ou le moteur de calcul directement.
+
+    Colonnes retournées :
+        asset_id, symbol, name, asset_type, quantity, pru, last_price,
+        value, pnl_latent, asset_ccy
+    """
+    from services import portfolio
+
+    empty_cols = [
+        "asset_id", "symbol", "name", "asset_type", "quantity", "pru",
+        "last_price", "value", "pnl_latent", "asset_ccy",
+    ]
+
+    # Devise du compte
+    acc_row = repo.get_account(conn, account_id)
+    if acc_row is None:
+        logger.warning(
+            "get_live_bourse_positions_for_account: compte introuvable (id=%s)", account_id,
+        )
+        return pd.DataFrame(columns=empty_cols)
+
+    acc_ccy = str(acc_row.get("currency") or "EUR").upper()
+
+    tx_acc = repo.list_transactions(conn, account_id=account_id, limit=10000)
+    asset_ids = repo.list_account_asset_ids(conn, account_id=account_id)
+    prices = repo.get_latest_prices(conn, asset_ids)
+
+    pos = portfolio.compute_positions_v2_fx(conn, tx_acc, prices, acc_ccy)
+
+    if pos.empty:
+        logger.debug(
+            "get_live_bourse_positions_for_account: aucune position pour compte id=%s",
+            account_id,
+        )
+        return pd.DataFrame(columns=empty_cols)
+
+    # Log des prix manquants
+    if "last_price" in pos.columns:
+        missing_px = pos[pos["last_price"].fillna(0.0) == 0.0]
+        for _, mp in missing_px.iterrows():
+            logger.warning(
+                "get_live_bourse_positions_for_account: prix live absent pour %s (compte id=%s)",
+                mp.get("symbol", "?"), account_id,
+            )
+
+    return pos
 
 
 def get_bourse_state_asof(conn, person_id: int, asof_date: str) -> dict:

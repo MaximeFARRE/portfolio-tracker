@@ -1,7 +1,10 @@
-﻿import pandas as pd
+﻿import logging
+import pandas as pd
 from services import repositories as repo
 from services import pe_cash_repository as pe_cash_repo
 from utils.validators import sens_flux
+
+logger = logging.getLogger(__name__)
 
 def _fx_to_eur(conn, amount: float, ccy: str) -> float:
     ccy = (ccy or "EUR").upper()
@@ -103,4 +106,31 @@ def _compute_liquidites_like_overview(conn, person_id: int):
 
     total = round(float(bank_total_eur + bourse_total_eur + pe_total_eur), 2)
     return bank_total_eur, bourse_total_eur, pe_total_eur, total
+
+
+def get_liquidites_summary(conn, person_id: int) -> dict:
+    """
+    Point d'entrée officiel pour la synthèse des liquidités d'une personne.
+
+    Retourne un dictionnaire avec :
+        bank_cash_eur    float  — solde comptes bancaires (EUR)
+        bourse_cash_eur  float  — cash non investi sur comptes bourse (EUR)
+        pe_cash_eur      float  — cash sur plateformes PE (EUR)
+        total_eur        float  — somme des trois
+
+    Retourne des zéros si aucune liquidité disponible.
+    """
+    bank, bourse, pe, total = _compute_liquidites_like_overview(conn, person_id)
+
+    if total == 0.0:
+        logger.info(
+            "get_liquidites_summary: aucune liquidité pour person_id=%s", person_id,
+        )
+
+    return {
+        "bank_cash_eur": bank,
+        "bourse_cash_eur": bourse,
+        "pe_cash_eur": pe,
+        "total_eur": total,
+    }
 
