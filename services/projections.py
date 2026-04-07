@@ -106,50 +106,7 @@ def _empty_projection_base(scope_type: str, scope_id: Optional[int], scope_label
 
 # ── Revenus / dépenses ────────────────────────────────────────────────────────
 
-def _compute_average_income_expenses(
-    income_df: pd.DataFrame,
-    expense_df: pd.DataFrame,
-    months: int = 12,
-) -> dict:
-    if income_df is None:
-        income_df = pd.DataFrame(columns=["mois", "income"])
-    if expense_df is None:
-        expense_df = pd.DataFrame(columns=["mois", "expenses"])
 
-    if income_df.empty and expense_df.empty:
-        return {"avg_monthly_income": 0.0, "avg_monthly_expenses": 0.0,
-                "avg_monthly_savings": 0.0, "months_used": 0}
-
-    i_df = income_df.rename(columns={"amount": "income"}).copy()
-    e_df = expense_df.rename(columns={"amount": "expenses"}).copy()
-    if "income" not in i_df.columns:
-        i_df["income"] = 0.0
-    if "expenses" not in e_df.columns:
-        e_df["expenses"] = 0.0
-
-    merged = pd.merge(
-        i_df[["mois", "income"]] if "mois" in i_df.columns else pd.DataFrame(columns=["mois", "income"]),
-        e_df[["mois", "expenses"]] if "mois" in e_df.columns else pd.DataFrame(columns=["mois", "expenses"]),
-        on="mois", how="outer",
-    )
-    merged["income"] = pd.to_numeric(merged["income"], errors="coerce").fillna(0.0)
-    merged["expenses"] = pd.to_numeric(merged["expenses"], errors="coerce").fillna(0.0)
-    merged["mois_dt"] = pd.to_datetime(merged["mois"], errors="coerce")
-    merged = merged.dropna(subset=["mois_dt"])
-
-    if merged.empty:
-        return {"avg_monthly_income": 0.0, "avg_monthly_expenses": 0.0,
-                "avg_monthly_savings": 0.0, "months_used": 0}
-
-    merged = merged.sort_values("mois_dt", ascending=False).head(max(int(months), 1))
-    avg_income = _to_float(merged["income"].mean())
-    avg_expenses = _to_float(merged["expenses"].mean())
-    return {
-        "avg_monthly_income": avg_income,
-        "avg_monthly_expenses": avg_expenses,
-        "avg_monthly_savings": avg_income - avg_expenses,
-        "months_used": len(merged),
-    }
 
 
 # ── Snapshots ─────────────────────────────────────────────────────────────────
@@ -191,40 +148,34 @@ def get_latest_family_snapshot(conn) -> dict:
 
 
 def compute_average_income_expenses_for_person(conn, person_id: int, months: int = 12) -> dict:
+    from services.cashflow import compute_savings_metrics
     if person_id is None:
         return {"avg_monthly_income": 0.0, "avg_monthly_expenses": 0.0,
                 "avg_monthly_savings": 0.0, "months_used": 0}
-    try:
-        income_df = pd.read_sql_query(
-            "SELECT mois, SUM(montant) AS amount FROM revenus WHERE person_id = ? GROUP BY mois",
-            conn, params=(int(person_id),),
-        )
-    except Exception:
-        income_df = pd.DataFrame(columns=["mois", "amount"])
-    try:
-        expense_df = pd.read_sql_query(
-            "SELECT mois, SUM(montant) AS amount FROM depenses WHERE person_id = ? GROUP BY mois",
-            conn, params=(int(person_id),),
-        )
-    except Exception:
-        expense_df = pd.DataFrame(columns=["mois", "amount"])
-    return _compute_average_income_expenses(income_df, expense_df, months=months)
+    
+    metrics = compute_savings_metrics(conn, person_id=int(person_id), n_mois=24)
+    return {
+        "avg_monthly_income": metrics.get("avg_monthly_income", 0.0),
+        "avg_monthly_expenses": metrics.get("avg_monthly_expenses", 0.0),
+        "avg_monthly_savings": metrics.get("avg_monthly_savings", 0.0),
+        "months_used": 12,
+    }
 
 
 def compute_average_income_expenses_for_family(conn, months: int = 12) -> dict:
+    from services.cashflow import get_cashflow_for_scope, compute_savings_metrics
     try:
-        income_df = pd.read_sql_query(
-            "SELECT mois, SUM(montant) AS amount FROM revenus GROUP BY mois", conn
-        )
+        df = get_cashflow_for_scope(conn, "family")
+        metrics = compute_savings_metrics(df)
+        return {
+            "avg_monthly_income": metrics.get("avg_monthly_income", 0.0),
+            "avg_monthly_expenses": metrics.get("avg_monthly_expenses", 0.0),
+            "avg_monthly_savings": metrics.get("avg_monthly_savings", 0.0),
+            "months_used": 12,
+        }
     except Exception:
-        income_df = pd.DataFrame(columns=["mois", "amount"])
-    try:
-        expense_df = pd.read_sql_query(
-            "SELECT mois, SUM(montant) AS amount FROM depenses GROUP BY mois", conn
-        )
-    except Exception:
-        expense_df = pd.DataFrame(columns=["mois", "amount"])
-    return _compute_average_income_expenses(income_df, expense_df, months=months)
+        return {"avg_monthly_income": 0.0, "avg_monthly_expenses": 0.0,
+                "avg_monthly_savings": 0.0, "months_used": 0}
 
 
 def _get_person_label(conn, person_id: int) -> str:
