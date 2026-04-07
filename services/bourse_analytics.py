@@ -7,7 +7,6 @@ import pandas as pd
 from services import repositories as repo
 from services import positions
 from services import market_history
-from services import market_repository as mrepo
 
 logger = logging.getLogger(__name__)
 
@@ -59,19 +58,14 @@ def get_bourse_weekly_series(conn, person_id: int) -> pd.DataFrame:
     Renvoie une série weekly issue des snapshots weekly.
     IMPORTANT: on ne parle pas de cash ici => on utilise bourse_holdings uniquement.
     """
-    df = mrepo.list_weekly_snapshots(conn, person_id=person_id)
-    if df is None or df.empty:
+    from services.snapshots import get_person_weekly_series
+    df = get_person_weekly_series(conn, person_id)
+    if df.empty:
         return pd.DataFrame(columns=["date", "holdings_eur"])
 
-    # compat: la date s'appelle parfois snapshot_date
-    date_col = "week_date" if "week_date" in df.columns else "snapshot_date"
-    out = df.copy()
-    out["date"] = pd.to_datetime(out[date_col], errors="coerce")
-    out = out.dropna(subset=["date"]).sort_values("date")
-
-    out["holdings_eur"] = pd.to_numeric(out.get("bourse_holdings", 0.0), errors="coerce").fillna(0.0)
-
-    return out[["date", "holdings_eur"]].copy()
+    out = df[["week_date", "bourse_holdings"]].copy()
+    out = out.rename(columns={"week_date": "date", "bourse_holdings": "holdings_eur"})
+    return out
 
 
 def compute_perf(series: pd.Series) -> float:
@@ -540,9 +534,13 @@ def get_bourse_performance_metrics(conn, person_id: int, current_live_value: flo
     current_live_value : si fourni, utilisé à la place du dernier snapshot pour le calcul de
                          global_perf et comme point final du graphe (évite le décalage snapshot/live).
     """
-    df_snap = mrepo.list_weekly_snapshots(conn, person_id=person_id)
-    if df_snap is None or df_snap.empty:
-        df_snap = pd.DataFrame(columns=["snapshot_date", "bourse_holdings"])
+    from services.snapshots import get_person_weekly_series
+    df_raw = get_person_weekly_series(conn, person_id)
+    if df_raw.empty:
+        df_snap = pd.DataFrame(columns=["date", "bourse_holdings"])
+    else:
+        df_snap = df_raw[["week_date", "bourse_holdings"]].copy()
+        df_snap = df_snap.rename(columns={"week_date": "date"})
 
     import datetime as _dt
     invested_eur = compute_invested_amount_eur_asof(conn, person_id, _dt.date.today().isoformat())
@@ -555,17 +553,12 @@ def get_bourse_performance_metrics(conn, person_id: int, current_live_value: flo
     ytd_perf = 0.0
 
     if not df_snap.empty:
-        df_snap["date"] = pd.to_datetime(df_snap["snapshot_date"], errors="coerce")
-        df_snap = df_snap.dropna(subset=["date"]).sort_values("date")
-        df_snap["bourse_holdings"] = pd.to_numeric(df_snap.get("bourse_holdings", 0.0), errors="coerce").fillna(0.0)
-
         # Injecter le point live aujourd'hui si le dernier snapshot a plus de 3 jours
         today = pd.Timestamp(_dt.date.today())
         if current_live_value is not None:
             last_snap_date = df_snap["date"].max() if not df_snap.empty else pd.NaT
             if pd.isna(last_snap_date) or (today - last_snap_date).days > 3:
                 today_row = pd.DataFrame([{
-                    "snapshot_date": today.strftime("%Y-%m-%d"),
                     "date": today,
                     "bourse_holdings": float(current_live_value),
                 }])
