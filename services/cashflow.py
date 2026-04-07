@@ -83,6 +83,54 @@ def get_cashflow_for_scope(
     merged["savings"] = merged["income"] - merged["expenses"]
     return merged
 
+
+def get_person_monthly_savings_series(
+    conn,
+    person_id: int,
+    n_mois: int = 24,
+    end_month: str | None = None,
+) -> pd.DataFrame:
+    """
+    Retourne la série mensuelle d'épargne d'une personne.
+
+    Colonnes retournées :
+        mois, revenus, depenses, epargne, taux_epargne
+    """
+    from services.revenus_repository import compute_taux_epargne_mensuel
+
+    try:
+        df = compute_taux_epargne_mensuel(
+            conn,
+            int(person_id),
+            n_mois=int(n_mois),
+            end_month=end_month,
+        )
+    except Exception as exc:
+        logger.warning(
+            "get_person_monthly_savings_series: échec calcul série person_id=%s : %s",
+            person_id,
+            exc,
+        )
+        return pd.DataFrame(
+            columns=["mois", "revenus", "depenses", "epargne", "taux_epargne"]
+        )
+
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=["mois", "revenus", "depenses", "epargne", "taux_epargne"]
+        )
+
+    expected = ["mois", "revenus", "depenses", "epargne", "taux_epargne"]
+    for col in expected:
+        if col not in df.columns:
+            logger.warning(
+                "get_person_monthly_savings_series: colonne '%s' absente pour person_id=%s",
+                col,
+                person_id,
+            )
+            df[col] = pd.NA
+    return df[expected].reset_index(drop=True)
+
 def compute_savings_metrics(conn_or_df, person_id: Optional[int] = None,
                             n_mois: int = 24) -> dict:
     """

@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QFormLayout, QDoubleSpinBox, QComboBox, QDateEdit, QScrollArea,
 )
 from qt_ui.components.animated_tab import AnimatedTabWidget
-from PyQt6.QtCore import QDate, QThread, pyqtSignal
+from PyQt6.QtCore import QDate, QThread, pyqtSignal, Qt
 
 from qt_ui.widgets import PlotlyView, DataTableWidget, MetricLabel, LoadingOverlay
 from qt_ui.panels.saisie_panel import SaisiePanel, ASSET_TYPES, _ASSET_TYPES_NON_COTES
@@ -308,7 +308,7 @@ class CompteBoursePanel(QWidget):
         # Formulaire de saisie de prix
         form = QFormLayout()
         form.setSpacing(10)
-        form.setLabelAlignment(0x0002)  # AlignRight
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         def _flbl(text):
             lbl = QLabel(text)

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from services.revenus_repository import compute_taux_epargne_mensuel
+from services.cashflow import get_person_monthly_savings_series
 from services.vue_ensemble_metrics import get_vue_ensemble_metrics
 
 
@@ -39,7 +39,7 @@ def test_compute_taux_epargne_mensuel_keeps_calendar_month_gaps(conn_with_person
     )
     conn.commit()
 
-    df = compute_taux_epargne_mensuel(conn, 1, n_mois=3, end_month="2025-03-01")
+    df = get_person_monthly_savings_series(conn, 1, n_mois=3, end_month="2025-03-01")
     assert list(df["mois"]) == ["2025-01-01", "2025-02-01", "2025-03-01"]
     assert list(df["revenus"]) == [0.0, 0.0, 1000.0]
     assert list(df["depenses"]) == [0.0, 0.0, 0.0]
