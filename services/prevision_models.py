@@ -7,9 +7,35 @@ class PrevisionConfig:
     """Paramètres globaux pour la simulation de prévision."""
     horizon_years: int = 20
     monthly_contribution: float = 0.0
-    expected_equity_return: float = 0.07
-    expected_equity_volatility: float = 0.15
-    expected_cash_return: float = 0.02
+    
+    # Hypothèses simples par classe d'actifs (V1)
+    # Les clés doivent correspondre aux clés de assets_breakdown
+    expected_returns: Dict[str, float] = field(default_factory=lambda: {
+        "Liquidités": 0.02,
+        "Bourse": 0.07,
+        "Immobilier": 0.03,
+        "PE": 0.10,
+        "Entreprises": 0.05,
+        "Crypto": 0.0,
+    })
+    
+    expected_volatilities: Dict[str, float] = field(default_factory=lambda: {
+        "Liquidités": 0.01,
+        "Bourse": 0.15,
+        "Immobilier": 0.05,
+        "PE": 0.20,
+        "Entreprises": 0.15,
+        "Crypto": 0.50,
+    })
+    
+    # Matrice de corrélation simple entre ces 6 classes (ordre: Liq, Bourse, Immo, PE, Ent, Crypto)
+    # Dans une V2 on l'importera dynamiquement, ici V1 pédagogique
+    correlation_matrix: Optional[List[List[float]]] = None
+
+    expected_equity_return: float = 0.07 # Historique/Fallback
+    expected_equity_volatility: float = 0.15 # Historique/Fallback
+    expected_cash_return: float = 0.02 # Historique/Fallback
+    
     num_simulations: int = 1000
     target_goal_amount: Optional[float] = None
     inflation_rate: float = 0.02
@@ -17,12 +43,44 @@ class PrevisionConfig:
 
 @dataclass
 class PrevisionBase:
-    """État patrimonial de départ pour la projection."""
+    """État patrimonial consolidé de départ pour la projection."""
     current_net_worth: float
     current_cash: float
     current_equity: float
     current_real_estate: float
-    # TODO: Ajouter plus de granularité (PE, entreprises, crédits) pour la V2
+    current_pe: float = 0.0
+    current_business: float = 0.0
+    current_crypto: float = 0.0
+    current_credits: float = 0.0
+    
+    # Evolution de la dette totale (déterministe)
+    debts_schedule: Optional[pd.Series] = None
+    
+    # Flux annuels
+    current_savings_per_year: float = 0.0
+    current_passive_income_per_year: float = 0.0
+    
+    # Suivi et diagnostique
+    metadata: Dict[str, str] = field(default_factory=dict)
+    warnings: List[str] = field(default_factory=list)
+    
+    @property
+    def assets_breakdown(self) -> Dict[str, float]:
+        return {
+            "Liquidités": self.current_cash,
+            "Bourse": self.current_equity,
+            "Immobilier": self.current_real_estate,
+            "PE": self.current_pe,
+            "Entreprises": self.current_business,
+            "Crypto": self.current_crypto
+        }
+        
+    @property
+    def allocation(self) -> Dict[str, float]:
+        gross = sum(self.assets_breakdown.values())
+        if gross <= 0:
+            return {k: 0.0 for k in self.assets_breakdown.keys()}
+        return {k: (v / gross * 100) for k, v in self.assets_breakdown.items()}
     
 @dataclass
 class RiskMetrics:

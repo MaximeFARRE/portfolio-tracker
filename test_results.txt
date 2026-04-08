@@ -1,0 +1,31 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.13.1, pytest-9.0.2, pluggy-1.6.0 -- C:\Python313\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\maxim\OneDrive\Desktop\Money\Suivie patrimoine desktop
+plugins: anyio-4.12.0
+collecting ... collected 4 items
+
+tests/test_prevision.py::test_prevision_base_person PASSED               [ 25%]
+tests/test_prevision.py::test_run_prevision_deterministic PASSED         [ 50%]
+tests/test_prevision.py::test_run_prevision_monte_carlo FAILED           [ 75%]
+tests/test_prevision.py::test_run_prevision_with_dynamic_debt PASSED     [100%]
+
+================================== FAILURES ===================================
+_______________________ test_run_prevision_monte_carlo ________________________
+tests\test_prevision.py:71: in test_run_prevision_monte_carlo
+    assert result.trajectories_df.shape == (100, 37)
+E   assert (37, 100) == (100, 37)
+E     
+E     At index 0 diff: 37 != 100
+E     
+E     Full diff:
+E       (
+E     +     37,
+E           100,
+E     -     37,
+E       )
+------------------------------ Captured log call ------------------------------
+WARNING  services.prevision_base:prevision_base.py:49 Erreur lors de l'agrégation des crédits pour person_id=1: 'NoneType' object has no attribute 'cursor'
+=========================== short test summary info ===========================
+FAILED tests/test_prevision.py::test_run_prevision_monte_carlo - assert (37, ...
+========================= 1 failed, 3 passed in 1.89s =========================
