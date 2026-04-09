@@ -12,6 +12,10 @@ from .prevision_risk import compute_risk_metrics
 from .prevision_goals import compute_goal_metrics
 from .prevision_explain import generate_prevision_diagnostics
 
+from .prevision_stress_models import StressScenario, StressResult
+from .prevision_stress import list_standard_scenarios
+from .prevision_engines import run_stress_test
+
 def get_prevision_base_for_scope(conn, scope_type: str, scope_id: int) -> PrevisionBase:
     """
     Point d'entrée pour récupérer l'état patrimonial consolidé de départ pour les projections.
@@ -47,3 +51,17 @@ def run_prevision(
     result.diagnostics = generate_prevision_diagnostics(result)
     
     return result
+
+def run_stress_prevision(
+    conn,
+    scope_type: str,
+    scope_id: int,
+    config: PrevisionConfig,
+    scenario: StressScenario
+) -> StressResult:
+    """
+    Point d'entrée pour évaluer le patrimoine face à un scénario de crise spécifique.
+    Retourne StressResult encapsulant la baseline et la trajectoire de crise.
+    """
+    base = get_prevision_base_for_scope(conn, scope_type, scope_id)
+    return run_stress_test(base, config, scenario)
