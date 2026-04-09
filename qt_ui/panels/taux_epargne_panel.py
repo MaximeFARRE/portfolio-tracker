@@ -135,9 +135,10 @@ class TauxEpargnePanel(QWidget):
     def _load_data(self) -> None:
         self._overlay.start("Calcul du taux d'épargne…")
         try:
-            from services.revenus_repository import compute_taux_epargne_mensuel
+            from services.cashflow import compute_savings_metrics
 
-            df = compute_taux_epargne_mensuel(self._conn, self._person_id, n_mois=24)
+            result = compute_savings_metrics(self._conn, self._person_id, n_mois=24)
+            df = result.get("monthly_series")
 
             if df is None or df.empty:
                 self._clear_all()
@@ -145,7 +146,6 @@ class TauxEpargnePanel(QWidget):
 
             # ── KPI : mois courant et M-1, M-2 ──────────────────────────────
             today = datetime.date.today()
-            current_mois = today.strftime("%Y-%m-01")
 
             def _row_for_offset(months_back: int) -> dict | None:
                 """Retourne la ligne pour un mois donné."""
@@ -158,16 +158,11 @@ class TauxEpargnePanel(QWidget):
                     return hit.iloc[0].to_dict()
                 return None
 
-            def _fmt_kpi(row: dict | None, label: str) -> None:
-                pass  # helper inline unused
-
             def _apply_kpi(card: KpiCard, row: dict | None, label: str) -> None:
                 if row is None:
                     card.set_content(label, "Pas de données", tone="neutral")
                     return
                 rate = row.get("taux_epargne")
-                rev = row.get("revenus", 0.0)
-                dep = row.get("depenses", 0.0)
                 ep  = row.get("epargne", 0.0)
                 tone = _tone_for_rate(rate)
                 val  = f"{rate:.1f} %" if rate is not None else "—"
@@ -178,11 +173,9 @@ class TauxEpargnePanel(QWidget):
             _apply_kpi(self._kpi_m1,       _row_for_offset(1), "Mois M-1")
             _apply_kpi(self._kpi_m2,       _row_for_offset(2), "Mois M-2")
 
-            # ── KPI : moyenne 12 mois ────────────────────────────────────────
-            last12 = df.tail(12)
-            valid_rates = last12["taux_epargne"].dropna()
-            if not valid_rates.empty:
-                avg_rate = round(float(valid_rates.mean()), 1)
+            # ── KPI : moyenne 12 mois (depuis le service) ────────────────────
+            avg_rate = result.get("avg_rate_12m", 0.0)
+            if avg_rate:
                 tone_avg = _tone_for_rate(avg_rate)
                 self._kpi_avg12.set_content(
                     "Moyenne 12 mois", f"{avg_rate} %",
@@ -191,7 +184,7 @@ class TauxEpargnePanel(QWidget):
             else:
                 self._kpi_avg12.set_content("Moyenne 12 mois", "—", tone="neutral")
 
-            avg_ep = float(last12["epargne"].mean()) if not last12.empty else 0.0
+            avg_ep = result.get("avg_savings_12m", 0.0)
             tone_ep = "success" if avg_ep >= 0 else "alert"
             self._kpi_avg12_ep.set_content(
                 "Épargne moy. 12 mois",

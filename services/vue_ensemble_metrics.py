@@ -28,6 +28,60 @@ def _opt(v) -> float | None:
         return None
 
 
+_ALLOC_COLUMNS = ["Catégorie", "Valeur"]
+_CASHFLOW_COLUMNS = ["mois", "revenus", "depenses", "epargne", "taux_epargne"]
+_EPARGNE_COLUMNS = [*_CASHFLOW_COLUMNS, "mois_label"]
+
+
+def _empty_alloc_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=_ALLOC_COLUMNS)
+
+
+def _empty_cashflow_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=_CASHFLOW_COLUMNS)
+
+
+def _empty_epargne_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=_EPARGNE_COLUMNS)
+
+
+def _normalize_cashflow_for_panel(df_cashflow: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalise la série cashflow pour les usages graphiques de vue_ensemble_panel.
+    """
+    if df_cashflow is None or df_cashflow.empty:
+        logger.info("_normalize_cashflow_for_panel: série cashflow vide")
+        return _empty_cashflow_df()
+
+    df = df_cashflow.copy()
+    if "mois" not in df.columns:
+        if "mois_dt" in df.columns:
+            df["mois"] = pd.to_datetime(df["mois_dt"], errors="coerce").dt.strftime("%Y-%m-01")
+        else:
+            logger.warning(
+                "_normalize_cashflow_for_panel: colonnes 'mois' et 'mois_dt' absentes"
+            )
+            return _empty_cashflow_df()
+
+    for col in ["revenus", "depenses", "epargne"]:
+        if col not in df.columns:
+            logger.warning(
+                "_normalize_cashflow_for_panel: colonne '%s' absente, remplacée par 0",
+                col,
+            )
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    if "taux_epargne" not in df.columns:
+        logger.warning(
+            "_normalize_cashflow_for_panel: colonne 'taux_epargne' absente, remplacée par NaN"
+        )
+        df["taux_epargne"] = pd.NA
+    df["taux_epargne"] = pd.to_numeric(df["taux_epargne"], errors="coerce")
+
+    return df[_CASHFLOW_COLUMNS].reset_index(drop=True)
+
+
 def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     """
     Calcule et retourne toutes les métriques du dashboard patrimoine.
@@ -52,13 +106,9 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     m: dict = {}
 
     # ── 1. Snapshots hebdomadaires ────────────────────────────────────────
+    from services.snapshots import get_person_weekly_series
     try:
-        rows = conn.execute(
-            "SELECT * FROM patrimoine_snapshots_weekly "
-            "WHERE person_id = ? ORDER BY week_date",
-            (person_id,),
-        ).fetchall()
-        df_snap = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+        df_snap = get_person_weekly_series(conn, person_id)
     except Exception as exc:
         logger.warning("get_vue_ensemble_metrics: lecture snapshots échouée : %s", exc)
         df_snap = pd.DataFrame()
@@ -66,7 +116,7 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     if df_snap.empty:
         return m
 
-    # Valeurs courantes par défaut (avant parsing date, pour robustesse).
+    # week_date est déjà datetime (via get_person_weekly_series)
     last = df_snap.iloc[-1]
     m["net"] = _sf(last.get("patrimoine_net"))
     m["brut"] = _sf(last.get("patrimoine_brut"))
@@ -76,37 +126,25 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     m["pe_value"] = _sf(last.get("pe_value"))
     m["ent_value"] = _sf(last.get("ent_value"))
     m["immo_value"] = _sf(last.get("immobilier_value"))
-    m["week_date"] = str(last.get("week_date", "—"))
+    m["week_date"] = pd.Timestamp(last["week_date"]).strftime("%Y-%m-%d")
     m["asof_date"] = m["week_date"]
 
     # ── 2. Patrimoine net historique ──────────────────────────────────────
     anchor_dt = None
     try:
-        df_snap["_dt"] = pd.to_datetime(df_snap["week_date"], errors="coerce")
-        df_snap = df_snap.dropna(subset=["_dt"]).sort_values("_dt")
-        if df_snap.empty:
-            return m
-
-        last = df_snap.iloc[-1]
-        anchor_dt = pd.Timestamp(last["_dt"])
-        m["net"] = _sf(last.get("patrimoine_net"))
-        m["brut"] = _sf(last.get("patrimoine_brut"))
-        m["liq"] = _sf(last.get("liquidites_total"))
-        m["bourse"] = _sf(last.get("bourse_holdings"))
-        m["credits"] = _sf(last.get("credits_remaining"))
-        m["pe_value"] = _sf(last.get("pe_value"))
-        m["ent_value"] = _sf(last.get("ent_value"))
-        m["immo_value"] = _sf(last.get("immobilier_value"))
-        m["week_date"] = str(last.get("week_date", "—"))
+        anchor_dt = pd.Timestamp(last["week_date"])
         m["asof_date"] = anchor_dt.date().isoformat()
 
         def _hist_net(weeks_back: int) -> float | None:
             target = anchor_dt - pd.Timedelta(weeks=weeks_back)
-            past = df_snap[df_snap["_dt"] <= target]
+            past = df_snap[df_snap["week_date"] <= target]
             return _opt(past.iloc[-1]["patrimoine_net"]) if not past.empty else None
 
         m["net_13w"] = _hist_net(13)
         m["net_52w"] = _hist_net(52)
+        # _dt : alias pour rétrocompatibilité avec vue_ensemble_panel (graphique)
+        df_snap = df_snap.copy()
+        df_snap["_dt"] = df_snap["week_date"]
         m["df_snap"] = df_snap  # pour le graphique ligne dans le panel
     except Exception as exc:
         logger.warning("get_vue_ensemble_metrics: historique net échoué : %s", exc)
@@ -115,8 +153,8 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
 
     # ── 3. Cashflow mensuel (12 mois) ─────────────────────────────────────
     try:
-        from services.revenus_repository import compute_taux_epargne_mensuel
-        df_cf = compute_taux_epargne_mensuel(
+        from services.cashflow import get_person_monthly_savings_series
+        df_cf = get_person_monthly_savings_series(
             conn,
             person_id,
             n_mois=24,
@@ -202,3 +240,90 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     m["reserve_securite"] = (m["liq"] / dep_moy) if (dep_moy and dep_moy > 0) else None
 
     return m
+
+
+def prepare_vue_ensemble_alloc_pie_data(metrics: dict) -> pd.DataFrame:
+    """
+    Prépare les données d'allocation pour le pie chart du panel Vue d'ensemble.
+    """
+    if not metrics:
+        logger.info("prepare_vue_ensemble_alloc_pie_data: métriques absentes")
+        return _empty_alloc_df()
+
+    alloc_data = [
+        {"Catégorie": "Liquidités", "Valeur": max(0.0, _sf(metrics.get("liq")))},
+        {"Catégorie": "Holdings bourse", "Valeur": max(0.0, _sf(metrics.get("bourse")))},
+        {"Catégorie": "Immobilier", "Valeur": max(0.0, _sf(metrics.get("immo_value")))},
+        {"Catégorie": "PE", "Valeur": max(0.0, _sf(metrics.get("pe_value")))},
+        {"Catégorie": "Entreprises", "Valeur": max(0.0, _sf(metrics.get("ent_value")))},
+    ]
+    df = pd.DataFrame([row for row in alloc_data if row["Valeur"] > 0])
+    if df.empty:
+        logger.info("prepare_vue_ensemble_alloc_pie_data: aucune allocation positive")
+        return _empty_alloc_df()
+    return df.reset_index(drop=True)
+
+
+def prepare_vue_ensemble_cashflow_bar_data(
+    df_cashflow: pd.DataFrame,
+    months: int = 12,
+) -> pd.DataFrame:
+    """
+    Prépare la série des barres Revenus/Dépenses sur les N derniers mois.
+    """
+    df = _normalize_cashflow_for_panel(df_cashflow)
+    if df.empty:
+        logger.info("prepare_vue_ensemble_cashflow_bar_data: série vide")
+        return _empty_cashflow_df()
+    return df.tail(int(months)).reset_index(drop=True)
+
+
+def prepare_vue_ensemble_epargne_chart_data(df_cashflow: pd.DataFrame) -> pd.DataFrame:
+    """
+    Prépare la série complète pour le graphique taux d'épargne du panel.
+    """
+    df = _normalize_cashflow_for_panel(df_cashflow)
+    if df.empty:
+        logger.info("prepare_vue_ensemble_epargne_chart_data: série vide")
+        return _empty_epargne_df()
+
+    df = df.copy()
+    df["mois_label"] = pd.to_datetime(df["mois"], errors="coerce").dt.strftime("%b %Y")
+    return df[_EPARGNE_COLUMNS].reset_index(drop=True)
+
+
+def pop_missing_fx_pairs() -> set[tuple[str, str]]:
+    """
+    Retourne puis purge les paires FX manquantes collectées lors des calculs marché.
+    """
+    from services import market_history
+
+    missing_fx = market_history.get_and_clear_missing_fx()
+    if missing_fx:
+        logger.warning(
+            "pop_missing_fx_pairs: %d paire(s) FX manquante(s)", len(missing_fx)
+        )
+    return missing_fx
+
+
+def get_vue_ensemble_panel_payload(conn, person_id: int) -> dict:
+    """
+    Assemble le payload métier consommé par ``qt_ui/panels/vue_ensemble_panel.py``.
+    """
+    metrics = get_vue_ensemble_metrics(conn, person_id)
+    if not metrics:
+        logger.info(
+            "get_vue_ensemble_panel_payload: métriques indisponibles pour person_id=%s",
+            person_id,
+        )
+        return {}
+
+    df_cashflow = metrics.get("df_cashflow", pd.DataFrame())
+    payload = {
+        "metrics": metrics,
+        "alloc_df": prepare_vue_ensemble_alloc_pie_data(metrics),
+        "cashflow_12m_df": prepare_vue_ensemble_cashflow_bar_data(df_cashflow, months=12),
+        "epargne_df": prepare_vue_ensemble_epargne_chart_data(df_cashflow),
+        "missing_fx_pairs": pop_missing_fx_pairs(),
+    }
+    return payload

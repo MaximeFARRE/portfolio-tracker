@@ -11,6 +11,7 @@ patrimoine_turso.db
 *.db-journal
 *.db-wal
 *.db-shm
+*.db-info
 
 # Données sensibles
 *.csv
@@ -27,6 +28,7 @@ logs/
 .vscode/
 .idea/
 *.sw[po]
+.VSCodeCounter/
 
 # OS
 .DS_Store
@@ -36,3 +38,16 @@ Thumbs.db
 dist/
 build/
 *.spec.bak
+
+# Outils personnels / config locale
+.agents/
+.claude/
+.devcontainer/
+
+# Fichiers de travail personnels
+plan_prevision.md
+prevision.md
+
+# Tests temporaires
+pytest-cache-files-*/
+test_results.txt

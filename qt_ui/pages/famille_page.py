@@ -311,37 +311,13 @@ class FamilleDashboardPanel(QWidget):
 
     def _build_alloc_chart(self, alloc: dict, df_family: pd.DataFrame) -> None:
         """Pie allocation enrichi avec part + variation hebdo par catégorie."""
-        prev_values: dict[str, float] = {}
-        if df_family is not None and len(df_family) >= 2:
-            prev = df_family.iloc[-2]
-            prev_values = {
-                "Liquidités": float(prev.get("liquidites_total", 0.0) or 0.0),
-                "Bourse": float(prev.get("bourse_holdings", 0.0) or 0.0),
-                "Private Equity": float(prev.get("pe_value", 0.0) or 0.0),
-                "Entreprises": float(prev.get("ent_value", 0.0) or 0.0),
-                "Immobilier": float(prev.get("immobilier_value", 0.0) or 0.0),
-            }
+        from services import family_dashboard as fd
 
-        alloc_rows = []
-        for category, value in (alloc or {}).items():
-            amount = float(value or 0.0)
-            if amount <= 0:
-                continue
-            prev_amount = float(prev_values.get(category, 0.0))
-            alloc_rows.append(
-                {
-                    "Catégorie": category,
-                    "Valeur": amount,
-                    "var_txt": _fmt_var_pct(_compute_var_pct(amount, prev_amount)),
-                }
-            )
-
-        alloc_df = pd.DataFrame(alloc_rows)
+        alloc_df = fd.prepare_family_alloc_pie_data(df_family, alloc)
         if alloc_df.empty:
             return
 
-        total = float(alloc_df["Valeur"].sum())
-        alloc_df["part_pct"] = (alloc_df["Valeur"] / total * 100.0).round(2) if total > 0 else 0.0
+        alloc_df["var_txt"] = alloc_df["var_pct"].apply(_fmt_var_pct)
 
         fig_alloc = px.pie(alloc_df, names="Catégorie", values="Valeur", hole=0.45)
         fig_alloc.update_traces(
@@ -386,34 +362,12 @@ class FamilleDashboardPanel(QWidget):
 
     def _build_allocation_area_chart(self, df_family: pd.DataFrame) -> None:
         """AM-05 : Stacked area allocation patrimoniale avec tooltips enrichis."""
-        if df_family is None or df_family.empty:
+        from services import family_dashboard as fd
+
+        melt = fd.prepare_family_area_chart_data(df_family)
+        if melt.empty:
             return
 
-        df_area = df_family.copy()
-        df_area["week_date"] = pd.to_datetime(df_area["week_date"], errors="coerce")
-        df_area = df_area.dropna(subset=["week_date"]).sort_values("week_date")
-        if df_area.empty:
-            return
-
-        category_map = {
-            "Liquidités": "liquidites_total",
-            "Bourse": "bourse_holdings",
-            "Private Equity": "pe_value",
-            "Entreprises": "ent_value",
-            "Immobilier": "immobilier_value",
-        }
-        for col in category_map.values():
-            if col not in df_area.columns:
-                df_area[col] = 0.0
-
-        melt = df_area[["week_date", *category_map.values()]].rename(columns={v: k for k, v in category_map.items()})
-        melt = melt.melt(id_vars="week_date", var_name="Catégorie", value_name="Valeur")
-        melt["Valeur"] = melt["Valeur"].fillna(0.0).clip(lower=0.0)
-        melt = melt.sort_values(["Catégorie", "week_date"]).reset_index(drop=True)
-
-        totals = melt.groupby("week_date")["Valeur"].transform("sum")
-        melt["part_pct"] = (melt["Valeur"] / totals * 100.0).where(totals > 0, 0.0)
-        melt["var_pct"] = melt.groupby("Catégorie")["Valeur"].pct_change() * 100.0
         melt["var_txt"] = melt["var_pct"].apply(_fmt_var_pct)
 
         fig_area = px.area(
@@ -421,7 +375,7 @@ class FamilleDashboardPanel(QWidget):
             x="week_date",
             y="Valeur",
             color="Catégorie",
-            category_orders={"Catégorie": list(category_map.keys())},
+            category_orders={"Catégorie": list(fd.ALLOC_CATEGORY_MAP.keys())},
             labels={"week_date": "Semaine", "Valeur": "Montant (€)"},
         )
 
@@ -454,59 +408,13 @@ class FamilleDashboardPanel(QWidget):
         df_people_prev: pd.DataFrame | None = None,
     ) -> None:
         """AM-06 : Treemap allocation détaillée par personne et catégorie."""
-        if df_people is None or df_people.empty:
-            return
+        from services import family_dashboard as fd
 
-        category_cols = {
-            "Liquidités": "Liquidités (€)",
-            "Bourse": "Bourse (€)",
-            "Private Equity": "PE (€)",
-            "Entreprises": "Entreprises (€)",
-            "Immobilier": "Immobilier (€)",
-        }
-
-        prev_map: dict[tuple[str, str], float] = {}
-        if df_people_prev is not None and not df_people_prev.empty:
-            for _, row in df_people_prev.iterrows():
-                name = str(row.get("Personne", ""))
-                for category, col in category_cols.items():
-                    prev_map[(name, category)] = float(row.get(col, 0.0) or 0.0)
-
-        rows = []
-        for _, row in df_people.iterrows():
-            person = str(row.get("Personne", ""))
-            person_total = 0.0
-            values = {}
-            for category, col in category_cols.items():
-                value = max(0.0, float(row.get(col, 0.0) or 0.0))
-                values[category] = value
-                person_total += value
-            if person_total <= 0:
-                continue
-
-            for category, value in values.items():
-                if value <= 0:
-                    continue
-                prev_val = prev_map.get((person, category))
-                rows.append(
-                    {
-                        "Portefeuille": "Famille",
-                        "Personne": person,
-                        "Catégorie": category,
-                        "Valeur": value,
-                        "Part personne (%)": value / person_total * 100.0,
-                        "var_txt": _fmt_var_pct(_compute_var_pct(value, prev_val)) if prev_val is not None else "n/a",
-                    }
-                )
-
-        tree_df = pd.DataFrame(rows)
+        tree_df = fd.prepare_family_treemap_data(df_people, df_people_prev)
         if tree_df.empty:
             return
 
-        total = float(tree_df["Valeur"].sum())
-        tree_df["Part famille (%)"] = (
-            tree_df["Valeur"] / total * 100.0
-        ).round(2) if total > 0 else 0.0
+        tree_df["var_txt"] = tree_df["var_pct"].apply(_fmt_var_pct)
 
         fig_tree = px.treemap(
             tree_df,
@@ -741,24 +649,14 @@ class DataHealthPanel(QWidget):
     def refresh(self) -> None:
         try:
             from services import diagnostics_global as dg
-            from services import repositories as repo
 
-            people = repo.list_people(self._conn)
-            person_ids = [int(x) for x in people["id"].tolist()] if people is not None and not people.empty else []
             safety_weeks = int(self._safety_combo.currentText())
 
-            rows = []
-            for pid in person_ids:
-                name = str(people.loc[people["id"] == pid, "name"].iloc[0])
-                stt = dg.person_weekly_status(self._conn, person_id=pid, safety_weeks=safety_weeks)
-                rows.append({
-                    "Personne": name,
-                    "Dernière semaine": stt.get("last_week") or "—",
-                    "Cible": stt.get("target_week") or "—",
-                    "Statut": "✅ À jour" if stt.get("suggested") == "UP_TO_DATE" else "⚠️ À rebuild",
-                })
-            if rows:
-                self._status_table.set_dataframe(pd.DataFrame(rows))
+            # Tableau de statuts par personne
+            health = dg.get_family_health_summary(self._conn, safety_weeks=safety_weeks)
+            status_df = health["status_df"]
+            if not status_df.empty:
+                self._status_table.set_dataframe(status_df)
 
             # Marché
             dates = dg.last_market_dates(self._conn)
@@ -782,9 +680,9 @@ class DataHealthPanel(QWidget):
 
     def _on_rebuild_all(self) -> None:
         try:
-            from services import repositories as repo
-            people = repo.list_people(self._conn)
-            person_ids = [int(x) for x in people["id"].tolist()]
+            from services import diagnostics_global as dg
+            people = dg.list_people(self._conn)
+            person_ids = [int(x) for x in people["id"].tolist()] if not people.empty else []
         except Exception as e:
             logger.error("Erreur récupération personnes pour rebuild all : %s", e)
             person_ids = []
@@ -867,52 +765,30 @@ class FluxPanel(QWidget):
 
     def refresh(self) -> None:
         try:
-            from services import repositories as repo
-            from services import calculations as calc
+            from services import cashflow as cf
 
-            people = repo.list_people(self._conn)
-            accounts = repo.list_accounts(self._conn)
-            tx_all = repo.list_transactions(self._conn, limit=20000)
-
-            if people.empty:
-                return
-
-            solde_total = calc.solde_compte(tx_all)
             today = pd.Timestamp.today()
-            cashflow_mois = calc.cashflow_mois(tx_all, int(today.year), int(today.month))
+            summary = cf.get_family_flux_summary(
+                self._conn, year=int(today.year), month=int(today.month)
+            )
 
+            solde_total = summary["solde_total"]
+            cashflow_mois = summary["cashflow_mois"]
             self._kpi_solde.set_content("Solde famille (flux)", f"{solde_total:,.2f} €".replace(",", " "))
             self._kpi_cashflow.set_content("Cashflow du mois", f"{cashflow_mois:,.2f} €".replace(",", " "))
-            self._kpi_ops.set_content("Opérations", str(len(tx_all)))
+            self._kpi_ops.set_content("Opérations", str(summary["n_operations"]))
 
-            # Tableau personnes
-            lignes = []
-            for _, p in people.iterrows():
-                pid = int(p["id"])
-                tx_p = tx_all[tx_all["person_id"] == pid].copy() if not tx_all.empty else pd.DataFrame()
-                lignes.append({"Personne": str(p["name"]), "Solde (flux)": calc.solde_compte(tx_p), "Opérations": len(tx_p)})
-            df_people = pd.DataFrame(lignes).sort_values("Solde (flux)", ascending=False)
-            self._people_table.set_dataframe(df_people)
+            df_par_personne = summary["par_personne"]
+            if not df_par_personne.empty:
+                self._people_table.set_dataframe(df_par_personne)
 
-            # Tableau comptes
-            if not accounts.empty:
-                lignes_c = []
-                for _, a in accounts.iterrows():
-                    acc_id = int(a["id"])
-                    pid = int(a["person_id"])
-                    person_name = str(people.loc[people["id"] == pid, "name"].iloc[0]) if pid in people["id"].values else "?"
-                    tx_c = tx_all[tx_all["account_id"] == acc_id].copy() if not tx_all.empty else pd.DataFrame()
-                    lignes_c.append({"Personne": person_name, "Compte": str(a["name"]),
-                                     "Solde (flux)": calc.solde_compte(tx_c), "Opérations": len(tx_c)})
-                df_accounts = pd.DataFrame(lignes_c).sort_values("Solde (flux)", ascending=False)
-                self._accounts_table.set_dataframe(df_accounts)
+            df_par_compte = summary["par_compte"]
+            if not df_par_compte.empty:
+                self._accounts_table.set_dataframe(df_par_compte)
 
-            # Dernières ops
-            if not tx_all.empty:
-                cols = ["date", "person_name", "account_name", "type", "asset_symbol", "amount", "fees", "category", "note"]
-                cols = [c for c in cols if c in tx_all.columns]
-                df_last = tx_all[cols].head(50).copy()
-                self._last_table.set_dataframe(df_last)
+            df_dernieres = summary["dernieres_operations"]
+            if not df_dernieres.empty:
+                self._last_table.set_dataframe(df_dernieres)
 
         except Exception as e:
             logger.error("Erreur chargement Flux : %s", e)

@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QFormLayout, QDoubleSpinBox, QComboBox, QDateEdit, QScrollArea,
 )
 from qt_ui.components.animated_tab import AnimatedTabWidget
-from PyQt6.QtCore import QDate, QThread, pyqtSignal
+from PyQt6.QtCore import QDate, QThread, pyqtSignal, Qt
 
 from qt_ui.widgets import PlotlyView, DataTableWidget, MetricLabel, LoadingOverlay
 from qt_ui.panels.saisie_panel import SaisiePanel, ASSET_TYPES, _ASSET_TYPES_NON_COTES
@@ -208,17 +208,9 @@ class CompteBoursePanel(QWidget):
 
         self._overlay.start("Chargement du portefeuille…", blur=True)
         try:
-            from services import repositories as repo
-            from services import portfolio
+            from services.bourse_analytics import get_live_bourse_positions_for_account
 
-            acc = repo.get_account(self._conn, self._account_id)
-            acc_ccy = (acc["currency"] if acc and acc["currency"] else "EUR").upper() if acc else "EUR"
-
-            tx_acc = repo.list_transactions(self._conn, account_id=self._account_id, limit=10000)
-            asset_ids = repo.list_account_asset_ids(self._conn, account_id=self._account_id)
-            latest_prices = repo.get_latest_prices(self._conn, asset_ids)
-
-            pos = portfolio.compute_positions_v2_fx(self._conn, tx_acc, latest_prices, acc_ccy)
+            pos = get_live_bourse_positions_for_account(self._conn, self._account_id)
 
             if pos.empty:
                 self._table_pos.set_dataframe(pd.DataFrame([{"Info": "Aucune position (ACHAT/VENTE)."}]))
@@ -316,7 +308,7 @@ class CompteBoursePanel(QWidget):
         # Formulaire de saisie de prix
         form = QFormLayout()
         form.setSpacing(10)
-        form.setLabelAlignment(0x0002)  # AlignRight
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         def _flbl(text):
             lbl = QLabel(text)

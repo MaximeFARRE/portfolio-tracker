@@ -1,7 +1,9 @@
 import pytest
+import pandas as pd
 
 from services import family_snapshots as fs
 from services.projections import ScenarioParams, load_initial_patrimoine_from_family, project_patrimoine
+from services.family_dashboard import compute_allocations_family
 
 
 def _insert_person(conn, person_id: int = 1, name: str = "Test") -> None:
@@ -117,3 +119,60 @@ def test_load_initial_patrimoine_from_family_reads_immobilier(conn):
     payload = load_initial_patrimoine_from_family(conn, family_id=1)
     assert payload["immobilier"] == pytest.approx(500.0)
     assert payload["credits"] == pytest.approx(400.0)
+
+
+# ─── compute_allocations_family ──────────────────────────────────────────────
+
+def _make_family_df(**kwargs) -> pd.DataFrame:
+    """Construit un DataFrame famille minimal pour tester les allocations."""
+    defaults = {
+        "week_date": "2026-03-30",
+        "patrimoine_net": 200_000.0,
+        "patrimoine_brut": 260_000.0,
+        "liquidites_total": 40_000.0,
+        "bourse_holdings": 25_000.0,
+        "pe_value": 5_000.0,
+        "ent_value": 10_000.0,
+        "immobilier_value": 180_000.0,
+        "credits_remaining": 60_000.0,
+    }
+    defaults.update(kwargs)
+    return pd.DataFrame([defaults])
+
+
+def test_compute_allocations_family_inclut_immobilier():
+    """compute_allocations_family doit inclure la valeur Immobilier."""
+    df = _make_family_df(immobilier_value=180_000.0)
+    alloc = compute_allocations_family(df)
+
+    assert "Immobilier" in alloc
+    assert alloc["Immobilier"] == pytest.approx(180_000.0)
+    assert alloc["Liquidités"] == pytest.approx(40_000.0)
+    assert alloc["Bourse"] == pytest.approx(25_000.0)
+
+
+def test_compute_allocations_family_patrimoine_zero_pas_de_crash():
+    """Toutes les allocations à zéro ne doit pas lever d'exception."""
+    df = _make_family_df(
+        patrimoine_net=0.0,
+        patrimoine_brut=0.0,
+        liquidites_total=0.0,
+        bourse_holdings=0.0,
+        pe_value=0.0,
+        ent_value=0.0,
+        immobilier_value=0.0,
+        credits_remaining=0.0,
+    )
+    alloc = compute_allocations_family(df)
+
+    for key, val in alloc.items():
+        assert val == pytest.approx(0.0), f"{key} devrait être 0"
+
+
+def test_compute_allocations_family_pas_de_valeurs_negatives():
+    """Les allocations ne peuvent pas être négatives (données corrompues tolérées)."""
+    df = _make_family_df(immobilier_value=-999.0, bourse_holdings=-100.0)
+    alloc = compute_allocations_family(df)
+
+    for key, val in alloc.items():
+        assert val >= 0.0, f"{key} est négatif : {val}"

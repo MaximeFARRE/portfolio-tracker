@@ -67,10 +67,12 @@ class LiquiditesPanel(QWidget):
     def _load_data(self) -> None:
         self._overlay.start("Chargement des liquidités…")
         try:
-            from services.liquidites import _compute_liquidites_like_overview
-            bank_cash, bourse_cash, pe_cash, total = _compute_liquidites_like_overview(
-                self._conn, self._person_id
-            )
+            from services.liquidites import get_liquidites_summary
+            summary = get_liquidites_summary(self._conn, self._person_id)
+            bank_cash = summary["bank_cash_eur"]
+            bourse_cash = summary["bourse_cash_eur"]
+            pe_cash = summary["pe_cash_eur"]
+            total = summary["total_eur"]
 
             self._kpi_total.set_content("Total liquidités", f"{total:,.2f} €".replace(",", " "), tone="primary")
             self._kpi_bank.set_content("Comptes bancaires", f"{bank_cash:,.2f} €".replace(",", " "), tone="bank")

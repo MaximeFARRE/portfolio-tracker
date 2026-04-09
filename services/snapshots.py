@@ -900,3 +900,266 @@ def rebuild_snapshots_person_backdated_aware(
         "n_ok": n_ok,
         "truncated": truncated
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lecture de la série hebdomadaire personne (SSOT)
+# ─────────────────────────────────────────────────────────────────────────────
+
+PERSON_WEEKLY_COLUMNS = [
+    "week_date",
+    "patrimoine_net",
+    "patrimoine_brut",
+    "liquidites_total",
+    "bourse_holdings",
+    "pe_value",
+    "ent_value",
+    "immobilier_value",
+    "credits_remaining",
+]
+
+
+def get_person_weekly_series(conn, person_id: int) -> pd.DataFrame:
+    """
+    Point d'entrée officiel (SSOT) pour lire la série hebdomadaire
+    de patrimoine d'une personne.
+
+    Symétrique à ``family_snapshots.get_family_weekly_series``.
+
+    Retourne un DataFrame avec les colonnes :
+        week_date           datetime64
+        patrimoine_net      float
+        patrimoine_brut     float
+        liquidites_total    float
+        bourse_holdings     float
+        pe_value            float
+        ent_value           float
+        immobilier_value    float
+        credits_remaining   float
+
+    Les lignes sont triées par ``week_date`` croissant.
+    Retourne un DataFrame vide (avec les colonnes) si aucun snapshot.
+    """
+    empty = pd.DataFrame(columns=PERSON_WEEKLY_COLUMNS)
+
+    try:
+        df = pd.read_sql_query(
+            """
+            SELECT week_date,
+                   patrimoine_net,
+                   patrimoine_brut,
+                   liquidites_total,
+                   bourse_holdings,
+                   pe_value,
+                   ent_value,
+                   immobilier_value,
+                   credits_remaining
+            FROM patrimoine_snapshots_weekly
+            WHERE person_id = ?
+            ORDER BY week_date ASC
+            """,
+            conn,
+            params=(int(person_id),),
+        )
+    except Exception:
+        _logger.error(
+            "get_person_weekly_series: erreur lecture snapshots pour person_id=%s",
+            person_id, exc_info=True,
+        )
+        return empty
+
+    if df is None or df.empty:
+        _logger.info(
+            "get_person_weekly_series: aucun snapshot pour person_id=%s", person_id,
+        )
+        return empty
+
+    # Normalisation (même logique que family_snapshots._normalize_family_weekly_series)
+    df["week_date"] = pd.to_datetime(df["week_date"], errors="coerce")
+    n_before = len(df)
+    df = df.dropna(subset=["week_date"]).sort_values("week_date")
+    n_dropped = n_before - len(df)
+    if n_dropped > 0:
+        _logger.warning(
+            "get_person_weekly_series: %d ligne(s) ignorée(s) (date invalide) "
+            "pour person_id=%s", n_dropped, person_id,
+        )
+
+    for col in PERSON_WEEKLY_COLUMNS:
+        if col == "week_date":
+            continue
+        if col not in df.columns:
+            df[col] = 0.0
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    return df[PERSON_WEEKLY_COLUMNS].reset_index(drop=True)
+
+
+def get_latest_person_snapshot(conn, person_id: int) -> dict | None:
+    """
+    Retourne le dernier snapshot hebdomadaire d'une personne.
+
+    Point d'entrée officiel pour obtenir l'état patrimonial le plus
+    récent d'une personne sans charger toute la série.
+
+    Retourne un dictionnaire avec les clés :
+        week_date           str   (format YYYY-MM-DD)
+        patrimoine_net      float
+        patrimoine_brut     float
+        liquidites_total    float
+        bourse_holdings     float
+        pe_value            float
+        ent_value           float
+        immobilier_value    float
+        credits_remaining   float
+
+    Retourne None si aucun snapshot n'existe.
+    """
+    if person_id is None:
+        _logger.warning("get_latest_person_snapshot: person_id est None")
+        return None
+
+    try:
+        row = conn.execute(
+            """
+            SELECT week_date, patrimoine_net, patrimoine_brut,
+                   liquidites_total, bourse_holdings, immobilier_value,
+                   pe_value, ent_value, credits_remaining
+            FROM patrimoine_snapshots_weekly
+            WHERE person_id = ?
+            ORDER BY week_date DESC, id DESC
+            LIMIT 1
+            """,
+            (int(person_id),),
+        ).fetchone()
+    except Exception:
+        _logger.error(
+            "get_latest_person_snapshot: erreur lecture pour person_id=%s",
+            person_id, exc_info=True,
+        )
+        return None
+
+    if row is None:
+        _logger.info(
+            "get_latest_person_snapshot: aucun snapshot pour person_id=%s",
+            person_id,
+        )
+        return None
+
+    def _val(key: str) -> float:
+        """Extrait une valeur numérique de la Row SQLite."""
+        try:
+            v = row[key]
+            return float(v) if v is not None else 0.0
+        except (KeyError, IndexError, TypeError, ValueError):
+            return 0.0
+
+    return {
+        "week_date":        str(row["week_date"]) if row["week_date"] else None,
+        "patrimoine_net":   _val("patrimoine_net"),
+        "patrimoine_brut":  _val("patrimoine_brut"),
+        "liquidites_total": _val("liquidites_total"),
+        "bourse_holdings":  _val("bourse_holdings"),
+        "immobilier_value": _val("immobilier_value"),
+        "pe_value":         _val("pe_value"),
+        "ent_value":        _val("ent_value"),
+        "credits_remaining": _val("credits_remaining"),
+    }
+
+
+def get_person_snapshot_at_week(
+    conn,
+    person_id: int,
+    week_date: "pd.Timestamp | str",
+) -> "dict | None":
+    """
+    Retourne le snapshot hebdomadaire d'une personne à une semaine précise.
+
+    Symétrique à ``get_latest_person_snapshot`` mais filtré sur une date donnée
+    plutôt que sur le dernier enregistrement.
+
+    Paramètres
+    ----------
+    week_date : pd.Timestamp ou str (YYYY-MM-DD)
+        La semaine exacte souhaitée.
+
+    Retourne un dictionnaire avec les mêmes clés que ``get_latest_person_snapshot``:
+        week_date           str   (format YYYY-MM-DD)
+        patrimoine_net      float
+        patrimoine_brut     float
+        liquidites_total    float
+        bourse_holdings     float
+        pe_value            float
+        ent_value           float
+        immobilier_value    float
+        credits_remaining   float
+
+    Retourne None si aucun snapshot n'existe pour cette semaine.
+    """
+    if person_id is None:
+        _logger.warning("get_person_snapshot_at_week: person_id est None")
+        return None
+
+    # Normalisation de la date en chaîne YYYY-MM-DD
+    try:
+        if isinstance(week_date, str):
+            week_str = week_date
+        else:
+            week_str = pd.Timestamp(week_date).strftime("%Y-%m-%d")
+    except Exception:
+        _logger.warning(
+            "get_person_snapshot_at_week: week_date invalide (%r) pour person_id=%s",
+            week_date, person_id,
+        )
+        return None
+
+    try:
+        row = conn.execute(
+            """
+            SELECT week_date, patrimoine_net, patrimoine_brut,
+                   liquidites_total, bourse_holdings, immobilier_value,
+                   pe_value, ent_value, credits_remaining
+            FROM patrimoine_snapshots_weekly
+            WHERE person_id = ? AND week_date = ?
+            LIMIT 1
+            """,
+            (int(person_id), week_str),
+        ).fetchone()
+    except Exception:
+        _logger.error(
+            "get_person_snapshot_at_week: erreur lecture pour person_id=%s week_date=%s",
+            person_id, week_str, exc_info=True,
+        )
+        return None
+
+    if row is None:
+        _logger.info(
+            "get_person_snapshot_at_week: aucun snapshot pour person_id=%s semaine=%s",
+            person_id, week_str,
+        )
+        return None
+
+    def _val(key: str) -> float:
+        """Extrait une valeur numérique de la Row SQLite avec fallback à 0.0."""
+        try:
+            v = row[key]
+            return float(v) if v is not None else 0.0
+        except (KeyError, IndexError, TypeError, ValueError):
+            _logger.warning(
+                "get_person_snapshot_at_week: colonne '%s' absente ou invalide "
+                "pour person_id=%s semaine=%s", key, person_id, week_str,
+            )
+            return 0.0
+
+    return {
+        "week_date":         str(row["week_date"]) if row["week_date"] else None,
+        "patrimoine_net":    _val("patrimoine_net"),
+        "patrimoine_brut":   _val("patrimoine_brut"),
+        "liquidites_total":  _val("liquidites_total"),
+        "bourse_holdings":   _val("bourse_holdings"),
+        "immobilier_value":  _val("immobilier_value"),
+        "pe_value":          _val("pe_value"),
+        "ent_value":         _val("ent_value"),
+        "credits_remaining": _val("credits_remaining"),
+    }
