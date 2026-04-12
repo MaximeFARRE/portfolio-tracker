@@ -54,6 +54,14 @@ build/
 plan_prevision.md
 prevision.md
 
+# Audits, rapports et docs de pilotage
+AUDIT_*.md
+REPORT_*.md
+TASKS_AUDIT.md
+CHECKLIST_QUALITE.md
+DATA_QUALITY_GAPS.md
+BACKLOG_GLOBAL.md
+
 # Tests temporaires
 .pytest_cache/
 .mypy_cache/
