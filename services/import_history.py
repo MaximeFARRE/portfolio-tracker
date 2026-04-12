@@ -76,21 +76,21 @@ def list_batches(conn, limit: int = 100) -> list[dict[str, Any]]:
     """
     rows = conn.execute(
         """SELECT id, import_type, person_name, account_name,
-                  filename, imported_at, nb_rows, status
+                  filename, imported_at, nb_rows, status, account_id
            FROM import_batches
            ORDER BY imported_at DESC
            LIMIT ?""",
         (limit,),
     ).fetchall()
 
+    alive_by_batch = _count_alive_rows_bulk(conn, rows)
+
     result = []
     for r in rows:
         batch_id   = _row_val(r, "id", 0)
         itype      = _row_val(r, "import_type", 1)
         status     = _row_val(r, "status", 7)
-
-        # Compter les lignes encore vivantes selon le type d'import
-        alive = _count_alive_rows(conn, batch_id, itype)
+        alive = int(alive_by_batch.get(int(batch_id), 0))
 
         result.append({
             "id":           batch_id,
@@ -104,6 +104,75 @@ def list_batches(conn, limit: int = 100) -> list[dict[str, Any]]:
             "alive_rows":   alive,
         })
     return result
+
+
+def _count_rows_by_batch_ids(conn, table: str, batch_ids: list[int]) -> dict[int, int]:
+    if not batch_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(batch_ids))
+    rows = conn.execute(
+        f"SELECT import_batch_id, COUNT(*) FROM {table} "
+        f"WHERE import_batch_id IN ({placeholders}) "
+        "GROUP BY import_batch_id",
+        tuple(int(bid) for bid in batch_ids),
+    ).fetchall()
+    return {int(r[0]): int(r[1]) for r in rows}
+
+
+def _count_alive_rows_bulk(conn, batch_rows) -> dict[int, int]:
+    """
+    Compte les lignes encore vivantes pour une liste de batches en minimisant
+    les allers-retours SQL (évite le N+1 de _count_alive_rows par batch).
+    """
+    out: dict[int, int] = {}
+    if not batch_rows:
+        return out
+
+    grouped_ids: dict[str, list[int]] = {
+        "TR": [],
+        "BANKIN": [],
+        "DEPENSES": [],
+        "REVENUS": [],
+        "CREDIT": [],
+    }
+    credit_account_by_batch: dict[int, int] = {}
+
+    for r in batch_rows:
+        bid = int(_row_val(r, "id", 0))
+        itype = str(_row_val(r, "import_type", 1) or "").upper()
+        grouped_ids.setdefault(itype, [])
+        grouped_ids[itype].append(bid)
+        if itype == "CREDIT":
+            acc_id = _row_val(r, "account_id", 8)
+            if acc_id is not None:
+                credit_account_by_batch[bid] = int(acc_id)
+
+    tx_ids = grouped_ids.get("TR", []) + grouped_ids.get("BANKIN", [])
+    dep_ids = grouped_ids.get("DEPENSES", [])
+    rev_ids = grouped_ids.get("REVENUS", [])
+    cred_ids = grouped_ids.get("CREDIT", [])
+
+    out.update(_count_rows_by_batch_ids(conn, "transactions", tx_ids))
+    out.update(_count_rows_by_batch_ids(conn, "depenses", dep_ids))
+    out.update(_count_rows_by_batch_ids(conn, "revenus", rev_ids))
+
+    if cred_ids:
+        account_ids = sorted({credit_account_by_batch.get(bid) for bid in cred_ids if credit_account_by_batch.get(bid) is not None})
+        if account_ids:
+            placeholders = ",".join(["?"] * len(account_ids))
+            rows = conn.execute(
+                f"SELECT account_id, COUNT(*) FROM credits "
+                f"WHERE account_id IN ({placeholders}) "
+                "GROUP BY account_id",
+                tuple(int(aid) for aid in account_ids),
+            ).fetchall()
+            count_by_account = {int(r[0]): int(r[1]) for r in rows}
+            for bid in cred_ids:
+                acc_id = credit_account_by_batch.get(bid)
+                if acc_id is not None:
+                    out[bid] = int(count_by_account.get(int(acc_id), 0))
+
+    return out
 
 
 def _count_alive_rows(conn, batch_id: int, import_type: str) -> int:

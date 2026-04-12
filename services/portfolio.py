@@ -8,15 +8,16 @@ def compute_positions_v1(tx_df: pd.DataFrame, latest_prices: pd.DataFrame) -> pd
     - applique le dernier prix connu (table prices)
     - calcule Valeur et PnL latent (sans FX)
     """
+    empty_cols = ["asset_id", "symbol", "name", "quantity", "pru", "last_price", "value", "pnl_latent", "valuation_status"]
     if tx_df is None or tx_df.empty:
-        return pd.DataFrame(columns=["asset_id", "symbol", "name", "quantity", "pru", "last_price", "value", "pnl_latent"])
+        return pd.DataFrame(columns=empty_cols)
 
     # On ne garde que ACHAT/VENTE avec asset_id
     df = tx_df.copy()
     df = df[df["asset_id"].notna()].copy()
     df = df[df["type"].isin(["ACHAT", "VENTE"])].copy()
     if df.empty:
-        return pd.DataFrame(columns=["asset_id", "symbol", "name", "quantity", "pru", "last_price", "value", "pnl_latent"])
+        return pd.DataFrame(columns=empty_cols)
 
     # Assure numeric
     df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0.0)
@@ -56,18 +57,26 @@ def compute_positions_v1(tx_df: pd.DataFrame, latest_prices: pd.DataFrame) -> pd
     # Nettoyage: ne garde que positions positives
     out = out[out["quantity"] > 1e-12].copy()
     if out.empty:
-        return pd.DataFrame(columns=["asset_id", "symbol", "name", "quantity", "pru", "last_price", "value", "pnl_latent"])
+        return pd.DataFrame(columns=empty_cols)
 
-    # Merge latest prices
-    lp = latest_prices.rename(columns={"price": "last_price"}).copy()
+    # Merge latest prices. Prix absent = donnée non valorisable, pas zéro métier.
+    if latest_prices is None or latest_prices.empty:
+        lp = pd.DataFrame(columns=["asset_id", "last_price"])
+    else:
+        lp = latest_prices.rename(columns={"price": "last_price"}).copy()
+        for col in ["asset_id", "last_price"]:
+            if col not in lp.columns:
+                lp[col] = pd.NA
     out = out.merge(lp[["asset_id", "last_price"]], on="asset_id", how="left")
-    out["last_price"] = pd.to_numeric(out["last_price"], errors="coerce").fillna(0.0)
+    out["last_price"] = pd.to_numeric(out["last_price"], errors="coerce")
+    out["valuation_status"] = "ok"
+    out.loc[out["last_price"].isna() | (out["last_price"] <= 0), "valuation_status"] = "missing_price"
 
     out["value"] = out["quantity"] * out["last_price"]
     out["pnl_latent"] = (out["last_price"] - out["pru"]) * out["quantity"]
 
     # Colonnes dans l’ordre
-    out = out[["asset_id", "symbol", "name", "quantity", "pru", "last_price", "value", "pnl_latent"]]
+    out = out[["asset_id", "symbol", "name", "quantity", "pru", "last_price", "value", "pnl_latent", "valuation_status"]]
     return out
 
 def compute_positions_v2_fx(conn, tx_df: pd.DataFrame, latest_prices: pd.DataFrame, account_ccy: str) -> pd.DataFrame:
@@ -119,9 +128,31 @@ def compute_positions_v2_fx(conn, tx_df: pd.DataFrame, latest_prices: pd.DataFra
 
     out["asset_ccy"] = out.apply(pick_ccy, axis=1)
 
+    import logging
+    _log = logging.getLogger(__name__)
+
+    def _convert_or_nan(amount, from_ccy, to_ccy):
+        if pd.isna(amount):
+            return amount
+        res = fx.convert(conn, amount, from_ccy, to_ccy)
+        if res is None:
+            _log.warning("FX: Unable to convert %s from %s to %s - generating NaN", amount, from_ccy, to_ccy)
+            return float('nan')
+        return res
+
     # Conversion PRU + last_price en devise compte
-    out["pru"] = out.apply(lambda r: fx.convert(conn, r["pru"], r["asset_ccy"], account_ccy), axis=1)
-    out["last_price"] = out.apply(lambda r: fx.convert(conn, r["last_price"], r["asset_ccy"], account_ccy), axis=1)
+    status = out.get("valuation_status", pd.Series(["ok"] * len(out), index=out.index)).copy()
+    original_pru = out["pru"].copy()
+    original_last_price = out["last_price"].copy()
+    out["pru"] = out.apply(lambda r: _convert_or_nan(r["pru"], r["asset_ccy"], account_ccy), axis=1)
+    out["last_price"] = out.apply(lambda r: _convert_or_nan(r["last_price"], r["asset_ccy"], account_ccy), axis=1)
+    missing_fx = (
+        status.eq("ok")
+        & (original_pru.notna() | original_last_price.notna())
+        & (out["pru"].isna() | out["last_price"].isna())
+    )
+    status.loc[missing_fx] = "missing_fx"
+    out["valuation_status"] = status
 
     # Recalcul value & pnl_latent après conversion
     out["value"] = out["quantity"] * out["last_price"]
@@ -131,5 +162,5 @@ def compute_positions_v2_fx(conn, tx_df: pd.DataFrame, latest_prices: pd.DataFra
     if "asset_type" not in out.columns:
         out["asset_type"] = "autre"
     out["asset_type"] = out["asset_type"].fillna("autre")
-    out = out[["asset_id","symbol","name","asset_type","quantity","pru","last_price","value","pnl_latent","asset_ccy"]]
+    out = out[["asset_id","symbol","name","asset_type","quantity","pru","last_price","value","pnl_latent","asset_ccy","valuation_status"]]
     return out

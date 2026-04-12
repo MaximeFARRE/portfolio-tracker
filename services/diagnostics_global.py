@@ -20,9 +20,10 @@ def _week_monday(d: pd.Timestamp) -> pd.Timestamp:
 
 def list_people(conn) -> pd.DataFrame:
     try:
-        return pd.read_sql_query("SELECT id, name FROM people ORDER BY id", conn)
+        rows = conn.execute("SELECT id, name FROM people ORDER BY id").fetchall()
+        return pd.DataFrame(rows, columns=["id", "name"]) if rows else pd.DataFrame(columns=["id", "name"])
     except Exception:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["id", "name"])
 
 
 def last_market_dates(conn) -> dict:
@@ -177,16 +178,16 @@ def tickers_missing_weekly_prices(conn, max_show: int = 30) -> pd.DataFrame:
     (V1 : facile, utile, pas parfait mais efficace)
     """
     try:
-        tx = pd.read_sql_query(
+        rows = conn.execute(
             """
             SELECT DISTINCT asset_symbol AS ticker
             FROM transactions
             WHERE asset_symbol IS NOT NULL
               AND TRIM(asset_symbol) <> ''
               AND type IN ('ACHAT','VENTE')
-            """,
-            conn,
-        )
+            """
+        ).fetchall()
+        tx = pd.DataFrame(rows, columns=["ticker"]) if rows else pd.DataFrame(columns=["ticker"])
     except Exception:
         return pd.DataFrame(columns=["ticker", "has_price"])
 

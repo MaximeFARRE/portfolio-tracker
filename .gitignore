@@ -8,6 +8,9 @@ __pycache__/
 # Base de données
 patrimoine.db
 patrimoine_turso.db
+*.db
+*.sqlite
+*.sqlite3
 *.db-journal
 *.db-wal
 *.db-shm
@@ -39,6 +42,9 @@ dist/
 build/
 *.spec.bak
 
+# Runtime local
+.patrimoine/
+
 # Outils personnels / config locale
 .agents/
 .claude/
@@ -49,5 +55,7 @@ plan_prevision.md
 prevision.md
 
 # Tests temporaires
+.pytest_cache/
+.mypy_cache/
 pytest-cache-files-*/
 test_results.txt

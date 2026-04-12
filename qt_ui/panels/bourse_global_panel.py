@@ -3,7 +3,9 @@ Panel Bourse Global — remplace ui/bourse_global_overview.py
 """
 import logging
 import datetime
+import time
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -13,13 +15,17 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QDate
 
-from qt_ui.widgets import PlotlyView, DataTableWidget, KpiCard, LoadingOverlay
+from qt_ui.widgets import (
+    PlotlyView, DataTableWidget, KpiCard, LoadingOverlay, CollapsibleSection,
+)
 from qt_ui.theme import (
-    BG_PRIMARY, BORDER_SUBTLE, TEXT_SECONDARY, TEXT_MUTED,
+    BG_PRIMARY, BG_CARD, BORDER_SUBTLE, TEXT_SECONDARY, TEXT_MUTED, TEXT_PRIMARY,
     STYLE_BTN_PRIMARY, STYLE_TITLE_XL, STYLE_SECTION,
-    STYLE_STATUS, COLOR_SUCCESS, COLOR_ERROR,
+    STYLE_STATUS, STYLE_STATUS_SUCCESS, STYLE_STATUS_WARNING, STYLE_STATUS_ERROR,
+    COLOR_SUCCESS, COLOR_ERROR, COLOR_WARNING,
     plotly_layout, plotly_time_series_layout,
 )
+from services.common_utils import safe_float
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +40,7 @@ _COL_LABELS = {
     "value":      "Valeur (€)",
     "poids_%":    "Poids %",
     "pnl_latent": "PnL (€)",
+    "valuation_status": "Statut valorisation",
     "compte":     "Compte",
     "type":       "Type",
 }
@@ -45,10 +52,26 @@ _INCOME_COLORS = {
 }
 
 
-def _fmt_eur(value: float, decimals: int = 0) -> str:
+def _fmt_eur(value: float | None, decimals: int = 0) -> str:
     """Formate un montant en € avec espace fine comme séparateur de milliers."""
+    if value is None or pd.isna(value):
+        return "—"
     fmt = f"{value:,.{decimals}f}".replace(",", "\u202f")
     return f"{fmt} €"
+
+
+def _fmt_pct(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    sign = "+" if float(value) > 0 else ""
+    return f"{sign}{float(value):.2f} %"
+
+
+def _finite_sum(series: pd.Series) -> float | None:
+    vals = pd.to_numeric(series, errors="coerce").dropna()
+    if vals.empty:
+        return None
+    return float(vals.sum())
 
 
 def _sep() -> QFrame:
@@ -127,6 +150,7 @@ class RefreshPricesThread(QThread):
         try:
             from services import repositories as repo
             from services import pricing, fx
+            from services import panel_data_access as pda
             from services.db import get_conn
 
             with get_conn() as local_conn:
@@ -138,25 +162,44 @@ class RefreshPricesThread(QThread):
                 bourse_types = {"PEA", "CTO", "CRYPTO"}
                 df_b = df_acc[df_acc["account_type"].astype(str).str.upper().isin(bourse_types)]
                 n_ok, n_fail = 0, 0
+                assets_to_refresh: dict[int, str] = {}
+                asset_target_ccy: dict[int, str] = {}
                 for _, row in df_b.iterrows():
                     account_id = int(row["id"])
                     acc_ccy = str(row.get("currency") or "EUR").upper()
                     asset_ids = repo.list_account_asset_ids(local_conn, account_id=account_id)
                     for aid in asset_ids:
-                        a = local_conn.execute("SELECT symbol FROM assets WHERE id = ?", (aid,)).fetchone()
+                        aid_i = int(aid)
+                        if aid_i in assets_to_refresh:
+                            continue
+                        a = pda.get_asset_symbol(local_conn, aid)
                         if not a:
                             continue
                         sym = a[0] if not hasattr(a, '__getitem__') else a["symbol"]
-                        px_val, ccy = pricing.fetch_last_price_auto(sym)
-                        if px_val is not None:
-                            repo.upsert_price(local_conn, asset_id=aid, date=pricing.today_str(),
-                                              price=px_val, currency=ccy, source="AUTO")
-                            if ccy and str(ccy).upper() != acc_ccy:
-                                repo.update_asset_currency(local_conn, aid, str(ccy).upper())
-                                fx.ensure_fx_rate(local_conn, str(ccy).upper(), acc_ccy)
-                            n_ok += 1
-                        else:
-                            n_fail += 1
+                        sym = str(sym or "").strip().upper()
+                        if sym:
+                            assets_to_refresh[aid_i] = sym
+                            asset_target_ccy[aid_i] = acc_ccy
+
+                sym_cache: dict[str, tuple[float | None, str]] = {}
+                ensured_fx_pairs: set[tuple[str, str]] = set()
+                for aid, sym in assets_to_refresh.items():
+                    acc_ccy = asset_target_ccy.get(aid, "EUR")
+                    if sym not in sym_cache:
+                        sym_cache[sym] = pricing.fetch_last_price_auto(sym)
+                    px_val, ccy = sym_cache[sym]
+                    if px_val is not None:
+                        repo.upsert_price(local_conn, asset_id=aid, date=pricing.today_str(),
+                                          price=px_val, currency=ccy, source="AUTO")
+                        if ccy and str(ccy).upper() != acc_ccy:
+                            repo.update_asset_currency(local_conn, aid, str(ccy).upper())
+                            pair = (str(ccy).upper(), acc_ccy)
+                            if pair not in ensured_fx_pairs:
+                                fx.ensure_fx_rate(local_conn, pair[0], pair[1])
+                                ensured_fx_pairs.add(pair)
+                        n_ok += 1
+                    else:
+                        n_fail += 1
             self.finished.emit(f"{n_ok} OK, {n_fail} non trouvés")
         except Exception as e:
             logger.error("RefreshPricesThread error: %s", e, exc_info=True)
@@ -173,6 +216,9 @@ class BourseGlobalPanel(QWidget):
         self._thread = None
         self._thread_rebuild = None
         self._selected_date = None  # None = Live
+        self._cache_ttl_sec = 20.0
+        self._last_load_key: tuple[int, str | None] | None = None
+        self._last_load_monotonic = 0.0
 
         self.setStyleSheet(f"background: {BG_PRIMARY};")
 
@@ -330,6 +376,14 @@ class BourseGlobalPanel(QWidget):
         
         layout.addLayout(self._diag_header)
 
+        self._quality_label = QLabel("")
+        self._quality_label.setStyleSheet(
+            f"color: {COLOR_WARNING}; background: {BG_CARD}; border: 1px solid {COLOR_WARNING}; "
+            "border-radius: 4px; padding: 4px 8px; font-size: 12px;"
+        )
+        self._quality_label.setVisible(False)
+        layout.addWidget(self._quality_label)
+
         table_area = QHBoxLayout()
         table_area.setSpacing(12)
 
@@ -366,6 +420,41 @@ class BourseGlobalPanel(QWidget):
         ])
         layout.addWidget(self._table_diag)
 
+        # ── Analytics Avancés (accordéons, tout fermé par défaut) ──────────
+        layout.addWidget(_sep())
+        lbl_analytics = QLabel("📊  Analytics Avancés")
+        lbl_analytics.setStyleSheet(STYLE_TITLE_XL)
+        layout.addWidget(lbl_analytics)
+        lbl_analytics_sub = QLabel(
+            "Métriques d'ingénierie financière — cliquez sur une section pour l'ouvrir"
+        )
+        lbl_analytics_sub.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
+        layout.addWidget(lbl_analytics_sub)
+
+        # État de chargement lazy : une seule fois par section
+        self._analytics_loaded: dict[str, bool] = {}
+
+        self._section_risk = self._build_analytics_section(
+            layout, "📈 Rendement & Risque", "risk_return"
+        )
+        self._section_corr = self._build_analytics_section(
+            layout, "🔗 Corrélations & Diversification", "correlation"
+        )
+        self._section_contrib = self._build_analytics_section(
+            layout, "⚖️ Contribution au Risque", "risk_contribution"
+        )
+        self._section_var = self._build_analytics_section(
+            layout, "🎯 VaR & Expected Shortfall", "var_es"
+        )
+        self._section_frontier = self._build_analytics_section(
+            layout, "🌐 Frontière Efficiente", "efficient_frontier"
+        )
+        self._section_benchmark = self._build_analytics_section(
+            layout, "📊 Comparaison Benchmark", "benchmark"
+        )
+
+        layout.addStretch()
+
         # ── Overlay de chargement (sur le widget externe, pas le scroll) ───
         self._overlay = LoadingOverlay(self)
 
@@ -380,19 +469,30 @@ class BourseGlobalPanel(QWidget):
 
     def set_person(self, person_id: int) -> None:
         self._person_id = person_id
-        self._load_data()
+        self._invalidate_view_cache(reset_analytics=True)
+        self._load_data(force=True)
 
     def _on_refresh(self) -> None:
         self._btn_refresh.setEnabled(False)
-        self._refresh_status.setText("En cours…")
+        self._refresh_status.setStyleSheet(STYLE_STATUS_WARNING)
+        self._refresh_status.setText("⏳ En cours…")
         self._thread = RefreshPricesThread(self._person_id)
         self._thread.finished.connect(self._on_refresh_done)
         self._thread.start()
 
     def _on_refresh_done(self, msg: str) -> None:
         self._btn_refresh.setEnabled(True)
-        self._refresh_status.setText(f"✅ {msg}")
-        self._load_data()
+        if msg.startswith("Erreur"):
+            self._refresh_status.setStyleSheet(STYLE_STATUS_ERROR)
+            self._refresh_status.setText(f"❌ {msg}")
+        elif "non trouvés" in msg:
+            self._refresh_status.setStyleSheet(STYLE_STATUS_WARNING)
+            self._refresh_status.setText(f"⚠️ {msg}")
+        else:
+            self._refresh_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+            self._refresh_status.setText(f"✅ {msg}")
+        self._invalidate_view_cache(reset_analytics=True)
+        self._load_data(force=True)
 
     def _on_date_applied(self) -> None:
         qdt = self._date_picker.date()
@@ -404,9 +504,10 @@ class BourseGlobalPanel(QWidget):
         
         self._selected_date = date_str
         self._lbl_mode.setText(f"🕒 Historique : {qdt.toString('dd/MM/yyyy')}")
-        self._lbl_mode.setStyleSheet(f"color: #f97316; font-weight: bold;") # Orange
+        self._lbl_mode.setStyleSheet(f"color: {COLOR_WARNING}; font-weight: bold;")
         self._btn_reset_live.setVisible(True)
-        self._load_data()
+        self._invalidate_view_cache(reset_analytics=True)
+        self._load_data(force=True)
 
     def _on_reset_live(self) -> None:
         self._selected_date = None
@@ -414,26 +515,55 @@ class BourseGlobalPanel(QWidget):
         self._lbl_mode.setStyleSheet(f"color: {COLOR_SUCCESS}; font-weight: bold;")
         self._btn_reset_live.setVisible(False)
         self._date_picker.setDate(QDate.currentDate())
-        self._load_data()
+        self._invalidate_view_cache(reset_analytics=True)
+        self._load_data(force=True)
 
     def _on_rebuild(self) -> None:
         self._btn_rebuild.setEnabled(False)
         self._btn_refresh.setEnabled(False)
-        self._rebuild_status.setText("Démarrage…")
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_WARNING)
+        self._rebuild_status.setText("⏳ Démarrage…")
         self._thread_rebuild = RebuildHistoryThread(self._person_id)
-        self._thread_rebuild.progress.connect(self._rebuild_status.setText)
+        self._thread_rebuild.progress.connect(self._on_rebuild_progress)
         self._thread_rebuild.finished.connect(self._on_rebuild_done)
         self._thread_rebuild.start()
+
+    def _on_rebuild_progress(self, msg: str) -> None:
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_WARNING)
+        self._rebuild_status.setText(f"⏳ {msg}")
 
     def _on_rebuild_done(self, msg: str) -> None:
         self._btn_rebuild.setEnabled(True)
         self._btn_refresh.setEnabled(True)
-        self._rebuild_status.setText(msg)
-        self._load_data()
+        if msg.startswith("Erreur"):
+            self._rebuild_status.setStyleSheet(STYLE_STATUS_ERROR)
+            self._rebuild_status.setText(f"❌ {msg}")
+        else:
+            self._rebuild_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+            self._rebuild_status.setText(msg)
+        self._invalidate_view_cache(reset_analytics=True)
+        self._load_data(force=True)
 
     # ── Chargement des données ────────────────────────────────────────────────
 
-    def _load_data(self) -> None:
+    def _invalidate_view_cache(self, *, reset_analytics: bool = False) -> None:
+        """Invalide le dernier rendu local pour forcer un prochain chargement complet."""
+        self._last_load_key = None
+        self._last_load_monotonic = 0.0
+        if reset_analytics:
+            self._analytics_loaded = {}
+
+    def _is_view_cache_valid(self, load_key: tuple[int, str | None]) -> bool:
+        if self._last_load_key != load_key:
+            return False
+        age = time.monotonic() - self._last_load_monotonic
+        return age <= self._cache_ttl_sec
+
+    def _load_data(self, *, force: bool = False) -> None:
+        load_key = (self._person_id, self._selected_date)
+        if not force and self._is_view_cache_valid(load_key):
+            return
+
         # ── 1. Activation des Skeletons ──────────────────────────────────
         all_widgets = self._kpis_top + self._kpis_bot + [self._table_pos, self._table_diag]
         for w in all_widgets:
@@ -445,6 +575,7 @@ class BourseGlobalPanel(QWidget):
         self._chart_alloc.set_loading(True)
 
         self._overlay.start("Analyse du portefeuille global…", blur=True)
+        loaded_ok = False
         try:
             from services import repositories as repo
             from services.bourse_analytics import (
@@ -464,19 +595,32 @@ class BourseGlobalPanel(QWidget):
                 self._table_pos.set_dataframe(pd.DataFrame([{"Info": "Aucun compte bourse."}]))
                 return
 
+            metrics = {}
+            missing_reasons: list[str] = []
             if self._selected_date:
                 # ── MODE HISTORIQUE ──
                 state = get_bourse_state_asof(self._conn, self._person_id, self._selected_date)
                 df_all = state.get("df", pd.DataFrame())
-                total_val = float(state.get("total_val", 0.0))
+                total_val = state.get("total_val")
                 nb_pos = len(df_all[df_all["quantity"] > 0]) if not df_all.empty else 0
                 nb_acc = len(df_b)
-                inv_eur = float(state.get("total_invested", 0.0))
-                total_pnl = float(state.get("total_pnl", 0.0))
-                g_perf = (total_val / inv_eur - 1.0) * 100.0 if inv_eur > 0 else 0.0
-                y_perf = 0.0 # pas calculé en historique simple
-                t_div = 0.0 # pas filtré par date ici
-                t_int = 0.0
+                inv_eur = state.get("total_invested")
+                total_pnl = state.get("total_pnl")
+                g_perf = (
+                    (float(total_val) / float(inv_eur) - 1.0) * 100.0
+                    if total_val is not None and inv_eur is not None and float(inv_eur) > 0
+                    else None
+                )
+                y_perf = None  # pas calculé en historique simple
+                t_div = None   # pas filtré par date ici
+                t_int = None
+                missing_prices = state.get("missing_prices", [])
+                missing_fx = state.get("missing_fx", [])
+                if missing_prices:
+                    missing_reasons.append(f"prix absent(s): {', '.join(map(str, missing_prices[:5]))}")
+                if missing_fx:
+                    fx_labels = sorted({str(item.get("currency", "?")) for item in missing_fx})
+                    missing_reasons.append(f"FX absent(s): {', '.join(fx_labels)}")
                 
             else:
                 # ── MODE LIVE ──
@@ -485,18 +629,37 @@ class BourseGlobalPanel(QWidget):
                 if df_all.empty:
                     self._table_pos.set_dataframe(pd.DataFrame([{"Info": "Aucune position ouverte."}]))
                     return
-                total_val = float(df_all["value"].sum())       if "value"      in df_all.columns else 0.0
-                total_pnl = float(df_all["pnl_latent"].sum())  if "pnl_latent" in df_all.columns else 0.0
+                total_val = _finite_sum(df_all["value"])       if "value"      in df_all.columns else None
+                total_pnl = _finite_sum(df_all["pnl_latent"])  if "pnl_latent" in df_all.columns else None
                 nb_pos    = len(df_all[df_all["quantity"] > 0]) if "quantity"  in df_all.columns else len(df_all)
                 nb_acc    = len(df_b)
+                if "valuation_status" in df_all.columns:
+                    status_counts = df_all["valuation_status"].fillna("ok").astype(str).value_counts()
+                    for status, count in status_counts.items():
+                        if status != "ok":
+                            missing_reasons.append(f"{count} position(s) {status}")
 
                 # ── Métriques analytiques ──
                 metrics = get_bourse_performance_metrics(self._conn, self._person_id, current_live_value=total_val)
-                inv_eur = metrics.get("invested_eur",    0.0)
-                g_perf  = metrics.get("global_perf_pct", 0.0)
-                y_perf  = metrics.get("ytd_perf_pct",    0.0)
-                t_div   = metrics.get("total_dividends",  0.0)
-                t_int   = metrics.get("total_interests",  0.0)
+                inv_eur = metrics.get("invested_eur")
+                g_perf  = metrics.get("global_perf_pct")
+                y_perf  = metrics.get("ytd_perf_pct")
+                t_div   = metrics.get("total_dividends")
+                t_int   = metrics.get("total_interests")
+                if total_val is None:
+                    g_perf = None
+                    y_perf = None
+                    missing_reasons.append("valeur courante non calculable")
+                if metrics.get("missing_income_fx"):
+                    fx_labels = sorted({str(item.get("currency", "?")) for item in metrics.get("missing_income_fx", [])})
+                    missing_reasons.append(f"revenus FX incomplets: {', '.join(fx_labels)}")
+                missing_reasons.extend([str(w) for w in metrics.get("perf_warnings", [])])
+
+            if missing_reasons:
+                self._quality_label.setText("⚠️ Données partielles : " + " · ".join(missing_reasons[:4]))
+                self._quality_label.setVisible(True)
+            else:
+                self._quality_label.setVisible(False)
 
             # ── Sous-titre dynamique ─────────────────────────────────────────
             today_str = datetime.date.today().strftime("%d/%m/%Y")
@@ -513,14 +676,12 @@ class BourseGlobalPanel(QWidget):
                 "Valeur Actuelle", _fmt_eur(total_val),
                 emoji="📊", tone="broker",
             )
-            s_g = "+" if g_perf > 0 else ""
-            s_y = "+" if y_perf > 0 else ""
             self._kpi_perf.set_content(
                 "Perf Globale",
-                f"{s_g}{g_perf:.2f} %",
-                subtitle=f"YTD : {s_y}{y_perf:.2f} %",
+                _fmt_pct(g_perf),
+                subtitle=f"YTD : {_fmt_pct(y_perf)}",
                 emoji="📈",
-                tone="success" if g_perf >= 0 else "alert",
+                tone="neutral" if g_perf is None or pd.isna(g_perf) else ("success" if float(g_perf) >= 0 else "alert"),
             )
             # ── KPI — ligne 2 ────────────────────────────────────────────────
             self._kpi_nb.set_content(
@@ -566,61 +727,68 @@ class BourseGlobalPanel(QWidget):
                     df_snap_m = df_snap_m.copy()
                     df_snap_m["_dt"] = pd.to_datetime(df_snap_m["date"], errors="coerce")
                     older = df_snap_m[df_snap_m["_dt"] <= pd.Timestamp(_date_12m)]
-                    if not older.empty:
+                    if not older.empty and total_val is not None:
                         val_12m_ago = float(older.iloc[-1]["bourse_holdings"])
                         pnl_delta_12m = total_val - val_12m_ago
                         sign = "+" if pnl_delta_12m >= 0 else ""
-                        pnl_12m_pct = ((total_val / val_12m_ago) - 1.0) * 100.0 if val_12m_ago > 0 else 0.0
-                        s_pct = "+" if pnl_12m_pct >= 0 else ""
+                        pnl_12m_pct = ((total_val / val_12m_ago) - 1.0) * 100.0 if val_12m_ago > 0 else None
                         pnl_details.extend([
                             ("Δ 12 derniers mois",  f"{sign}{_fmt_eur(pnl_delta_12m)}"),
-                            ("Perf 12 m",           f"{s_pct}{pnl_12m_pct:.2f} %"),
+                            ("Perf 12 m",           _fmt_pct(pnl_12m_pct)),
                         ])
 
             # Valeur principale des cartes de revenus = all-time
+            income_fx_missing = bool(metrics.get("missing_income_fx"))
+            div_value = "—" if income_fx_missing and (t_div is None or float(t_div or 0.0) == 0.0) else _fmt_eur(t_div)
+            int_value = "—" if income_fx_missing and (t_int is None or float(t_int or 0.0) == 0.0) else _fmt_eur(t_int)
+            pnl_value = "—" if total_pnl is None or pd.isna(total_pnl) else f"{'+' if float(total_pnl) >= 0 else ''}{_fmt_eur(total_pnl)}"
             self._kpi_div.set_content(
-                "Dividendes (all time)", _fmt_eur(t_div),
+                "Dividendes (all time)", div_value,
+                subtitle="FX incomplet" if income_fx_missing else None,
                 emoji="💵", tone="success",
                 details=div_details or None,
             )
             self._kpi_int.set_content(
-                "Intérêts (all time)", _fmt_eur(t_int),
+                "Intérêts (all time)", int_value,
+                subtitle="FX incomplet" if income_fx_missing else None,
                 emoji="🏦", tone="success",
                 details=int_details or None,
             )
             self._kpi_pnl.set_content(
                 "PnL Latent",
-                f"{'+'  if total_pnl >= 0 else ''}{_fmt_eur(total_pnl)}",
+                pnl_value,
                 emoji="⚡",
-                tone="success" if total_pnl >= 0 else "alert",
+                tone="neutral" if total_pnl is None or pd.isna(total_pnl) else ("success" if float(total_pnl) >= 0 else "alert"),
                 details=pnl_details or None,
             )
 
             # ── Table des positions (U5) ──────────────────────────────────────
             # On adapte les colonnes selon le mode
             if self._selected_date:
-                display_cols = ["symbol", "quantity", "last_price", "currency", "fx_rate", "value", "compte"]
+                display_cols = ["symbol", "quantity", "last_price", "currency", "fx_rate", "value", "valuation_status", "compte"]
                 _LABELS = {**_COL_LABELS, "last_price": "Prix (Date)", "fx_rate": "Taux FX"}
             else:
                 display_cols = ["symbol", "name", "asset_type", "quantity", "pru", "last_price",
-                                "value", "pnl_latent", "compte", "type"]
+                                "value", "pnl_latent", "valuation_status", "compte", "type"]
                 _LABELS = _COL_LABELS
 
             display_cols = [c for c in display_cols if c in df_all.columns]
-            if total_val > 0 and "value" in df_all.columns:
+            if total_val is not None and float(total_val) > 0 and "value" in df_all.columns:
                 df_all["poids_%"] = (df_all["value"] / total_val * 100.0).round(2)
                 if "value" in display_cols:
                     idx = display_cols.index("value")
                     display_cols.insert(idx + 1, "poids_%")
 
-            df_display = df_all[display_cols].copy().sort_values("value", ascending=False)
+            df_display = df_all[display_cols].copy()
+            if "value" in df_display.columns:
+                df_display = df_display.sort_values("value", ascending=False, na_position="last")
             df_display.rename(columns=_LABELS, inplace=True)
 
             pnl_col = _LABELS.get("pnl_latent", "PnL (€)")
             self._table_pos.set_dataframe(df_display)
             if not self._selected_date:
                 self._table_pos.set_column_colors({
-                    pnl_col: lambda v: COLOR_SUCCESS if _safe_float(v) >= 0 else COLOR_ERROR
+                pnl_col: lambda v: COLOR_SUCCESS if pd.notna(v) and safe_float(v) >= 0 else COLOR_ERROR
                 })
             
             if not self._selected_date:
@@ -684,6 +852,8 @@ class BourseGlobalPanel(QWidget):
                         hovermode="x unified",
                     )
                     self._chart_history.set_figure(fig_hist)
+                else:
+                    self._chart_history.clear_figure()
 
                 # ── Graphe revenus (U4) ──
                 df_inc = metrics.get("income_df")
@@ -711,6 +881,8 @@ class BourseGlobalPanel(QWidget):
                         ),
                     )
                     self._chart_income.set_figure(fig_inc)
+                else:
+                    self._chart_income.clear_figure()
             else:
                 # Masquer les graphes en mode historique pour éviter la confusion
                 self._chart_history.clear_figure()
@@ -736,6 +908,10 @@ class BourseGlobalPanel(QWidget):
                         showlegend=False,
                     )
                     self._chart_alloc.set_figure(fig_pie)
+                else:
+                    self._chart_alloc.clear_figure()
+            else:
+                self._chart_alloc.clear_figure()
 
             # ── Diagnostic Tickers ───────────────────────────────────────────
             df_diag = get_tickers_diagnostic_df(self._conn, self._person_id)
@@ -750,6 +926,8 @@ class BourseGlobalPanel(QWidget):
             else:
                 self._table_diag.set_dataframe(pd.DataFrame([{"Info": "Aucune position pour le diagnostic."}]))
 
+            loaded_ok = True
+
         except Exception as e:
             logger.error("BourseGlobalPanel._load_data error: %s", e, exc_info=True)
         finally:
@@ -763,10 +941,468 @@ class BourseGlobalPanel(QWidget):
             self._chart_alloc.set_loading(False)
 
             self._overlay.stop()
+            if loaded_ok:
+                self._last_load_key = load_key
+                self._last_load_monotonic = time.monotonic()
+
+    # ── Analytics — construction et chargement lazy ─────────────────────────
+
+    def _build_analytics_section(
+        self, parent_layout: QVBoxLayout, title: str, section_key: str
+    ) -> CollapsibleSection:
+        """Crée une section accordéon et connecte le signal d'ouverture."""
+        section = CollapsibleSection(title)
+        content_layout = QVBoxLayout()
+
+        # Placeholder "Chargement…"
+        placeholder = QLabel("⏳ Ouvrez la section pour charger les données…")
+        placeholder.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px; padding: 8px;")
+        placeholder.setObjectName(f"placeholder_{section_key}")
+        content_layout.addWidget(placeholder)
+
+        section.set_content_layout(content_layout)
+        section.toggled.connect(lambda opened, k=section_key: self._on_analytics_toggled(k, opened))
+        parent_layout.addWidget(section)
+        return section
+
+    def _on_analytics_toggled(self, section_key: str, opened: bool) -> None:
+        """Charge les données la première fois qu'une section est ouverte."""
+        if not opened:
+            return
+        if self._analytics_loaded.get(section_key, False):
+            return
+
+        self._analytics_loaded[section_key] = True
+
+        loaders = {
+            "risk_return": self._load_risk_return_section,
+            "correlation": self._load_correlation_section,
+            "risk_contribution": self._load_risk_contribution_section,
+            "var_es": self._load_var_es_section,
+            "efficient_frontier": self._load_efficient_frontier_section,
+            "benchmark": self._load_benchmark_section,
+        }
+        loader = loaders.get(section_key)
+        if loader:
+            try:
+                loader()
+            except Exception as e:
+                logger.error("Erreur chargement analytics '%s': %s", section_key, e, exc_info=True)
+
+    def _get_section_content_layout(self, section: CollapsibleSection) -> QVBoxLayout:
+        """Retourne le layout de contenu d'une section et supprime le placeholder."""
+        content = section._content_widget
+        layout = content.layout()
+        # Supprimer le placeholder
+        for i in reversed(range(layout.count())):
+            widget = layout.itemAt(i).widget()
+            if widget and widget.objectName().startswith("placeholder_"):
+                widget.deleteLater()
+        return layout
+
+    @staticmethod
+    def _analytics_error_label(message: str) -> QLabel:
+        """Crée un label d'erreur/état vide pour les sections analytics."""
+        lbl = QLabel(f"⚠️ {message}")
+        lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px; padding: 12px;")
+        lbl.setWordWrap(True)
+        return lbl
+
+    @staticmethod
+    def _analytics_kpi_row(items: list[tuple[str, str]]) -> QHBoxLayout:
+        """Crée une ligne de KPIs simples (label : valeur)."""
+        row = QHBoxLayout()
+        row.setSpacing(20)
+        for label_text, value_text in items:
+            pair = QVBoxLayout()
+            pair.setSpacing(2)
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+            val = QLabel(str(value_text))
+            val.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 14px; font-weight: bold;")
+            pair.addWidget(lbl)
+            pair.addWidget(val)
+            row.addLayout(pair)
+        row.addStretch()
+        return row
+
+    # ── 1. Rendement & Risque ─────────────────────────────────────────────
+
+    def _load_risk_return_section(self) -> None:
+        """Charge les KPIs rendement/risque dans la section accordéon."""
+        from services.bourse_advanced_analytics import get_risk_return_payload
+
+        payload = get_risk_return_payload(self._conn, self._person_id)
+        layout = self._get_section_content_layout(self._section_risk)
+
+        if "error" in payload:
+            layout.addWidget(self._analytics_error_label(payload["error"]))
+            return
+
+        # Ligne 1 — Rendement
+        cagr = payload.get("cagr_pct")
+        cagr_text = f"{cagr:+.2f} %" if cagr is not None else "N/A"
+        mean_ret = payload.get("mean_return_ann_pct", 0)
+        layout.addLayout(self._analytics_kpi_row([
+            ("CAGR", cagr_text),
+            ("Rendement moy. annualisé", f"{mean_ret:+.2f} %"),
+            ("Points de données", str(payload.get("data_points", 0))),
+            ("Période", f"{payload.get('period_start', '?')} → {payload.get('period_end', '?')}"),
+        ]))
+
+        # Ligne 2 — Risque
+        vol = payload.get("volatility_ann_pct", 0)
+        sharpe = payload.get("sharpe")
+        sharpe_text = f"{sharpe:.3f}" if sharpe is not None else "N/A"
+        beta = payload.get("beta")
+        beta_text = f"{beta:.3f}" if beta is not None else "N/A (benchmark absent)"
+        layout.addLayout(self._analytics_kpi_row([
+            ("Volatilité annualisée", f"{vol:.2f} %"),
+            ("Ratio de Sharpe", sharpe_text),
+            ("Beta vs MSCI World", beta_text),
+        ]))
+
+        # Ligne 3 — Drawdown
+        dd = payload.get("max_drawdown_pct", 0)
+        dd_start = payload.get("drawdown_start", "—")
+        dd_end = payload.get("drawdown_end", "—")
+        recovery = payload.get("recovery_days")
+        recovery_text = f"{recovery} jours" if recovery is not None else "Non récupéré"
+        layout.addLayout(self._analytics_kpi_row([
+            ("Max Drawdown", f"{dd:.2f} %"),
+            ("Drawdown", f"{dd_start} → {dd_end}"),
+            ("Récupération", recovery_text),
+        ]))
+
+        # Info méthodologique
+        info = QLabel("ℹ️ Sharpe calculé avec Rf=3%. Volatilité = σ weekly × √52. Beta vs URTH (MSCI World).")
+        info.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px; padding-top: 6px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+    # ── 2. Corrélations & Diversification ─────────────────────────────────
+
+    def _load_correlation_section(self) -> None:
+        """Charge la heatmap de corrélation dans la section accordéon."""
+        from services.bourse_advanced_analytics import get_correlation_payload
+
+        payload = get_correlation_payload(self._conn, self._person_id)
+        layout = self._get_section_content_layout(self._section_corr)
+
+        if "error" in payload:
+            layout.addWidget(self._analytics_error_label(payload["error"]))
+            return
+
+        corr_matrix = payload["matrix"]
+        tickers = payload["tickers"]
+        avg_corr = payload.get("avg_correlation", 0)
+        div_ratio = payload.get("diversification_ratio")
+
+        # KPIs
+        div_text = f"{div_ratio:.2f}" if div_ratio is not None else "N/A"
+        layout.addLayout(self._analytics_kpi_row([
+            ("Corrélation moyenne", f"{avg_corr:.3f}"),
+            ("Ratio de diversification", div_text),
+            ("Actifs analysés", str(payload.get("n_assets", 0))),
+        ]))
+
+        # Top paires corrélées
+        top_pairs = payload.get("top_correlated_pairs", [])
+        if top_pairs:
+            pairs_text = " · ".join([f"{a}/{b}: {c:.2f}" for a, b, c in top_pairs[:5]])
+            lbl_pairs = QLabel(f"🔗 Top corrélations : {pairs_text}")
+            lbl_pairs.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px; padding: 4px 0;")
+            lbl_pairs.setWordWrap(True)
+            layout.addWidget(lbl_pairs)
+
+        # Heatmap Plotly
+        chart_corr = PlotlyView(min_height=350)
+        fig = go.Figure(data=go.Heatmap(
+            z=corr_matrix.values,
+            x=tickers,
+            y=tickers,
+            colorscale="RdBu_r",
+            zmin=-1, zmax=1,
+            text=np.round(corr_matrix.values, 2),
+            texttemplate="%{text}",
+            textfont=dict(size=10),
+            hovertemplate="%{x} / %{y}<br>Corrélation: %{z:.3f}<extra></extra>",
+        ))
+        fig.update_layout(
+            **plotly_layout(margin=dict(l=60, r=20, t=20, b=60)),
+            xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
+            yaxis=dict(tickfont=dict(size=10)),
+        )
+        chart_corr.set_figure(fig)
+        layout.addWidget(chart_corr)
+
+        info = QLabel("ℹ️ Corrélation de Pearson sur rendements log-weekly. Ratio diversification > 1 = bonne diversification.")
+        info.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+    # ── 3. Contribution au Risque ─────────────────────────────────────────
+
+    def _load_risk_contribution_section(self) -> None:
+        """Charge la contribution au risque de chaque actif."""
+        from services.bourse_advanced_analytics import get_risk_contribution_payload
+
+        payload = get_risk_contribution_payload(self._conn, self._person_id)
+        layout = self._get_section_content_layout(self._section_contrib)
+
+        if "error" in payload:
+            layout.addWidget(self._analytics_error_label(payload["error"]))
+            return
+
+        contrib_df = payload["contributions"]
+        vol_ann = payload.get("portfolio_vol_ann_pct", 0)
+
+        layout.addLayout(self._analytics_kpi_row([
+            ("Volatilité portefeuille (ann.)", f"{vol_ann:.2f} %"),
+        ]))
+
+        # Bar chart horizontal — contribution au risque vs poids
+        chart_contrib = PlotlyView(min_height=max(250, len(contrib_df) * 28))
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            y=contrib_df["ticker"], x=contrib_df["weight_pct"],
+            name="Poids (%)", orientation="h",
+            marker_color="#60a5fa",
+            hovertemplate="%{y}<br>Poids: %{x:.1f}%<extra></extra>",
+        ))
+        fig.add_trace(go.Bar(
+            y=contrib_df["ticker"], x=contrib_df["risk_contrib_pct"],
+            name="Contribution risque (%)", orientation="h",
+            marker_color="#f87171",
+            hovertemplate="%{y}<br>Risque: %{x:.1f}%<extra></extra>",
+        ))
+        fig.update_layout(
+            **plotly_layout(margin=dict(l=80, r=20, t=30, b=10)),
+            barmode="group",
+            yaxis=dict(autorange="reversed"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        chart_contrib.set_figure(fig)
+        layout.addWidget(chart_contrib)
+
+        info = QLabel(
+            "ℹ️ La contribution au risque montre qu'un actif peut représenter "
+            "peu en poids mais beaucoup en risque (et inversement)."
+        )
+        info.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+    # ── 4. VaR & Expected Shortfall ───────────────────────────────────────
+
+    def _load_var_es_section(self) -> None:
+        """Charge les métriques VaR et ES."""
+        from services.bourse_advanced_analytics import get_var_es_payload
+
+        payload = get_var_es_payload(self._conn, self._person_id)
+        layout = self._get_section_content_layout(self._section_var)
+
+        if "error" in payload:
+            layout.addWidget(self._analytics_error_label(payload["error"]))
+            return
+
+        ptf_val = payload.get("portfolio_value_eur", 0)
+        horizon = payload.get("horizon", "1 semaine")
+
+        # Ligne 1 — VaR
+        layout.addLayout(self._analytics_kpi_row([
+            (f"VaR 95% ({horizon})", f"{payload['var_95_pct']:.2f} %"),
+            (f"VaR 99% ({horizon})", f"{payload['var_99_pct']:.2f} %"),
+            ("VaR 95% (EUR)", f"{payload['var_95_eur']:,.0f} €"),
+            ("VaR 99% (EUR)", f"{payload['var_99_eur']:,.0f} €"),
+        ]))
+
+        # Ligne 2 — ES / CVaR
+        layout.addLayout(self._analytics_kpi_row([
+            (f"ES/CVaR 95% ({horizon})", f"{payload['es_95_pct']:.2f} %"),
+            (f"ES/CVaR 99% ({horizon})", f"{payload['es_99_pct']:.2f} %"),
+        ]))
+
+        # Ligne 3 — Paramétrique
+        layout.addLayout(self._analytics_kpi_row([
+            ("VaR 95% (param.)", f"{payload.get('var_95_param_pct', 0):.2f} %"),
+            ("VaR 99% (param.)", f"{payload.get('var_99_param_pct', 0):.2f} %"),
+            ("Observations", str(payload.get("n_observations", 0))),
+        ]))
+
+        info = QLabel(
+            f"ℹ️ Méthode primaire : historique (percentile des rendements observés). "
+            f"Paramétrique : hypothèse de distribution normale. "
+            f"Horizon : {horizon}. Valeur portefeuille : {ptf_val:,.0f} €."
+        )
+        info.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+    # ── 5. Frontière Efficiente ────────────────────────────────────────────
+
+    def _load_efficient_frontier_section(self) -> None:
+        """Charge le graphe de la frontière efficiente."""
+        from services.bourse_advanced_analytics import get_efficient_frontier_payload
+
+        payload = get_efficient_frontier_payload(self._conn, self._person_id)
+        layout = self._get_section_content_layout(self._section_frontier)
+
+        if "error" in payload:
+            layout.addWidget(self._analytics_error_label(payload["error"]))
+            return
+
+        frontier = payload["frontier_points"]
+        current = payload["current_portfolio"]
+        min_var = payload["min_variance"]
+        max_sharpe = payload["max_sharpe"]
+
+        # KPIs
+        layout.addLayout(self._analytics_kpi_row([
+            ("Portefeuille actuel", f"Vol {current['vol']:.1f}% / Ret {current['ret']:.1f}%"),
+            ("Variance minimale", f"Vol {min_var['vol']:.1f}% / Ret {min_var['ret']:.1f}%"),
+            ("Sharpe maximal", f"Vol {max_sharpe['vol']:.1f}% / Ret {max_sharpe['ret']:.1f}%"),
+        ]))
+
+        # Scatter plot
+        chart_frontier = PlotlyView(min_height=380)
+        fig = go.Figure()
+
+        # Frontière
+        if frontier:
+            frontier_vol = [p["vol"] for p in frontier]
+            frontier_ret = [p["ret"] for p in frontier]
+            fig.add_trace(go.Scatter(
+                x=frontier_vol, y=frontier_ret,
+                mode="lines", name="Frontière efficiente",
+                line=dict(color="#60a5fa", width=2),
+                hovertemplate="Vol: %{x:.1f}%<br>Ret: %{y:.1f}%<extra>Frontière</extra>",
+            ))
+
+        # Portefeuille actuel
+        fig.add_trace(go.Scatter(
+            x=[current["vol"]], y=[current["ret"]],
+            mode="markers", name="Portefeuille actuel",
+            marker=dict(color="#f59e0b", size=14, symbol="star",
+                        line=dict(color="white", width=2)),
+            hovertemplate=f"<b>Actuel</b><br>Vol: {current['vol']:.1f}%<br>Ret: {current['ret']:.1f}%<extra></extra>",
+        ))
+
+        # Variance minimale
+        fig.add_trace(go.Scatter(
+            x=[min_var["vol"]], y=[min_var["ret"]],
+            mode="markers", name="Variance minimale",
+            marker=dict(color="#22c55e", size=12, symbol="diamond",
+                        line=dict(color="white", width=2)),
+            hovertemplate=f"<b>Min Variance</b><br>Vol: {min_var['vol']:.1f}%<br>Ret: {min_var['ret']:.1f}%<extra></extra>",
+        ))
+
+        # Sharpe max
+        fig.add_trace(go.Scatter(
+            x=[max_sharpe["vol"]], y=[max_sharpe["ret"]],
+            mode="markers", name="Sharpe maximal",
+            marker=dict(color="#ef4444", size=12, symbol="triangle-up",
+                        line=dict(color="white", width=2)),
+            hovertemplate=f"<b>Max Sharpe</b><br>Vol: {max_sharpe['vol']:.1f}%<br>Ret: {max_sharpe['ret']:.1f}%<extra></extra>",
+        ))
+
+        fig.update_layout(
+            **plotly_layout(margin=dict(l=50, r=20, t=30, b=50)),
+            xaxis=dict(title="Volatilité annualisée (%)", showgrid=True, gridcolor="#1e2538"),
+            yaxis=dict(title="Rendement annualisé (%)", showgrid=True, gridcolor="#1e2538"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        chart_frontier.set_figure(fig)
+        layout.addWidget(chart_frontier)
+
+        # Poids optimaux
+        weights_text_parts = []
+        for label, data in [("Min Var", min_var), ("Max Sharpe", max_sharpe)]:
+            top_weights = sorted(data["weights"].items(), key=lambda x: -x[1])[:5]
+            parts = ", ".join([f"{t}: {w:.0f}%" for t, w in top_weights])
+            weights_text_parts.append(f"{label} → {parts}")
+        weights_info = QLabel("🏆 " + " | ".join(weights_text_parts))
+        weights_info.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
+        weights_info.setWordWrap(True)
+        layout.addWidget(weights_info)
+
+        info = QLabel(
+            "ℹ️ Optimisation SLSQP (scipy). Contraintes : long-only, somme poids = 100%. "
+            "Basé sur rendements et covariance weekly annualisés."
+        )
+        info.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+    # ── 6. Comparaison Benchmark ──────────────────────────────────────────
+
+    def _load_benchmark_section(self) -> None:
+        """Charge la comparaison avec le benchmark."""
+        from services.bourse_advanced_analytics import get_benchmark_comparison_payload
+
+        payload = get_benchmark_comparison_payload(self._conn, self._person_id)
+        layout = self._get_section_content_layout(self._section_benchmark)
+
+        if "error" in payload:
+            layout.addWidget(self._analytics_error_label(payload["error"]))
+            return
+
+        bench_sym = payload.get("benchmark_symbol", "URTH")
+
+        # KPIs comparatifs
+        ptf_ret = payload.get("portfolio_return_ann_pct", 0)
+        bench_ret = payload.get("benchmark_return_ann_pct", 0)
+        ptf_vol = payload.get("portfolio_vol_ann_pct", 0)
+        bench_vol = payload.get("benchmark_vol_ann_pct", 0)
+        alpha = payload.get("alpha_pct", 0)
+        te = payload.get("tracking_error_pct", 0)
+
+        layout.addLayout(self._analytics_kpi_row([
+            ("Rendement portefeuille", f"{ptf_ret:+.2f} %/an"),
+            (f"Rendement {bench_sym}", f"{bench_ret:+.2f} %/an"),
+            ("Alpha", f"{alpha:+.2f} %"),
+        ]))
+        layout.addLayout(self._analytics_kpi_row([
+            ("Volatilité portefeuille", f"{ptf_vol:.2f} %"),
+            (f"Volatilité {bench_sym}", f"{bench_vol:.2f} %"),
+            ("Tracking Error", f"{te:.2f} %"),
+            ("Semaines comparées", str(payload.get("n_weeks", 0))),
+        ]))
+
+        # Line chart normalisé base 100
+        norm_series = payload.get("series")
+        if norm_series is not None and not norm_series.empty:
+            chart_bench = PlotlyView(min_height=320)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=norm_series["date"], y=norm_series["portfolio_norm"],
+                mode="lines", name="Portefeuille",
+                line=dict(color="#4ade80", width=2),
+                hovertemplate="<b>%{x|%d %b %Y}</b><br>%{y:.1f}<extra>Portefeuille</extra>",
+            ))
+            fig.add_trace(go.Scatter(
+                x=norm_series["date"], y=norm_series["benchmark_norm"],
+                mode="lines", name=bench_sym,
+                line=dict(color="#60a5fa", width=2, dash="dot"),
+                hovertemplate="<b>%{x|%d %b %Y}</b><br>%{y:.1f}<extra>" + bench_sym + "</extra>",
+            ))
+            # Ligne base 100
+            fig.add_hline(y=100, line_dash="dash", line_color="#475569", line_width=1)
+            fig.update_layout(
+                **plotly_time_series_layout(margin=dict(l=10, r=10, t=30, b=10)),
+                yaxis=dict(title="Base 100", showgrid=True, gridcolor="#1e2538"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                hovermode="x unified",
+            )
+            chart_bench.set_figure(fig)
+            layout.addWidget(chart_bench)
+
+        info = QLabel(
+            f"ℹ️ Comparaison vs {bench_sym} (MSCI World). "
+            f"Performance normalisée base 100. Alpha = excès de rendement annualisé."
+        )
+        info.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
 
 
-def _safe_float(v) -> float:
-    try:
-        return float(v)
-    except Exception:
-        return 0.0

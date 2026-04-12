@@ -40,8 +40,36 @@ def _to_float(x) -> float:
         return 0.0
 
 
+def _parse_date_strict(s: str):
+    """
+    Parse une date depuis une chaîne en format explicite.
+
+    Formats supportés, testés dans l'ordre :
+      - dd/mm/yyyy  (format FR, exports Excel/CSV)
+      - YYYY-MM-DD  (format ISO, Bankin)
+
+    N'utilise pas dayfirst=True ni l'inférence automatique de pandas
+    afin d'éviter les UserWarning de pandas >= 2.0 et les ambiguïtés.
+
+    Retourne pd.NaT si aucun format ne correspond.
+    """
+    # Format FR : 30/09/2025
+    if len(s) == 10 and s[2] == "/":
+        d = pd.to_datetime(s, format="%d/%m/%Y", errors="coerce")
+        if pd.notna(d):
+            return d
+
+    # Format ISO : 2025-09-30
+    if len(s) == 10 and s[4] == "-":
+        d = pd.to_datetime(s, format="%Y-%m-%d", errors="coerce")
+        if pd.notna(d):
+            return d
+
+    return pd.NaT
+
+
 def _month_key_from_date(date_value) -> str:
-    # date_value peut être NaN, string, etc.
+    """Convertit une valeur de date (string FR ou ISO) en clé mois YYYY-MM-01."""
     if pd.isna(date_value):
         raise ValueError("Date manquante")
 
@@ -49,12 +77,12 @@ def _month_key_from_date(date_value) -> str:
     if s == "":
         raise ValueError("Date vide")
 
-    # format attendu: 30/09/2025 (dd/mm/yyyy) ou YYYY-MM-DD (Bankin)
-    d = pd.to_datetime(s, dayfirst=True, errors="coerce")
+    # Formats attendus : 30/09/2025 (dd/mm/yyyy) ou 2025-09-30 (YYYY-MM-DD)
+    d = _parse_date_strict(s)
     if pd.isna(d):
         raise ValueError(f"Date invalide: {s}")
 
-    # On stocke le mois: YYYY-MM-01 (ton format DB)
+    # On stocke le mois : YYYY-MM-01 (format DB)
     return f"{d.year:04d}-{d.month:02d}-01"
 
 
@@ -290,6 +318,23 @@ def import_bankin_csv(
     monthly_dep = {}  # (mois, categorie_finale) -> sum
     monthly_rev = {}
 
+    existing_fingerprints = set()
+    if not purge_existing_transactions:
+        rows = conn.execute(
+            """
+            SELECT date, type, amount, note 
+            FROM transactions 
+            WHERE person_id = ? AND note LIKE 'Bankin:%'
+            """,
+            (person_id,)
+        ).fetchall()
+        for r_ext in rows:
+            d_ext = str(r_ext[0] if not hasattr(r_ext, "keys") else r_ext["date"])
+            t_ext = str(r_ext[1] if not hasattr(r_ext, "keys") else r_ext["type"])
+            a_ext = float(r_ext[2] if not hasattr(r_ext, "keys") else r_ext["amount"] or 0.0)
+            n_ext = str(r_ext[3] if not hasattr(r_ext, "keys") else r_ext["note"] or "")
+            existing_fingerprints.add((d_ext, t_ext, round(a_ext, 2), n_ext))
+
     inserted = 0
 
     for _, r in df.iterrows():
@@ -320,15 +365,20 @@ def import_bankin_csv(
             tx_amount = amount
             monthly_rev[(mois, categorie_finale)] = monthly_rev.get((mois, categorie_finale), 0.0) + tx_amount
 
-        note = f"Bankin: {parent} > {cat}"
+        note_complete = f"Bankin: {parent} > {cat} | {desc}"
+        fingerprint = (d.strftime("%Y-%m-%d"), tx_type, round(tx_amount, 2), note_complete)
+
+        if fingerprint in existing_fingerprints:
+            continue
 
         conn.execute(
             """
             INSERT INTO transactions(date, person_id, account_id, type, asset_id, quantity, price, fees, amount, category, note, import_batch_id)
             VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, ?, ?, ?, ?)
             """,
-            (d.strftime("%Y-%m-%d"), person_id, account_id, tx_type, tx_amount, categorie_finale, f"{note} | {desc}", import_batch_id),
+            (d.strftime("%Y-%m-%d"), person_id, account_id, tx_type, tx_amount, categorie_finale, note_complete, import_batch_id),
         )
+        existing_fingerprints.add(fingerprint)
         inserted += 1
 
     conn.commit()

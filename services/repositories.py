@@ -269,19 +269,23 @@ def link_subaccount_to_bank(conn, bank_account_id: int, sub_account_id: int, sub
 
 
 def list_bank_subaccounts(conn, bank_account_id: int) -> pd.DataFrame:
-    q = """
-    SELECT b.sub_account_id,
-           b.subtype,
-           a.name       AS account_name,
-           a.account_type AS account_type,
-           a.currency   AS account_currency,
-           a.institution AS institution
-    FROM bank_subaccounts b
-    JOIN accounts a ON a.id = b.sub_account_id
-    WHERE b.bank_account_id = ?
-    ORDER BY b.subtype, a.name;
-    """
-    return pd.read_sql_query(q, conn, params=(int(bank_account_id),))
+    _COLS = ["sub_account_id", "subtype", "account_name", "account_type", "account_currency", "institution"]
+    rows = conn.execute(
+        """
+        SELECT b.sub_account_id,
+               b.subtype,
+               a.name       AS account_name,
+               a.account_type AS account_type,
+               a.currency   AS account_currency,
+               a.institution AS institution
+        FROM bank_subaccounts b
+        JOIN accounts a ON a.id = b.sub_account_id
+        WHERE b.bank_account_id = ?
+        ORDER BY b.subtype, a.name
+        """,
+        (int(bank_account_id),),
+    ).fetchall()
+    return pd.DataFrame(rows, columns=_COLS) if rows else pd.DataFrame(columns=_COLS)
 
 
 def list_all_subaccount_ids(conn, person_id: int) -> list[int]:

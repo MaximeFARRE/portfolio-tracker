@@ -6,6 +6,7 @@ import logging
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from time import monotonic
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QLabel,
     QPushButton, QScrollArea, QGroupBox, QComboBox, QSizePolicy,
@@ -19,13 +20,28 @@ from qt_ui.theme import (
     BG_PRIMARY, BG_SIDEBAR, BORDER_SUBTLE, TEXT_PRIMARY, TEXT_SECONDARY,
     TEXT_MUTED, ACCENT_BLUE, STYLE_BTN_PRIMARY, STYLE_TAB, STYLE_GROUP,
     STYLE_INPUT, STYLE_SCROLLAREA, STYLE_PROGRESS, STYLE_TITLE_LARGE,
-    STYLE_TITLE, STYLE_SECTION, STYLE_STATUS, STYLE_STATUS_SUCCESS,
-    STYLE_STATUS_ERROR, COLOR_SUCCESS,
+    STYLE_TITLE, STYLE_SECTION, STYLE_SECTION_MARGIN, STYLE_STATUS,
+    STYLE_STATUS_SUCCESS, STYLE_STATUS_WARNING, STYLE_STATUS_ERROR, COLOR_SUCCESS,
     plotly_layout,
 )
 from utils.format_monnaie import money
 
 logger = logging.getLogger(__name__)
+
+
+def _empty_figure(msg: str = "Aucune donnée disponible") -> go.Figure:
+    """Figure Plotly vide avec un message centré — remplace un widget blank."""
+    fig = go.Figure()
+    fig.add_annotation(
+        text=msg, x=0.5, y=0.5, xref="paper", yref="paper",
+        showarrow=False, font=dict(size=13, color="#64748b"),
+    )
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+        margin=dict(l=0, r=0, t=0, b=0),
+    )
+    return fig
 
 
 def _compute_var_pct(current: float, previous: float) -> float | None:
@@ -55,6 +71,10 @@ class RebuildFamilleThread(QThread):
     def __init__(self, person_ids: list):
         super().__init__()
         self._person_ids = person_ids
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
 
     def run(self):
         try:
@@ -62,6 +82,9 @@ class RebuildFamilleThread(QThread):
             from services import family_snapshots as fs
             from services.db import get_conn
             with get_conn() as local_conn:
+                if self._is_cancelled:
+                    self.finished.emit("Annulé")
+                    return
                 res = fs.rebuild_family_weekly(
                     local_conn, person_ids=self._person_ids,
                     lookback_days=90, family_id=1
@@ -81,6 +104,10 @@ class RebuildAllThread(QThread):
         super().__init__()
         self._person_ids = person_ids
         self._safety_weeks = safety_weeks
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
 
     def run(self):
         try:
@@ -91,11 +118,15 @@ class RebuildAllThread(QThread):
             total = len(self._person_ids)
             with get_conn() as local_conn:
                 for i, pid in enumerate(self._person_ids):
+                    if self._is_cancelled:
+                        msgs.append("Annulé")
+                        break
                     self.progress.emit(f"Rebuild personne {i+1}/{total}...")
                     r = wk_snap.rebuild_snapshots_person_from_last(
                         local_conn, person_id=pid,
                         safety_weeks=self._safety_weeks,
-                        fallback_lookback_days=90
+                        fallback_lookback_days=90,
+                        cancel_check=lambda: self._is_cancelled
                     )
                     msgs.append(str(r))
                 try:
@@ -122,6 +153,8 @@ class FamilleDashboardPanel(QWidget):
         super().__init__(parent)
         self._conn = conn
         self._thread = None
+        self._last_refresh_ts = 0.0
+        self._refresh_ttl_s = 8.0
 
         self.setStyleSheet(f"background: {BG_PRIMARY};")
         self._layout = QVBoxLayout(self)
@@ -234,6 +267,13 @@ class FamilleDashboardPanel(QWidget):
         self._people_table.setMinimumHeight(160)
         self._layout.addWidget(self._people_table)
 
+        # Alerte personnes sans snapshot (DQ-08)
+        self._missing_persons_label = QLabel()
+        self._missing_persons_label.setStyleSheet(STYLE_STATUS_WARNING)
+        self._missing_persons_label.setWordWrap(True)
+        self._missing_persons_label.setVisible(False)
+        self._layout.addWidget(self._missing_persons_label)
+
         self._layout.addStretch()
 
     def _build_line_chart(self, df_family: pd.DataFrame) -> None:
@@ -242,6 +282,7 @@ class FamilleDashboardPanel(QWidget):
         df_plot["week_date"] = pd.to_datetime(df_plot["week_date"], errors="coerce")
         df_plot = df_plot.dropna(subset=["week_date"]).sort_values("week_date").reset_index(drop=True)
         if df_plot.empty:
+            self._chart_line.set_figure(_empty_figure("Aucune donnée d'évolution disponible"))
             return
 
         for col in [
@@ -315,6 +356,7 @@ class FamilleDashboardPanel(QWidget):
 
         alloc_df = fd.prepare_family_alloc_pie_data(df_family, alloc)
         if alloc_df.empty:
+            self._chart_alloc.set_figure(_empty_figure("Aucune allocation disponible"))
             return
 
         alloc_df["var_txt"] = alloc_df["var_pct"].apply(_fmt_var_pct)
@@ -338,6 +380,7 @@ class FamilleDashboardPanel(QWidget):
         person_alloc = df_people[["Personne", "Net (€)", "Bourse (€)", "% Expo Bourse"]].copy()
         person_alloc = person_alloc[person_alloc["Net (€)"] > 0]
         if person_alloc.empty:
+            self._chart_people.set_figure(_empty_figure("Aucune donnée personne disponible"))
             return
 
         total_net = float(person_alloc["Net (€)"].sum())
@@ -366,6 +409,7 @@ class FamilleDashboardPanel(QWidget):
 
         melt = fd.prepare_family_area_chart_data(df_family)
         if melt.empty:
+            self._chart_alloc_area.set_figure(_empty_figure("Aucune donnée d'allocation disponible"))
             return
 
         melt["var_txt"] = melt["var_pct"].apply(_fmt_var_pct)
@@ -412,6 +456,7 @@ class FamilleDashboardPanel(QWidget):
 
         tree_df = fd.prepare_family_treemap_data(df_people, df_people_prev)
         if tree_df.empty:
+            self._chart_alloc_treemap.set_figure(_empty_figure("Aucune donnée de répartition disponible"))
             return
 
         tree_df["var_txt"] = tree_df["var_pct"].apply(_fmt_var_pct)
@@ -437,19 +482,27 @@ class FamilleDashboardPanel(QWidget):
         fig_tree.update_layout(**plotly_layout(margin=dict(l=10, r=10, t=10, b=10)))
         self._chart_alloc_treemap.set_figure(fig_tree)
 
-    def refresh(self) -> None:
+    def refresh(self, force: bool = False) -> None:
+        if not force and (monotonic() - self._last_refresh_ts) <= self._refresh_ttl_s:
+            return
         try:
             from services import family_dashboard as fd
             people = fd.get_people(self._conn)
             if people.empty:
-                self._title_label.setText("Aucune personne en base.")
+                self._title_label.setStyleSheet(STYLE_STATUS_WARNING)
+                self._title_label.setText("⚠️  Aucune personne en base.")
+                self._people_table.set_dataframe(pd.DataFrame([{"Statut": "⚠️ Aucune donnée personne à afficher."}]))
                 return
             person_ids = [int(x) for x in people["id"].tolist()]
 
             df_family = fd.get_family_series(self._conn, person_ids=person_ids, family_id=1)
             if df_family.empty:
-                self._title_label.setText("Aucune donnée weekly — lancez un rebuild.")
+                self._title_label.setStyleSheet(STYLE_STATUS_WARNING)
+                self._title_label.setText("⚠️  Aucune donnée weekly — lancez un rebuild.")
+                self._people_table.set_dataframe(pd.DataFrame([{"Statut": "⚠️ Aucune donnée weekly disponible."}]))
                 return
+
+            self._title_label.setStyleSheet(STYLE_TITLE)
 
             common_week = fd.get_last_common_week(self._conn, person_ids)
 
@@ -480,11 +533,36 @@ class FamilleDashboardPanel(QWidget):
 
             # Pie personnes
             df_people = pd.DataFrame()
+            people_by_week: dict[pd.Timestamp, pd.DataFrame] = {}
+
+            def _people_for_week(week: pd.Timestamp) -> pd.DataFrame:
+                cached_df = people_by_week.get(week)
+                if cached_df is not None:
+                    return cached_df
+                built_df = fd.compute_people_table(self._conn, people, week)
+                people_by_week[week] = built_df
+                return built_df
+
             if common_week is not None:
-                df_people = fd.compute_people_table(self._conn, people, common_week)
+                df_people = _people_for_week(common_week)
                 if not df_people.empty:
                     self._build_people_pie(df_people)
                     self._people_table.set_dataframe(df_people)
+                else:
+                    self._people_table.set_dataframe(pd.DataFrame([{"Statut": "⚠️ Aucune donnée personne sur la semaine commune."}]))
+                # Alerte DQ-08 : personnes sans snapshot à la semaine commune
+                missing = fd.get_people_without_snapshot(people, df_people)
+                if missing:
+                    self._missing_persons_label.setText(
+                        f"⚠️  Snapshot manquant pour : {', '.join(missing)} — "
+                        f"ces personnes sont exclues du tableau et des graphiques."
+                    )
+                    self._missing_persons_label.setVisible(True)
+                else:
+                    self._missing_persons_label.setVisible(False)
+            else:
+                self._people_table.set_dataframe(pd.DataFrame([{"Statut": "⚠️ Semaine commune introuvable."}]))
+                self._missing_persons_label.setVisible(False)
 
             # Treemap détaillée (avec variation hebdo si semaine précédente dispo)
             if not df_people.empty:
@@ -493,11 +571,7 @@ class FamilleDashboardPanel(QWidget):
                     df_dates = pd.to_datetime(df_family["week_date"], errors="coerce").dropna().sort_values().unique()
                     if len(df_dates) >= 2:
                         prev_week = pd.Timestamp(df_dates[-2])
-                df_people_prev = (
-                    fd.compute_people_table(self._conn, people, prev_week)
-                    if prev_week is not None
-                    else pd.DataFrame()
-                )
+                df_people_prev = _people_for_week(prev_week) if prev_week is not None else pd.DataFrame()
                 self._build_allocation_treemap(df_people, df_people_prev)
 
             # Leaderboards
@@ -510,20 +584,24 @@ class FamilleDashboardPanel(QWidget):
                 if top_net is not None and len(top_net) > 0:
                     html_parts.append("<b>🥇 Patrimoine net (Top 3)</b><br>")
                     for i, row in top_net.iterrows():
+                        import html
                         m = medals[i] if i < 3 else "•"
-                        html_parts.append(f"{m} <b>{row['Personne']}</b> — {money(float(row['Net (€)']))}<br>")
+                        html_parts.append(f"{m} <b>{html.escape(str(row['Personne']))}</b> — {money(float(row['Net (€)']))}<br>")
 
                 top3 = boards.get("top_perf_3m", [])
                 if top3:
                     html_parts.append("<br><b>🚀 Progression 3 mois (Top 3)</b><br>")
                     for i, (name, val) in enumerate(top3):
+                        import html
                         m = medals[i]
-                        html_parts.append(f"{m} <b>{name}</b> — {val:.1f}%<br>")
+                        html_parts.append(f"{m} <b>{html.escape(str(name))}</b> — {val:.1f}%<br>")
 
                 self._leaderboard_label.setText("".join(html_parts))
 
+            self._last_refresh_ts = monotonic()
         except Exception as e:
-            self._title_label.setText(f"Erreur chargement : {e}")
+            self._title_label.setStyleSheet(STYLE_STATUS_ERROR)
+            self._title_label.setText(f"❌ Erreur de chargement : {e}")
 
     def _on_rebuild(self) -> None:
         try:
@@ -536,7 +614,8 @@ class FamilleDashboardPanel(QWidget):
 
         self._btn_rebuild.setEnabled(False)
         self._progress_bar.show()
-        self._rebuild_status.setText("Rebuild en cours...")
+        self._rebuild_status.setStyleSheet(STYLE_STATUS)
+        self._rebuild_status.setText("⏳ Rebuild en cours...")
 
         if self._thread is not None and self._thread.isRunning():
             self._thread.quit()
@@ -553,14 +632,15 @@ class FamilleDashboardPanel(QWidget):
     def _on_rebuild_done(self, result: str) -> None:
         self._btn_rebuild.setEnabled(True)
         self._progress_bar.hide()
-        self._rebuild_status.setText(f"Rebuild terminé ✅ {result}")
-        self.refresh()
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        self._rebuild_status.setText(f"✅ Rebuild terminé — {result}")
+        self.refresh(force=True)
 
     def _on_rebuild_error(self, err: str) -> None:
         self._btn_rebuild.setEnabled(True)
         self._progress_bar.hide()
         self._rebuild_status.setStyleSheet(STYLE_STATUS_ERROR)
-        self._rebuild_status.setText(f"Erreur : {err}")
+        self._rebuild_status.setText(f"❌ Erreur : {err}")
 
 
 # ─── Panel : Data Health ──────────────────────────────────────────────────────
@@ -570,6 +650,8 @@ class DataHealthPanel(QWidget):
         super().__init__(parent)
         self._conn = conn
         self._thread = None
+        self._last_refresh_ts = 0.0
+        self._refresh_ttl_s = 8.0
 
         self.setStyleSheet(f"background: {BG_PRIMARY};")
         layout = QVBoxLayout(self)
@@ -587,6 +669,7 @@ class DataHealthPanel(QWidget):
         self._safety_combo.addItems(["2", "4", "8"])
         self._safety_combo.setCurrentIndex(1)
         self._safety_combo.setStyleSheet(STYLE_INPUT)
+        self._safety_combo.currentIndexChanged.connect(lambda _: self.refresh(force=True))
         sw_row.addWidget(self._safety_combo)
         sw_row.addStretch()
         layout.addLayout(sw_row)
@@ -611,14 +694,14 @@ class DataHealthPanel(QWidget):
         btn_row.addWidget(self._rebuild_progress)
 
         self._rebuild_status = QLabel()
-        self._rebuild_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        self._rebuild_status.setStyleSheet(STYLE_STATUS)
         btn_row.addWidget(self._rebuild_status)
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
         # Marché
         mkt_label = QLabel("📡 Marché (weekly)")
-        mkt_label.setStyleSheet(STYLE_SECTION + " margin-top: 12px;")
+        mkt_label.setStyleSheet(STYLE_SECTION_MARGIN)
         layout.addWidget(mkt_label)
         mkt_row = QHBoxLayout()
         self._mkt_prix = MetricLabel("Dernière semaine prix", "—")
@@ -630,7 +713,7 @@ class DataHealthPanel(QWidget):
 
         # Snapshots personnes
         snap_label = QLabel("👤 Snapshots — Personnes (dernières semaines)")
-        snap_label.setStyleSheet(STYLE_SECTION + " margin-top: 12px;")
+        snap_label.setStyleSheet(STYLE_SECTION_MARGIN)
         layout.addWidget(snap_label)
         self._snap_table = DataTableWidget()
         self._snap_table.setMinimumHeight(150)
@@ -638,7 +721,7 @@ class DataHealthPanel(QWidget):
 
         # Tickers sans prix
         tick_label = QLabel("🧾 Tickers sans prix weekly")
-        tick_label.setStyleSheet(STYLE_SECTION + " margin-top: 12px;")
+        tick_label.setStyleSheet(STYLE_SECTION_MARGIN)
         layout.addWidget(tick_label)
         self._ticker_table = DataTableWidget()
         self._ticker_table.setMinimumHeight(120)
@@ -646,7 +729,9 @@ class DataHealthPanel(QWidget):
 
         layout.addStretch()
 
-    def refresh(self) -> None:
+    def refresh(self, force: bool = False) -> None:
+        if not force and (monotonic() - self._last_refresh_ts) <= self._refresh_ttl_s:
+            return
         try:
             from services import diagnostics_global as dg
 
@@ -657,6 +742,8 @@ class DataHealthPanel(QWidget):
             status_df = health["status_df"]
             if not status_df.empty:
                 self._status_table.set_dataframe(status_df)
+            else:
+                self._status_table.set_dataframe(pd.DataFrame([{"Statut": "⚠️ Aucun statut de diagnostic disponible."}]))
 
             # Marché
             dates = dg.last_market_dates(self._conn)
@@ -667,16 +754,20 @@ class DataHealthPanel(QWidget):
             df_last = dg.last_snapshot_week_by_person(self._conn)
             if not df_last.empty:
                 self._snap_table.set_dataframe(df_last)
+            else:
+                self._snap_table.set_dataframe(pd.DataFrame([{"Statut": "⚠️ Aucun snapshot personne disponible."}]))
 
             # Tickers
             df_t = dg.tickers_missing_weekly_prices(self._conn, max_show=30)
             if not df_t.empty:
                 self._ticker_table.set_dataframe(df_t)
             else:
-                self._ticker_table.set_dataframe(pd.DataFrame([{"Statut": "Tous les tickers ont un prix weekly ✅"}]))
+                self._ticker_table.set_dataframe(pd.DataFrame([{"Statut": "✅ Tous les tickers ont un prix weekly"}]))
+            self._last_refresh_ts = monotonic()
         except Exception as e:
             logger.error("Erreur refresh DataHealth : %s", e)
-            self._rebuild_status.setText(f"Erreur : {e}")
+            self._rebuild_status.setStyleSheet(STYLE_STATUS_ERROR)
+            self._rebuild_status.setText(f"❌ Erreur : {e}")
 
     def _on_rebuild_all(self) -> None:
         try:
@@ -690,7 +781,8 @@ class DataHealthPanel(QWidget):
         safety_weeks = int(self._safety_combo.currentText())
         self._btn_rebuild_all.setEnabled(False)
         self._rebuild_progress.show()
-        self._rebuild_status.setText("Rebuild en cours...")
+        self._rebuild_status.setStyleSheet(STYLE_STATUS)
+        self._rebuild_status.setText("⏳ Rebuild en cours...")
 
         if self._thread is not None and self._thread.isRunning():
             self._thread.quit()
@@ -705,14 +797,14 @@ class DataHealthPanel(QWidget):
         self._btn_rebuild_all.setEnabled(True)
         self._rebuild_progress.hide()
         self._rebuild_status.setStyleSheet(STYLE_STATUS_SUCCESS)
-        self._rebuild_status.setText("Rebuild terminé ✅")
-        self.refresh()
+        self._rebuild_status.setText(f"✅ Rebuild terminé — {result}")
+        self.refresh(force=True)
 
     def _on_rebuild_error(self, err: str) -> None:
         self._btn_rebuild_all.setEnabled(True)
         self._rebuild_progress.hide()
         self._rebuild_status.setStyleSheet(STYLE_STATUS_ERROR)
-        self._rebuild_status.setText(f"Erreur : {err}")
+        self._rebuild_status.setText(f"❌ Erreur : {err}")
 
 
 # ─── Panel : Flux V1 ──────────────────────────────────────────────────────────
@@ -721,6 +813,8 @@ class FluxPanel(QWidget):
     def __init__(self, conn, parent=None):
         super().__init__(parent)
         self._conn = conn
+        self._last_refresh_ts = 0.0
+        self._refresh_ttl_s = 8.0
         self.setStyleSheet(f"background: {BG_PRIMARY};")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -729,6 +823,10 @@ class FluxPanel(QWidget):
         title = QLabel("📒 Flux — Vue globale (basé sur les opérations)")
         title.setStyleSheet(STYLE_TITLE)
         layout.addWidget(title)
+
+        self._status_label = QLabel("Prêt.")
+        self._status_label.setStyleSheet(STYLE_STATUS)
+        layout.addWidget(self._status_label)
 
         kpi_row = QHBoxLayout()
         self._kpi_solde = MetricLabel("Solde famille (flux)", "—")
@@ -763,9 +861,13 @@ class FluxPanel(QWidget):
 
         layout.addStretch()
 
-    def refresh(self) -> None:
+    def refresh(self, force: bool = False) -> None:
+        if not force and (monotonic() - self._last_refresh_ts) <= self._refresh_ttl_s:
+            return
         try:
             from services import cashflow as cf
+            self._status_label.setStyleSheet(STYLE_STATUS)
+            self._status_label.setText("⏳ Chargement des flux...")
 
             today = pd.Timestamp.today()
             summary = cf.get_family_flux_summary(
@@ -781,17 +883,33 @@ class FluxPanel(QWidget):
             df_par_personne = summary["par_personne"]
             if not df_par_personne.empty:
                 self._people_table.set_dataframe(df_par_personne)
+            else:
+                self._people_table.set_dataframe(pd.DataFrame([{"Statut": "⚠️ Aucune opération par personne."}]))
 
             df_par_compte = summary["par_compte"]
             if not df_par_compte.empty:
                 self._accounts_table.set_dataframe(df_par_compte)
+            else:
+                self._accounts_table.set_dataframe(pd.DataFrame([{"Statut": "⚠️ Aucune opération par compte."}]))
 
             df_dernieres = summary["dernieres_operations"]
             if not df_dernieres.empty:
                 self._last_table.set_dataframe(df_dernieres)
+            else:
+                self._last_table.set_dataframe(pd.DataFrame([{"Statut": "⚠️ Aucune opération récente."}]))
+
+            if int(summary.get("n_operations", 0)) == 0:
+                self._status_label.setStyleSheet(STYLE_STATUS_WARNING)
+                self._status_label.setText("⚠️ Aucune opération trouvée pour la période.")
+            else:
+                self._status_label.setStyleSheet(STYLE_STATUS_SUCCESS)
+                self._status_label.setText("✅ Flux chargés.")
+            self._last_refresh_ts = monotonic()
 
         except Exception as e:
             logger.error("Erreur chargement Flux : %s", e)
+            self._status_label.setStyleSheet(STYLE_STATUS_ERROR)
+            self._status_label.setText(f"❌ Erreur de chargement : {e}")
 
 
 # ─── Page Famille ─────────────────────────────────────────────────────────────

@@ -6,10 +6,13 @@ import pytest
 from services.goals_projection_repository import compute_goal_monthly_required_amount
 from services.goals_projection_repository import create_goal, create_scenario
 from services.projections import (
+    ScenarioParams,
     build_standard_scenarios,
     compute_fire_target,
+    compute_weighted_return,
     estimate_fire_reach_date,
     get_projection_base_for_scope,
+    run_projection,
 )
 
 
@@ -150,6 +153,51 @@ def test_build_standard_scenarios():
     assert optimiste.expected_return_pct == pytest.approx(8.0)
     assert optimiste.inflation_pct == pytest.approx(1.5)
     assert optimiste.monthly_savings_override == pytest.approx(1_150.0)
+
+
+def test_compute_weighted_return_manual_mix():
+    base = {
+        "liquidities": 100.0,
+        "bourse": 100.0,
+        "immobilier": 0.0,
+        "private_equity": 0.0,
+        "entreprises": 0.0,
+    }
+    params = ScenarioParams(
+        return_liquidites_pct=2.0,
+        return_bourse_pct=8.0,
+        return_immobilier_pct=0.0,
+        return_pe_pct=0.0,
+        return_entreprises_pct=0.0,
+    )
+    assert compute_weighted_return(base, params) == pytest.approx(5.0)
+
+
+def test_run_projection_zero_returns_zero_savings_keeps_net_constant():
+    base = {
+        "net_worth": 80.0,
+        "liquidities": 100.0,
+        "bourse": 0.0,
+        "immobilier": 0.0,
+        "private_equity": 0.0,
+        "entreprises": 0.0,
+        "credits": 20.0,
+        "avg_monthly_income": 0.0,
+        "avg_monthly_expenses": 0.0,
+    }
+    params = ScenarioParams(
+        horizon_years=1,
+        return_liquidites_pct=0.0,
+        return_bourse_pct=0.0,
+        return_immobilier_pct=0.0,
+        return_pe_pct=0.0,
+        return_entreprises_pct=0.0,
+        inflation_pct=0.0,
+        monthly_savings_override=0.0,
+    )
+    df = run_projection(base, params)
+    assert float(df.iloc[0]["projected_net_worth"]) == pytest.approx(80.0)
+    assert float(df.iloc[-1]["projected_net_worth"]) == pytest.approx(80.0)
 
 
 def test_create_goal_validation(conn):

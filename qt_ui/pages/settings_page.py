@@ -6,8 +6,10 @@ Affiche les infos système, permet la configuration et le backup manuel.
 import logging
 import shutil
 import platform
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -25,7 +27,8 @@ from qt_ui.theme import (
     ACCENT_BLUE, COLOR_SUCCESS, COLOR_ERROR, COLOR_WARNING,
     STYLE_BTN_PRIMARY, STYLE_BTN_PRIMARY_BORDERED, STYLE_BTN_SUCCESS,
     STYLE_GROUP, STYLE_INPUT_FOCUS, STYLE_TITLE_LARGE, STYLE_SECTION,
-    STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR, STYLE_STATUS_WARNING,
+    STYLE_STATUS, STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR, STYLE_STATUS_WARNING,
+    BG_ACTIVE_HOVER,
     get_current_theme,
 )
 
@@ -77,6 +80,13 @@ class SettingsPage(QWidget):
         super().__init__(parent)
         self._conn = conn
         self._settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
+        self._backup_count_cache_ttl_s = 8.0
+        self._backup_count_cache_ts = 0.0
+        self._backup_count_cache_dir_mtime_ns = None
+        self._backup_count_cache_text = None
+        self._preset_scope_cache: dict[tuple[str, int | None], dict] = {}
+        self._preset_scope_cache_order: list[tuple[str, int | None]] = []
+        self._preset_scope_cache_limit = 8
 
         self.setStyleSheet(f"background: {BG_PRIMARY};")
 
@@ -174,7 +184,7 @@ class SettingsPage(QWidget):
             btn_copy.setStyleSheet(f"""
                 QPushButton {{ background: {BG_ACTIVE}; color: {ACCENT_BLUE};
                                border: none; border-radius: 4px; font-size: 13px; }}
-                QPushButton:hover {{ background: #1e4a7f; }}
+                QPushButton:hover {{ background: {BG_ACTIVE_HOVER}; }}
             """)
             btn_copy.clicked.connect(lambda _, v=value_text: self._copy_to_clipboard(v))
             val_row.addWidget(btn_copy)
@@ -250,7 +260,7 @@ class SettingsPage(QWidget):
         self._btn_save.setFixedWidth(240)
         self._btn_save.clicked.connect(self._save_preferences)
         self._lbl_save_status = QLabel()
-        self._lbl_save_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        self._lbl_save_status.setStyleSheet(STYLE_STATUS)
 
         save_row = QHBoxLayout()
         save_row.addWidget(self._btn_save)
@@ -301,7 +311,7 @@ class SettingsPage(QWidget):
         v.addLayout(btn_row)
 
         self._lbl_backup_status = QLabel()
-        self._lbl_backup_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        self._lbl_backup_status.setStyleSheet(STYLE_STATUS)
         v.addWidget(self._lbl_backup_status)
 
         return box
@@ -379,16 +389,25 @@ class SettingsPage(QWidget):
         _PRESET_LABELS = {"pessimiste": "Pessimiste", "realiste": "Réaliste", "optimiste": "Optimiste"}
 
         _FIELDS = [
-            ("return_liquidites_pct",  "Liquidités / épargne (%)",       -20.0, 50.0, " %"),
-            ("return_bourse_pct",      "Bourse (ETF, actions) (%)",       -20.0, 50.0, " %"),
-            ("return_immobilier_pct",  "Immobilier locatif (%)",          -20.0, 50.0, " %"),
-            ("return_pe_pct",          "Private Equity (%)",              -20.0, 50.0, " %"),
-            ("return_entreprises_pct", "Entreprises (%)",                 -20.0, 50.0, " %"),
-            ("inflation_pct",          "Inflation (%)",                    -5.0, 20.0, " %"),
-            ("income_growth_pct",      "Croissance revenus (%)",          -20.0, 20.0, " %"),
-            ("expense_growth_pct",     "Croissance dépenses (%)",         -20.0, 20.0, " %"),
-            ("fire_multiple",          "Multiple FIRE",                     1.0, 200.0, ""),
-            ("savings_factor",         "Facteur épargne (×)",               0.0,   5.0, " ×"),
+            # ── Rendements attendus ──────────────────────────────────────────────
+            ("return_liquidites_pct",  "Rendement Liquidités (%)",         -20.0, 50.0, " %"),
+            ("return_bourse_pct",      "Rendement Bourse (%)",             -20.0, 50.0, " %"),
+            ("return_immobilier_pct",  "Rendement Immobilier (%)",         -20.0, 50.0, " %"),
+            ("return_pe_pct",          "Rendement Private Equity (%)",     -20.0, 50.0, " %"),
+            ("return_entreprises_pct", "Rendement Entreprises (%)",        -20.0, 50.0, " %"),
+            # ── Volatilités (pour Monte Carlo) ───────────────────────────────────
+            ("vol_liquidites_pct",     "Volatilité Liquidités (%)",          0.0, 50.0, " %"),
+            ("vol_bourse_pct",         "Volatilité Bourse (%)",              0.0, 80.0, " %"),
+            ("vol_immobilier_pct",     "Volatilité Immobilier (%)",          0.0, 50.0, " %"),
+            ("vol_pe_pct",             "Volatilité Private Equity (%)",      0.0, 80.0, " %"),
+            ("vol_entreprises_pct",    "Volatilité Entreprises (%)",         0.0, 80.0, " %"),
+            ("vol_crypto_pct",         "Volatilité Crypto (%)",              0.0, 200.0, " %"),
+            # ── Macro ────────────────────────────────────────────────────────────
+            ("inflation_pct",          "Inflation (%)",                      -5.0, 20.0, " %"),
+            ("income_growth_pct",      "Croissance revenus (%)",            -20.0, 20.0, " %"),
+            ("expense_growth_pct",     "Croissance dépenses (%)",           -20.0, 20.0, " %"),
+            ("fire_multiple",          "Multiple FIRE",                        1.0, 200.0, ""),
+            ("savings_factor",         "Facteur épargne (×)",                  0.0,   5.0, " ×"),
         ]
 
         # {preset_key: {field: QDoubleSpinBox}}
@@ -422,7 +441,7 @@ class SettingsPage(QWidget):
             tab_layout.addLayout(form)
 
             status_lbl = QLabel("")
-            status_lbl.setStyleSheet(STYLE_STATUS_SUCCESS)
+            status_lbl.setStyleSheet(STYLE_STATUS)
             preset_status_labels[preset_key] = status_lbl
 
             def _make_save_fn(pk):
@@ -434,11 +453,12 @@ class SettingsPage(QWidget):
                     params = {f: preset_spinboxes[pk][f].value() for f, *_ in _FIELDS}
                     try:
                         update_preset(self._conn, pk, s_type, s_id, params)
+                        self._invalidate_scope_presets_cache(s_type, s_id)
                         preset_status_labels[pk].setStyleSheet(STYLE_STATUS_SUCCESS)
-                        preset_status_labels[pk].setText("Sauvegardé")
+                        preset_status_labels[pk].setText("✅ Preset sauvegardé.")
                     except Exception as exc:
                         preset_status_labels[pk].setStyleSheet(STYLE_STATUS_ERROR)
-                        preset_status_labels[pk].setText(f"Erreur : {exc}")
+                        preset_status_labels[pk].setText(f"❌ Erreur : {exc}")
                 return _save
 
             btn_save = QPushButton(f"Sauvegarder « {_PRESET_LABELS[preset_key]} »")
@@ -460,11 +480,16 @@ class SettingsPage(QWidget):
             if not scope_data:
                 return
             s_type, s_id = scope_data
-            try:
-                initialize_default_presets(self._conn, s_type, s_id)
-                all_p = get_all_presets(self._conn, s_type, s_id)
-            except Exception:
-                all_p = {}
+            cached = self._get_cached_scope_presets(s_type, s_id)
+            if cached is not None:
+                all_p = cached
+            else:
+                try:
+                    initialize_default_presets(self._conn, s_type, s_id)
+                    all_p = get_all_presets(self._conn, s_type, s_id)
+                    self._set_cached_scope_presets(s_type, s_id, all_p)
+                except Exception:
+                    all_p = {}
             for pk in PRESET_KEYS:
                 p = all_p.get(pk, PRESET_DEFAULTS[pk])
                 for field, *_ in _FIELDS:
@@ -522,10 +547,10 @@ class SettingsPage(QWidget):
         self._settings.sync()
         if previous_theme != new_theme:
             self._lbl_save_status.setStyleSheet(STYLE_STATUS_WARNING)
-            self._lbl_save_status.setText("✅ Enregistré — redémarre l'app pour appliquer le thème")
+            self._lbl_save_status.setText("⚠️ Préférences enregistrées — redémarrez l'app pour appliquer le thème.")
         else:
             self._lbl_save_status.setStyleSheet(STYLE_STATUS_SUCCESS)
-            self._lbl_save_status.setText("✅ Enregistré")
+            self._lbl_save_status.setText("✅ Préférences enregistrées.")
         logger.info(
             "Préférences enregistrées: devise=%s, theme=%s, rebuild_delay=%dms, backup_max=%d",
             self._combo_devise.currentText(),
@@ -542,7 +567,7 @@ class SettingsPage(QWidget):
             shutil.copy2(str(db_path), str(dest))
             self._lbl_backup_status.setStyleSheet(STYLE_STATUS_SUCCESS)
             self._lbl_backup_status.setText(f"✅ Backup créé : {dest.name}")
-            self._refresh_backup_count(backup_dir)
+            self._refresh_backup_count(backup_dir, force=True)
             logger.info("Backup manuel créé : %s", dest)
         except Exception as e:
             self._lbl_backup_status.setStyleSheet(STYLE_STATUS_ERROR)
@@ -581,26 +606,75 @@ class SettingsPage(QWidget):
     def _copy_to_clipboard(self, text: str) -> None:
         QApplication.clipboard().setText(text)
 
-    def _refresh_backup_count(self, backup_dir: Path) -> None:
-        if not backup_dir.exists():
-            self._lbl_backup_count.setText("Aucun backup trouvé.")
+    def _refresh_backup_count(self, backup_dir: Path, *, force: bool = False) -> None:
+        dir_mtime_ns = None
+        if backup_dir.exists():
+            try:
+                dir_mtime_ns = backup_dir.stat().st_mtime_ns
+            except Exception:
+                dir_mtime_ns = None
+
+        now = monotonic()
+        cache_is_fresh = (
+            not force
+            and self._backup_count_cache_text is not None
+            and (now - self._backup_count_cache_ts) <= self._backup_count_cache_ttl_s
+            and self._backup_count_cache_dir_mtime_ns == dir_mtime_ns
+        )
+        if cache_is_fresh:
+            self._lbl_backup_count.setText(self._backup_count_cache_text)
             return
+
+        if not backup_dir.exists():
+            msg = "Aucune sauvegarde disponible."
+            self._lbl_backup_count.setText(msg)
+            self._backup_count_cache_text = msg
+            self._backup_count_cache_ts = now
+            self._backup_count_cache_dir_mtime_ns = dir_mtime_ns
+            return
+
         backups = sorted(backup_dir.glob("patrimoine_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not backups:
-            self._lbl_backup_count.setText("Aucun backup disponible.")
+            msg = "Aucune sauvegarde disponible."
         else:
             latest = backups[0]
             mtime = datetime.fromtimestamp(latest.stat().st_mtime).strftime("%d/%m/%Y à %H:%M")
-            self._lbl_backup_count.setText(
-                f"{len(backups)} backup(s) disponible(s) — "
+            msg = (
+                f"{len(backups)} sauvegarde(s) disponible(s) — "
                 f"Dernier : {latest.name} ({mtime})"
             )
+        self._lbl_backup_count.setText(msg)
+        self._backup_count_cache_text = msg
+        self._backup_count_cache_ts = now
+        self._backup_count_cache_dir_mtime_ns = dir_mtime_ns
+
+    def _get_cached_scope_presets(self, scope_type: str, scope_id: int | None) -> dict | None:
+        key = (scope_type, scope_id)
+        cached = self._preset_scope_cache.get(key)
+        if cached is None:
+            return None
+        return deepcopy(cached)
+
+    def _set_cached_scope_presets(self, scope_type: str, scope_id: int | None, values: dict) -> None:
+        key = (scope_type, scope_id)
+        self._preset_scope_cache[key] = deepcopy(values or {})
+        if key in self._preset_scope_cache_order:
+            self._preset_scope_cache_order.remove(key)
+        self._preset_scope_cache_order.append(key)
+        while len(self._preset_scope_cache_order) > self._preset_scope_cache_limit:
+            oldest = self._preset_scope_cache_order.pop(0)
+            self._preset_scope_cache.pop(oldest, None)
+
+    def _invalidate_scope_presets_cache(self, scope_type: str, scope_id: int | None) -> None:
+        key = (scope_type, scope_id)
+        self._preset_scope_cache.pop(key, None)
+        if key in self._preset_scope_cache_order:
+            self._preset_scope_cache_order.remove(key)
 
     # ── API ────────────────────────────────────────────────────────────────────
 
     def refresh(self) -> None:
         """Appelé quand la page devient active."""
-        from services.db import DB_PATH
         _USER_DATA_DIR = Path.home() / ".patrimoine"
         self._refresh_backup_count(_USER_DATA_DIR / "backups")
 

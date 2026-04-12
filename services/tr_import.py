@@ -319,11 +319,16 @@ def run_pytr_export(
             timeout=180,
         )
         out = (result.stdout or "") + (result.stderr or "")
+        if pin and len(pin) >= 4:
+            out = out.replace(pin, "****")
         return result.returncode, out.strip()
     except subprocess.TimeoutExpired:
         return -1, "Timeout: l'export a pris trop de temps (>180s)."
     except Exception as e:
-        return -1, str(e)
+        err = str(e)
+        if pin and len(pin) >= 4:
+            err = err.replace(pin, "****")
+        return -1, err
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +602,7 @@ def import_tr_transactions(
     preview: list[dict] = []
     rows_to_insert: list[tuple] = []
     skipped = 0
+    seen_in_batch: set[tuple] = set()
 
     for _, r in df.iterrows():
         # Date
@@ -661,6 +667,14 @@ def import_tr_transactions(
             if effective_account_id != account_id:
                 _logger.info("ticker_account_map: %s redirige vers account_id=%s (defaut=%s)",
                              symbol, effective_account_id, account_id)
+
+        # Déduplication In-Memory
+        mem_fingerprint = (date_raw, effective_account_id, tx_type, tx_amount, isin, shares, fees_val)
+        if mem_fingerprint in seen_in_batch:
+            _logger.info("Skipping duplicate trade in batch: %s", mem_fingerprint)
+            skipped += 1
+            continue
+        seen_in_batch.add(mem_fingerprint)
 
         # Déduplication (inclut l'ISIN via assets pour éviter les faux positifs)
         if isin:
