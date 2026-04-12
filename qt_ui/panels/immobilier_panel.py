@@ -17,7 +17,7 @@ from qt_ui.widgets import DataTableWidget, MetricLabel
 from qt_ui.theme import (
     BG_PRIMARY, STYLE_BTN_PRIMARY_BORDERED, STYLE_BTN_SUCCESS,
     STYLE_INPUT_FOCUS, STYLE_FORM_LABEL, STYLE_TITLE, STYLE_SECTION,
-    STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR, STYLE_TAB_INNER,
+    STYLE_STATUS, STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR, STYLE_TAB_INNER,
     STYLE_SCROLLAREA, BORDER_SUBTLE, TEXT_SECONDARY,
 )
 
@@ -230,7 +230,7 @@ class ImmobilierPanel(QWidget):
         btn_create.setStyleSheet(STYLE_BTN_PRIMARY_BORDERED)
         btn_create.clicked.connect(self._save_new_property)
         self._create_status = QLabel("")
-        self._create_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        self._create_status.setStyleSheet(STYLE_STATUS)
         row_new.addWidget(btn_create)
         row_new.addWidget(self._create_status)
         row_new.addStretch()
@@ -316,7 +316,7 @@ class ImmobilierPanel(QWidget):
         btn_upd.setStyleSheet(STYLE_BTN_SUCCESS)
         btn_upd.clicked.connect(self._update_property)
         self._update_status = QLabel("")
-        self._update_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        self._update_status.setStyleSheet(STYLE_STATUS)
         row_upd.addWidget(btn_upd)
         row_upd.addWidget(self._update_status)
         row_upd.addStretch()

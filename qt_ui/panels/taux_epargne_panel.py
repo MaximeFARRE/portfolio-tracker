@@ -158,31 +158,45 @@ class TauxEpargnePanel(QWidget):
                     return hit.iloc[0].to_dict()
                 return None
 
-            def _apply_kpi(card: KpiCard, row: dict | None, label: str) -> None:
+            def _apply_kpi(card: KpiCard, row: dict | None, label: str, is_partial: bool = False) -> None:
                 if row is None:
-                    card.set_content(label, "Pas de données", tone="neutral")
+                    card.set_content(label, "Aucune donnée", tone="neutral")
                     return
                 rate = row.get("taux_epargne")
                 ep  = row.get("epargne", 0.0)
                 tone = _tone_for_rate(rate)
                 val  = f"{rate:.1f} %" if rate is not None else "—"
                 sub  = f"Épargnés : {ep:+,.0f} €".replace(",", " ")
+                if is_partial:
+                    sub += "  ·  mois en cours"
                 card.set_content(label, val, subtitle=sub, tone=tone)
 
-            _apply_kpi(self._kpi_current, _row_for_offset(0), "Mois courant")
+            _apply_kpi(self._kpi_current, _row_for_offset(0), "Mois courant", is_partial=(today.day < 25))
             _apply_kpi(self._kpi_m1,       _row_for_offset(1), "Mois M-1")
             _apply_kpi(self._kpi_m2,       _row_for_offset(2), "Mois M-2")
 
             # ── KPI : moyenne 12 mois (depuis le service) ────────────────────
+            last12 = df.tail(12)
+            n_covered = int((
+                (pd.to_numeric(last12["revenus"], errors="coerce").fillna(0.0) != 0.0)
+                | (pd.to_numeric(last12["depenses"], errors="coerce").fillna(0.0) != 0.0)
+            ).sum())
+            coverage_suffix = f" ({n_covered}/12 mois couverts)"
+
             avg_rate = result.get("avg_rate_12m", 0.0)
             if avg_rate:
                 tone_avg = _tone_for_rate(avg_rate)
+                if n_covered < 8:
+                    tone_avg = "neutral"
                 self._kpi_avg12.set_content(
                     "Moyenne 12 mois", f"{avg_rate} %",
-                    subtitle="Taux moyen d'épargne", tone=tone_avg,
+                    subtitle=f"Taux moyen d'épargne{coverage_suffix}", tone=tone_avg,
                 )
             else:
-                self._kpi_avg12.set_content("Moyenne 12 mois", "—", tone="neutral")
+                self._kpi_avg12.set_content(
+                    "Moyenne 12 mois", "—",
+                    subtitle=f"Aucune donnée{coverage_suffix}", tone="neutral",
+                )
 
             avg_ep = result.get("avg_savings_12m", 0.0)
             tone_ep = "success" if avg_ep >= 0 else "alert"
@@ -301,6 +315,6 @@ class TauxEpargnePanel(QWidget):
     def _clear_all(self) -> None:
         for k in [self._kpi_current, self._kpi_m1, self._kpi_m2,
                   self._kpi_avg12, self._kpi_avg12_ep]:
-            k.set_content(k._title_label.text() or "—", "Pas de données", tone="neutral")
+            k.set_content(k._title_label.text() or "—", "Aucune donnée", tone="neutral")
         self._chart_hist.clear_figure()
         self._table.set_dataframe(pd.DataFrame())

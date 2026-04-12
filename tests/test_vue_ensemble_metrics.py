@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from services.cashflow import get_person_monthly_savings_series
+from services.cashflow import compute_savings_metrics, get_person_monthly_savings_series
 from services.vue_ensemble_metrics import get_vue_ensemble_metrics
 
 
@@ -105,8 +105,61 @@ def test_vue_ensemble_metrics_nominal_kpis(conn_with_person):
     assert math.isfinite(m["cagr_pct"])
 
 
+def test_vue_ensemble_metrics_kpis_include_missing_months_as_zero(conn_with_person):
+    conn = conn_with_person
+
+    _insert_snapshot(conn, 1, "2026-01-05", net=1000.0)
+
+    for mois, rev, dep in [
+        ("2025-03-01", 1000.0, 800.0),  # +200
+        ("2025-12-01", 1200.0, 1000.0),  # +200
+    ]:
+        conn.execute(
+            "INSERT INTO revenus(person_id, mois, categorie, montant) VALUES (1, ?, 'Salaire', ?)",
+            (mois, rev),
+        )
+        conn.execute(
+            "INSERT INTO depenses(person_id, mois, categorie, montant) VALUES (1, ?, 'Vie', ?)",
+            (mois, dep),
+        )
+
+    conn.commit()
+    m = get_vue_ensemble_metrics(conn, 1)
+
+    # Fenêtre KPI = 12 mois calendaires (2025-02 à 2026-01), dont 10 mois à 0.
+    assert m["epargne_12m"] == pytest.approx(400.0)
+    assert m["capacite_epargne_avg"] == pytest.approx(400.0 / 12.0)
+    assert m["depenses_moy_12m"] == pytest.approx((800.0 + 1000.0) / 12.0)
+    assert m["taux_epargne_avg"] == pytest.approx((400.0 / 2200.0) * 100.0)
+
+
 def test_vue_ensemble_panel_subtitle_matches_formula():
     panel_path = Path(__file__).parent.parent / "qt_ui" / "panels" / "vue_ensemble_panel.py"
     text = panel_path.read_text(encoding="utf-8")
     assert "(Entreprises + PE + Immobilier) / Patrimoine brut" in text
+
+
+def test_compute_savings_metrics_uses_data_months_for_avg_and_recent_streak(conn_with_person):
+    conn = conn_with_person
+    conn.execute(
+        "INSERT INTO revenus(person_id, mois, categorie, montant) VALUES (1, '2025-01-01', 'Salaire', 1000)"
+    )
+    conn.execute(
+        "INSERT INTO depenses(person_id, mois, categorie, montant) VALUES (1, '2025-01-01', 'Vie', 800)"
+    )
+    conn.execute(
+        "INSERT INTO revenus(person_id, mois, categorie, montant) VALUES (1, '2025-03-01', 'Salaire', 1000)"
+    )
+    conn.execute(
+        "INSERT INTO depenses(person_id, mois, categorie, montant) VALUES (1, '2025-03-01', 'Vie', 1200)"
+    )
+    conn.commit()
+
+    out = compute_savings_metrics(conn, person_id=1, n_mois=3)
+
+    assert out["avg_monthly_income"] == pytest.approx(1000.0)
+    assert out["avg_monthly_expenses"] == pytest.approx(1000.0)
+    assert out["avg_monthly_savings"] == pytest.approx(0.0)
+    assert out["savings_rate_12m"] == pytest.approx(0.0)
+    assert out["positive_savings_streak"] == 0
 

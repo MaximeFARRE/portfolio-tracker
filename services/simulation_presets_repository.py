@@ -22,6 +22,13 @@ PRESET_DEFAULTS: dict[str, dict] = {
         "expense_growth_pct":     2.0,
         "fire_multiple":         27.0,
         "savings_factor":         0.85,
+        # Volatilités annuelles par classe (scénario pessimiste = incertitude élevée)
+        "vol_liquidites_pct":     2.0,
+        "vol_bourse_pct":        22.0,
+        "vol_immobilier_pct":     8.0,
+        "vol_pe_pct":            28.0,
+        "vol_entreprises_pct":   22.0,
+        "vol_crypto_pct":        70.0,
     },
     "realiste": {
         "return_liquidites_pct":  2.0,
@@ -34,6 +41,13 @@ PRESET_DEFAULTS: dict[str, dict] = {
         "expense_growth_pct":     1.0,
         "fire_multiple":         25.0,
         "savings_factor":         1.0,
+        # Volatilités annuelles par classe (scénario réaliste = volatilité historique)
+        "vol_liquidites_pct":     1.0,
+        "vol_bourse_pct":        15.0,
+        "vol_immobilier_pct":     5.0,
+        "vol_pe_pct":            20.0,
+        "vol_entreprises_pct":   15.0,
+        "vol_crypto_pct":        50.0,
     },
     "optimiste": {
         "return_liquidites_pct":  3.0,
@@ -46,6 +60,13 @@ PRESET_DEFAULTS: dict[str, dict] = {
         "expense_growth_pct":     0.5,
         "fire_multiple":         25.0,
         "savings_factor":         1.15,
+        # Volatilités annuelles par classe (scénario optimiste = marchés plus stables)
+        "vol_liquidites_pct":     1.0,
+        "vol_bourse_pct":        12.0,
+        "vol_immobilier_pct":     4.0,
+        "vol_pe_pct":            16.0,
+        "vol_entreprises_pct":   12.0,
+        "vol_crypto_pct":        40.0,
     },
 }
 
@@ -60,6 +81,12 @@ _PRESET_FIELDS = (
     "expense_growth_pct",
     "fire_multiple",
     "savings_factor",
+    "vol_liquidites_pct",
+    "vol_bourse_pct",
+    "vol_immobilier_pct",
+    "vol_pe_pct",
+    "vol_entreprises_pct",
+    "vol_crypto_pct",
 )
 
 
@@ -166,8 +193,10 @@ def initialize_default_presets(conn, scope_type: str, scope_id: Optional[int] = 
                    return_liquidites_pct, return_bourse_pct, return_immobilier_pct,
                    return_pe_pct, return_entreprises_pct,
                    inflation_pct, income_growth_pct, expense_growth_pct,
-                   fire_multiple, savings_factor)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   fire_multiple, savings_factor,
+                   vol_liquidites_pct, vol_bourse_pct, vol_immobilier_pct,
+                   vol_pe_pct, vol_entreprises_pct, vol_crypto_pct)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     st, sid, preset,
@@ -181,6 +210,12 @@ def initialize_default_presets(conn, scope_type: str, scope_id: Optional[int] = 
                     defaults["expense_growth_pct"],
                     defaults["fire_multiple"],
                     defaults["savings_factor"],
+                    defaults["vol_liquidites_pct"],
+                    defaults["vol_bourse_pct"],
+                    defaults["vol_immobilier_pct"],
+                    defaults["vol_pe_pct"],
+                    defaults["vol_entreprises_pct"],
+                    defaults["vol_crypto_pct"],
                 ),
             )
         except Exception:
@@ -251,8 +286,10 @@ def update_preset(
                return_liquidites_pct, return_bourse_pct, return_immobilier_pct,
                return_pe_pct, return_entreprises_pct,
                inflation_pct, income_growth_pct, expense_growth_pct,
-               fire_multiple, savings_factor)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               fire_multiple, savings_factor,
+               vol_liquidites_pct, vol_bourse_pct, vol_immobilier_pct,
+               vol_pe_pct, vol_entreprises_pct, vol_crypto_pct)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (st, sid, preset) + vals,
         )

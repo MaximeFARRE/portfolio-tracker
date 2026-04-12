@@ -2,40 +2,61 @@
 import pandas as pd
 from services import repositories as repo
 from services import pe_cash_repository as pe_cash_repo
+from services import fx
 from utils.validators import sens_flux
 
 logger = logging.getLogger(__name__)
 
-def _fx_to_eur(conn, amount: float, ccy: str) -> float:
-    ccy = (ccy or "EUR").upper()
-    if ccy == "EUR":
-        return float(amount)
+_SENS_MAP = {
+    "DEPOT": 1.0,
+    "ENTREE": 1.0,
+    "CREDIT": 1.0,
+    "VENTE": 1.0,
+    "DIVIDENDE": 1.0,
+    "INTERETS": 1.0,
+    "LOYER": 1.0,
+    "ABONDEMENT": 1.0,
+    "RETRAIT": -1.0,
+    "SORTIE": -1.0,
+    "DEBIT": -1.0,
+    "ACHAT": -1.0,
+    "DEPENSE": -1.0,
+    "FRAIS": -1.0,
+    "IMPOT": -1.0,
+    "REMBOURSEMENT_CREDIT": -1.0,
+}
 
-    row = repo.get_latest_fx_rate(conn, base_ccy=ccy, quote_ccy="EUR")
-    if row is not None:
-        rate = float(row["rate"]) if isinstance(row, dict) else float(row[0])
-        return float(amount) * rate
-
-    row2 = repo.get_latest_fx_rate(conn, base_ccy="EUR", quote_ccy=ccy)
-    if row2 is not None:
-        rate = float(row2["rate"]) if isinstance(row2, dict) else float(row2[0])
-        if abs(rate) > 1e-12:
-            return float(amount) / rate
-
-    return float(amount)
 
 def _bank_balance_from_tx(tx_df: pd.DataFrame) -> float:
     if tx_df is None or tx_df.empty:
         return 0.0
-    s = 0.0
-    for _, r in tx_df.iterrows():
-        s += float(r.get("amount", 0.0) or 0.0) * sens_flux(str(r.get("type", "")))
-    return float(round(s, 2))
+    df = tx_df.copy()
+    df["amount"] = pd.to_numeric(df.get("amount", 0.0), errors="coerce").fillna(0.0)
+    type_norm = df.get("type", "").astype(str).str.strip().str.upper()
+    signs = type_norm.map(_SENS_MAP)
+    if signs.isna().any():
+        # Fallback strict sur la logique existante si un type non standard apparait.
+        signs = type_norm.apply(sens_flux).astype(float)
+    return float(round(float((df["amount"] * signs).sum()), 2))
 
 def _compute_liquidites_like_overview(conn, person_id: int):
     accounts = repo.list_accounts(conn, person_id=person_id)
     if accounts is None or accounts.empty:
-        return 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, []
+
+    fx_cache: dict[tuple[str, str], float | None] = {}
+    missing_fx: list[dict] = []
+
+    def _convert_cached(amount: float, from_ccy: str, to_ccy: str = "EUR") -> float | None:
+        key = (str(from_ccy or "EUR").upper(), str(to_ccy or "EUR").upper())
+        if key[0] == key[1]:
+            return float(amount)
+        if key not in fx_cache:
+            fx_cache[key] = fx.convert(conn, 1.0, key[0], key[1])
+        rate = fx_cache[key]
+        if rate is None:
+            return None
+        return float(amount) * float(rate)
 
     bank_total_eur = 0.0
     df_banks = accounts[accounts["account_type"].astype(str).str.upper() == "BANQUE"].copy()
@@ -55,16 +76,25 @@ def _compute_liquidites_like_overview(conn, person_id: int):
                 for _, s in subs.iterrows():
                     sub_id = int(s["sub_account_id"])
                     tx = repo.list_transactions(conn, person_id=person_id, account_id=sub_id, limit=100000)
-                    if tx is not None and not tx.empty:
-                        for _, r in tx.iterrows():
-                            total_native += float(r.get("amount", 0.0) or 0.0) * sens_flux(str(r.get("type", "")))
+                    total_native += _bank_balance_from_tx(tx)
         else:
             tx = repo.list_transactions(conn, person_id=person_id, account_id=acc_id, limit=100000)
-            if tx is not None and not tx.empty:
-                for _, r in tx.iterrows():
-                    total_native += float(r.get("amount", 0.0) or 0.0) * sens_flux(str(r.get("type", "")))
+            total_native += _bank_balance_from_tx(tx)
 
-        bank_total_eur += float(_fx_to_eur(conn, total_native, acc_ccy))
+        eur = _convert_cached(total_native, acc_ccy, "EUR")
+        if eur is None:
+            logger.warning(
+                "_compute_liquidites: FX %s→EUR indisponible pour compte %s, ignoré du total.",
+                acc_ccy, acc_id,
+            )
+            missing_fx.append({
+                "component": "bank",
+                "account_id": acc_id,
+                "currency": acc_ccy,
+                "amount_native": round(float(total_native), 2),
+            })
+            continue
+        bank_total_eur += eur
 
     bank_total_eur = round(float(bank_total_eur), 2)
 
@@ -91,7 +121,20 @@ def _compute_liquidites_like_overview(conn, person_id: int):
             cash_native -= float(df.loc[df["type"] == "FRAIS", "amount"].sum())
             cash_native -= float(df["fees"].sum())
 
-        bourse_total_eur += float(_fx_to_eur(conn, cash_native, acc_ccy))
+        eur = _convert_cached(cash_native, acc_ccy, "EUR")
+        if eur is None:
+            logger.warning(
+                "_compute_liquidites: FX %s→EUR indisponible pour compte bourse %s, ignoré du total.",
+                acc_ccy, acc_id,
+            )
+            missing_fx.append({
+                "component": "bourse",
+                "account_id": acc_id,
+                "currency": acc_ccy,
+                "amount_native": round(float(cash_native), 2),
+            })
+            continue
+        bourse_total_eur += eur
 
     bourse_total_eur = round(float(bourse_total_eur), 2)
 
@@ -105,7 +148,7 @@ def _compute_liquidites_like_overview(conn, person_id: int):
     pe_total_eur = round(float(pe_total_eur), 2)
 
     total = round(float(bank_total_eur + bourse_total_eur + pe_total_eur), 2)
-    return bank_total_eur, bourse_total_eur, pe_total_eur, total
+    return bank_total_eur, bourse_total_eur, pe_total_eur, total, missing_fx
 
 
 def get_liquidites_summary(conn, person_id: int) -> dict:
@@ -118,13 +161,18 @@ def get_liquidites_summary(conn, person_id: int) -> dict:
         pe_cash_eur      float  — cash sur plateformes PE (EUR)
         total_eur        float  — somme des trois
 
-    Retourne des zéros si aucune liquidité disponible.
+    `quality_status` vaut `partial` si un compte a été exclu faute de FX.
     """
-    bank, bourse, pe, total = _compute_liquidites_like_overview(conn, person_id)
+    bank, bourse, pe, total, missing_fx = _compute_liquidites_like_overview(conn, person_id)
 
-    if total == 0.0:
+    if total == 0.0 and not missing_fx:
         logger.info(
             "get_liquidites_summary: aucune liquidité pour person_id=%s", person_id,
+        )
+    elif missing_fx:
+        logger.warning(
+            "get_liquidites_summary: synthèse partielle pour person_id=%s, FX manquants=%s",
+            person_id, missing_fx,
         )
 
     return {
@@ -132,5 +180,7 @@ def get_liquidites_summary(conn, person_id: int) -> dict:
         "bourse_cash_eur": bourse,
         "pe_cash_eur": pe,
         "total_eur": total,
+        "quality_status": "partial" if missing_fx else "ok",
+        "missing_fx": missing_fx,
     }
 

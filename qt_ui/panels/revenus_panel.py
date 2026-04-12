@@ -23,6 +23,13 @@ CATEGORIES_REVENUS = ["Salaire", "Prime", "Freelance", "Loyers perçus", "Divide
 MOIS_FR = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"]
 
 
+def _finite_sum(series: pd.Series) -> float | None:
+    vals = pd.to_numeric(series, errors="coerce").dropna()
+    if vals.empty:
+        return None
+    return float(vals.sum())
+
+
 class RevenusPanel(QWidget):
     def __init__(self, conn, person_id: int, parent=None):
         super().__init__(parent)
@@ -191,14 +198,16 @@ class RevenusPanel(QWidget):
 
             df_mois = revenus_du_mois(self._conn, self._person_id, mois)
             if df_mois is None or df_mois.empty:
-                self._kpi_total.set_content("Total revenus", "0,00 €", tone="green")
+                self._kpi_total.set_content("Total revenus", "—", tone="green")
                 self._kpi_count.set_content("Entrées", "0", tone="neutral")
                 self._table_mois.set_dataframe(pd.DataFrame())
                 self._chart_cat.clear_figure()
+                self._chart_hist.clear_figure()
                 return
 
-            total = float(df_mois["montant"].sum()) if "montant" in df_mois.columns else 0.0
-            self._kpi_total.set_content("Total revenus", f"{total:,.2f} €".replace(",", " "), tone="green")
+            total = _finite_sum(df_mois["montant"]) if "montant" in df_mois.columns else None
+            total_txt = "—" if total is None else f"{total:,.2f} €".replace(",", " ")
+            self._kpi_total.set_content("Total revenus", total_txt, tone="green")
             self._kpi_count.set_content("Entrées", str(len(df_mois)), tone="neutral")
             self._table_mois.set_dataframe(df_mois)
 
@@ -209,6 +218,8 @@ class RevenusPanel(QWidget):
                                  labels={"categorie": "Catégorie", "montant": "Montant (€)"})
                 fig_cat.update_layout(**plotly_layout(showlegend=False))
                 self._chart_cat.set_figure(fig_cat)
+            else:
+                self._chart_cat.clear_figure()
 
             try:
                 df_hist = revenus_par_mois(self._conn, self._person_id)
@@ -223,8 +234,13 @@ class RevenusPanel(QWidget):
                                        color_discrete_sequence=[CHART_GREEN])
                         fig_h.update_layout(**plotly_time_series_layout())
                         self._chart_hist.set_figure(fig_h)
+                    else:
+                        self._chart_hist.clear_figure()
+                else:
+                    self._chart_hist.clear_figure()
             except Exception as e:
                 logger.warning("Chargement historique mensuel revenus échoué : %s", e)
+                self._chart_hist.clear_figure()
 
         except Exception as e:
             self._saisie_result.setStyleSheet(STYLE_STATUS_ERROR)

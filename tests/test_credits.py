@@ -87,3 +87,43 @@ def test_safe_float_via_replace_amortissement(conn_with_person):
     ]
     n = replace_amortissement(conn_with_person, credit_id, rows)
     assert n == 1
+
+
+def test_build_amortissement_differe_total_interets_payes_keeps_crd_stable_during_differe():
+    params = CreditParams(
+        capital=1000.0,
+        taux_annuel=12.0,
+        duree_mois=2,
+        date_debut="2025-01-01",
+        assurance_mensuelle=10.0,
+        differe_mois=1,
+        differe_type="total",
+        interets_pendant_differe="payes",
+    )
+    rows = build_amortissement(params)
+    first = rows[0]
+
+    assert first["interets"] == pytest.approx(10.0)
+    assert first["mensualite"] == pytest.approx(20.0)
+    assert first["capital_amorti"] == pytest.approx(0.0)
+    assert first["crd"] == pytest.approx(1000.0)
+
+
+def test_build_amortissement_differe_total_interets_capitalises_increases_crd():
+    params = CreditParams(
+        capital=1000.0,
+        taux_annuel=12.0,
+        duree_mois=2,
+        date_debut="2025-01-01",
+        assurance_mensuelle=10.0,
+        differe_mois=1,
+        differe_type="total",
+        interets_pendant_differe="capitalises",
+    )
+    rows = build_amortissement(params)
+    first = rows[0]
+
+    assert first["interets"] == pytest.approx(0.0)
+    assert first["mensualite"] == pytest.approx(10.0)
+    assert first["capital_amorti"] == pytest.approx(0.0)
+    assert first["crd"] == pytest.approx(1010.0)

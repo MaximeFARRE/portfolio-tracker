@@ -7,17 +7,9 @@ import pandas as pd
 from services import repositories as repo
 from services import positions
 from services import market_history
+from services.common_utils import safe_float
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_float(x, default=0.0) -> float:
-    try:
-        if x is None:
-            return float(default)
-        return float(x)
-    except Exception:
-        return float(default)
 
 def _broker_cash_asof_native(tx: pd.DataFrame) -> float:
     """
@@ -142,22 +134,44 @@ def compute_positions_valued_asof(conn, person_id: int, asof_week_date: str) -> 
     # map account id -> name
     acc_name = {int(r["id"]): str(r.get("name") or r.get("nom") or f"Compte {int(r['id'])}") for _, r in bourse_acc.iterrows()}
 
+    price_cache: dict[str, float | None] = {}
+    fx_cache: dict[str, float | None] = {}
+
+    def _to_eur(amount_native: float, ccy: str) -> float | None:
+        c = str(ccy or "EUR").upper()
+        if c == "EUR":
+            return float(amount_native)
+        if c not in fx_cache:
+            fx_cache[c] = market_history.convert_weekly(conn, 1.0, c, "EUR", asof_week_date)
+        rate = fx_cache[c]
+        if rate is None:
+            return None
+        return float(amount_native) * float(rate)
+
     rows = []
     for _, r in pos.iterrows():
         ticker = str(r.get("symbol") or "").strip()
-        qty = _safe_float(r.get("quantity"), 0.0)
+        qty = safe_float(r.get("quantity"), 0.0)
         ccy = str(r.get("asset_ccy") or "EUR").upper()
         account_id = int(r.get("account_id"))
 
         if not ticker or qty <= 0:
             continue
 
-        px = market_history.get_price_asof(conn, ticker, asof_week_date)
+        if ticker not in price_cache:
+            price_cache[ticker] = market_history.get_price_asof(conn, ticker, asof_week_date)
+        px = price_cache[ticker]
         if px is None:
             px = 0.0
 
         value_native = qty * float(px)
-        value_eur = market_history.convert_weekly(conn, value_native, ccy, "EUR", asof_week_date)
+        value_eur = _to_eur(value_native, ccy)
+        if value_eur is None:
+            logger.warning(
+                "compute_positions_valued_asof: FX %s→EUR manquant pour %s @ %s, position ignorée.",
+                ccy, ticker, asof_week_date,
+            )
+            continue
 
         rows.append({
             "ticker": ticker,
@@ -165,7 +179,7 @@ def compute_positions_valued_asof(conn, person_id: int, asof_week_date: str) -> 
             "devise": ccy,
             "quantite": qty,
             "prix_weekly": float(px),
-            "valeur_eur": float(round(value_eur, 2)),
+            "valeur_eur": round(float(value_eur), 2),
         })
 
     out = pd.DataFrame(rows)
@@ -265,31 +279,56 @@ def compute_accounts_breakdown_asof(conn, person_id: int, asof_week_date: str) -
     acc_ids = [int(x) for x in bourse_acc["id"].tolist()]
     pos = positions.compute_positions_asof(conn, person_id=person_id, asof_date=asof_week_date, account_ids=acc_ids)
 
+    price_cache: dict[str, float] = {}
+    fx_cache: dict[str, float | None] = {}
+
+    def _to_eur(amount_native: float, ccy: str) -> float | None:
+        c = str(ccy or "EUR").upper()
+        if c == "EUR":
+            return float(amount_native)
+        if c not in fx_cache:
+            fx_cache[c] = market_history.convert_weekly(conn, 1.0, c, "EUR", asof_week_date)
+        rate = fx_cache[c]
+        if rate is None:
+            return None
+        return float(amount_native) * float(rate)
+
     # Pré-calc holdings par compte
     holdings_by_acc = {int(aid): 0.0 for aid in acc_ids}
     if pos is not None and not pos.empty:
         for _, r in pos.iterrows():
             aid = int(r["account_id"])
             ticker = str(r.get("symbol") or "").strip()
-            qty = _safe_float(r.get("quantity"), 0.0)
+            qty = safe_float(r.get("quantity"), 0.0)
             ccy = str(r.get("asset_ccy") or "EUR").upper()
             if not ticker or qty <= 0:
                 continue
 
-            px = market_history.get_price_asof(conn, ticker, asof_week_date) or 0.0
+            if ticker not in price_cache:
+                price_cache[ticker] = float(market_history.get_price_asof(conn, ticker, asof_week_date) or 0.0)
+            px = price_cache[ticker]
             value_native = qty * float(px)
-            value_eur = market_history.convert_weekly(conn, value_native, ccy, "EUR", asof_week_date)
+            value_eur = _to_eur(value_native, ccy)
+            if value_eur is None:
+                logger.warning(
+                    "compute_accounts_breakdown_asof: FX %s→EUR manquant pour %s @ %s, ignoré des holdings.",
+                    ccy, ticker, asof_week_date,
+                )
+                continue
             holdings_by_acc[aid] = holdings_by_acc.get(aid, 0.0) + float(value_eur)
 
     # Cash par compte (en EUR)
     rows = []
+    tx_by_account: dict[int, pd.DataFrame] = {}
     for _, a in bourse_acc.iterrows():
         acc_id = int(a["id"])
         acc_name = str(a.get("name") or a.get("nom") or f"Compte {acc_id}")
         acc_type = str(a.get("account_type") or "")
         acc_ccy = str(a.get("currency") or "EUR").upper()
 
-        tx = repo.list_transactions(conn, person_id=person_id, account_id=acc_id, limit=200000)
+        if acc_id not in tx_by_account:
+            tx_by_account[acc_id] = repo.list_transactions(conn, person_id=person_id, account_id=acc_id, limit=200000)
+        tx = tx_by_account[acc_id]
         cash_native = 0.0
         if tx is not None and not tx.empty:
             df = tx.copy()
@@ -298,18 +337,27 @@ def compute_accounts_breakdown_asof(conn, person_id: int, asof_week_date: str) -
             df = df[df["date"] <= pd.to_datetime(asof_week_date)]
             cash_native = _broker_cash_asof_native(df)
 
-        cash_eur = market_history.convert_weekly(conn, cash_native, acc_ccy, "EUR", asof_week_date)
+        cash_eur = _to_eur(cash_native, acc_ccy)
+        if cash_eur is None:
+            logger.warning(
+                "compute_accounts_breakdown_asof: FX %s→EUR manquant pour cash du compte %s @ %s, ignoré.",
+                acc_ccy, acc_name, asof_week_date,
+            )
+            continue
         hold_eur = float(holdings_by_acc.get(acc_id, 0.0))
-        total_eur = float(cash_eur + hold_eur)
+        total_eur = float(cash_eur) + hold_eur
 
         rows.append({
             "Compte": acc_name,
             "Type": acc_type,
             "Devise": acc_ccy,
             "Cash (EUR)": round(float(cash_eur), 2),
-            "Holdings (EUR)": round(float(hold_eur), 2),
-            "Total (EUR)": round(float(total_eur), 2),
+            "Holdings (EUR)": round(hold_eur, 2),
+            "Total (EUR)": round(total_eur, 2),
         })
+
+    if not rows:
+        return pd.DataFrame(columns=["Compte", "Type", "Devise", "Cash (EUR)", "Holdings (EUR)", "Total (EUR)", "%"])
 
     out = pd.DataFrame(rows).sort_values("Total (EUR)", ascending=False).reset_index(drop=True)
     total = float(out["Total (EUR)"].sum()) if not out.empty else 0.0
@@ -357,7 +405,14 @@ def compute_invested_amount_eur_asof(conn, person_id: int, asof_week_date: str) 
         sells = df[df["type"] == "VENTE"]
 
         invested_native = float(buys["amount"].sum() + buys["fees"].sum()) - float(sells["amount"].sum() - sells["fees"].sum())
-        total_eur += market_history.convert_weekly(conn, invested_native, acc_ccy, "EUR", asof_week_date)
+        converted = market_history.convert_weekly(conn, invested_native, acc_ccy, "EUR", asof_week_date)
+        if converted is None:
+            logger.warning(
+                "compute_invested_amount_eur_asof: FX %s→EUR manquant pour compte %s @ %s, ignoré.",
+                acc_ccy, acc_id, asof_week_date,
+            )
+            continue
+        total_eur += converted
 
     return float(round(total_eur, 2))
 
@@ -435,6 +490,8 @@ def compute_passive_income_history(conn, person_id: int) -> pd.DataFrame:
          return pd.DataFrame(columns=["date", "type", "amount_eur", "month", "year"])
     
     rows = []
+    missing_fx: list[dict] = []
+    fx_cache: dict[tuple[str, str], float | None] = {}
     for _, a in bourse_acc.iterrows():
         acc_id = int(a["id"])
         acc_ccy = str(a.get("currency") or "EUR").upper()
@@ -457,8 +514,27 @@ def compute_passive_income_history(conn, person_id: int) -> pd.DataFrame:
                 continue
             
             date_str = r["date"].strftime("%Y-%m-%d")
-            # Convert API
-            amt_eur = market_history.convert_weekly(conn, amt_native, acc_ccy, "EUR", date_str)
+            if acc_ccy == "EUR":
+                amt_eur = amt_native
+            else:
+                key = (acc_ccy, date_str)
+                if key not in fx_cache:
+                    fx_cache[key] = market_history.convert_weekly(conn, 1.0, acc_ccy, "EUR", date_str)
+                rate = fx_cache[key]
+                amt_eur = None if rate is None else float(amt_native) * float(rate)
+            if amt_eur is None:
+                logger.warning(
+                    "compute_passive_income_history: FX %s→EUR manquant pour %s @ %s, ignoré.",
+                    acc_ccy, r["type"], date_str,
+                )
+                missing_fx.append({
+                    "account_id": acc_id,
+                    "currency": acc_ccy,
+                    "date": date_str,
+                    "type": str(r["type"]),
+                    "amount_native": round(float(amt_native), 2),
+                })
+                continue
             rows.append({
                 "date": date_str,
                 "month": r["date"].strftime("%Y-%m"),
@@ -468,9 +544,12 @@ def compute_passive_income_history(conn, person_id: int) -> pd.DataFrame:
             })
             
     if not rows:
-        return pd.DataFrame(columns=["date", "month", "year", "type", "amount_eur"])
-        
-    return pd.DataFrame(rows)
+        out = pd.DataFrame(columns=["date", "month", "year", "type", "amount_eur"])
+    else:
+        out = pd.DataFrame(rows)
+    out.attrs["missing_fx"] = missing_fx
+    out.attrs["quality_status"] = "partial" if missing_fx else "ok"
+    return out
 
 def compute_invested_series(conn, person_id: int) -> pd.DataFrame:
     """
@@ -512,8 +591,14 @@ def compute_invested_series(conn, person_id: int) -> pd.DataFrame:
         combined = pd.concat([buys[["date", "net_native"]], sells[["date", "net_native"]]])
 
         if acc_ccy != "EUR":
-            rate = float(fx.ensure_fx_rate(conn, acc_ccy, "EUR") or 1.0)
-            combined["net_eur"] = combined["net_native"] * rate
+            rate = fx.ensure_fx_rate(conn, acc_ccy, "EUR")
+            if rate is None:
+                logger.warning(
+                    "compute_invested_series: FX %s→EUR introuvable pour compte %s, ignoré de la série.",
+                    acc_ccy, acc_id,
+                )
+                continue
+            combined["net_eur"] = combined["net_native"] * float(rate)
         else:
             combined["net_eur"] = combined["net_native"]
 
@@ -549,8 +634,9 @@ def get_bourse_performance_metrics(conn, person_id: int, current_live_value: flo
     tot_div = float(df_income[df_income["type"] == "DIVIDENDE"]["amount_eur"].sum()) if not df_income.empty else 0.0
     tot_int = float(df_income[df_income["type"] == "INTERETS"]["amount_eur"].sum()) if not df_income.empty else 0.0
 
-    global_perf = 0.0
-    ytd_perf = 0.0
+    global_perf = None
+    ytd_perf = None
+    perf_warnings: list[str] = []
 
     if not df_snap.empty:
         # Injecter le point live aujourd'hui si le dernier snapshot a plus de 3 jours
@@ -569,6 +655,8 @@ def get_bourse_performance_metrics(conn, person_id: int, current_live_value: flo
             current_value = float(current_live_value) if current_live_value is not None else float(df_snap.iloc[-1]["bourse_holdings"])
             if invested_eur > 0:
                 global_perf = (current_value / invested_eur - 1.0) * 100.0
+            else:
+                perf_warnings.append("montant investi non calculable")
 
             # Perf YTD : toujours basée sur les snapshots (historique intra-année)
             current_year = today.year
@@ -578,6 +666,12 @@ def get_bourse_performance_metrics(conn, person_id: int, current_live_value: flo
                 val_end_ytd = float(df_ytd.iloc[-1]["bourse_holdings"])
                 if val_start_ytd > 0:
                     ytd_perf = (val_end_ytd / val_start_ytd - 1.0) * 100.0
+                else:
+                    perf_warnings.append("base YTD nulle")
+            else:
+                perf_warnings.append("historique YTD insuffisant")
+    else:
+        perf_warnings.append("historique bourse absent")
 
     return {
         "invested_eur": invested_eur,
@@ -587,6 +681,9 @@ def get_bourse_performance_metrics(conn, person_id: int, current_live_value: flo
         "total_interests": tot_int,
         "snapshots_df": df_snap,
         "income_df": df_income,
+        "quality_status": "partial" if df_income.attrs.get("missing_fx") or perf_warnings else "ok",
+        "missing_income_fx": df_income.attrs.get("missing_fx", []),
+        "perf_warnings": perf_warnings,
     }
 
 def get_tickers_diagnostic_df(conn, person_id: int) -> pd.DataFrame:
@@ -687,7 +784,7 @@ def get_live_bourse_positions(conn, person_id: int) -> pd.DataFrame:
 
     empty_cols = [
         "asset_id", "symbol", "name", "asset_type", "quantity", "pru",
-        "last_price", "value", "pnl_latent", "asset_ccy", "compte", "type",
+        "last_price", "value", "pnl_latent", "asset_ccy", "valuation_status", "compte", "type",
     ]
 
     accounts = repo.list_accounts(conn, person_id=person_id)
@@ -708,8 +805,15 @@ def get_live_bourse_positions(conn, person_id: int) -> pd.DataFrame:
         acc_type = str(row.get("account_type") or "")
         acc_ccy = str(row.get("currency") or "EUR").upper()
 
-        tx_acc = repo.list_transactions(conn, account_id=account_id, limit=10000)
         asset_ids = repo.list_account_asset_ids(conn, account_id=account_id)
+        if not asset_ids:
+            logger.debug(
+                "get_live_bourse_positions: aucun actif lié au compte '%s' (id=%s)",
+                acc_name, account_id,
+            )
+            continue
+
+        tx_acc = repo.list_transactions(conn, account_id=account_id, limit=10000)
         prices = repo.get_latest_prices(conn, asset_ids)
 
         pos = portfolio.compute_positions_v2_fx(conn, tx_acc, prices, acc_ccy)
@@ -723,7 +827,7 @@ def get_live_bourse_positions(conn, person_id: int) -> pd.DataFrame:
 
         # Vérifier les prix manquants
         if "last_price" in pos.columns:
-            missing_px = pos[pos["last_price"].fillna(0.0) == 0.0]
+            missing_px = pos[pos["last_price"].isna() | (pos["last_price"] <= 0)]
             for _, mp in missing_px.iterrows():
                 logger.warning(
                     "get_live_bourse_positions: prix live absent pour %s (compte '%s')",
@@ -758,7 +862,7 @@ def get_live_bourse_positions_for_account(conn, account_id: int) -> pd.DataFrame
 
     empty_cols = [
         "asset_id", "symbol", "name", "asset_type", "quantity", "pru",
-        "last_price", "value", "pnl_latent", "asset_ccy",
+        "last_price", "value", "pnl_latent", "asset_ccy", "valuation_status",
     ]
 
     # Devise du compte
@@ -771,8 +875,15 @@ def get_live_bourse_positions_for_account(conn, account_id: int) -> pd.DataFrame
 
     acc_ccy = str(acc_row.get("currency") or "EUR").upper()
 
-    tx_acc = repo.list_transactions(conn, account_id=account_id, limit=10000)
     asset_ids = repo.list_account_asset_ids(conn, account_id=account_id)
+    if not asset_ids:
+        logger.debug(
+            "get_live_bourse_positions_for_account: aucun actif lié au compte id=%s",
+            account_id,
+        )
+        return pd.DataFrame(columns=empty_cols)
+
+    tx_acc = repo.list_transactions(conn, account_id=account_id, limit=10000)
     prices = repo.get_latest_prices(conn, asset_ids)
 
     pos = portfolio.compute_positions_v2_fx(conn, tx_acc, prices, acc_ccy)
@@ -786,7 +897,7 @@ def get_live_bourse_positions_for_account(conn, account_id: int) -> pd.DataFrame
 
     # Log des prix manquants
     if "last_price" in pos.columns:
-        missing_px = pos[pos["last_price"].fillna(0.0) == 0.0]
+        missing_px = pos[pos["last_price"].isna() | (pos["last_price"] <= 0)]
         for _, mp in missing_px.iterrows():
             logger.warning(
                 "get_live_bourse_positions_for_account: prix live absent pour %s (compte id=%s)",
@@ -802,25 +913,37 @@ def get_bourse_state_asof(conn, person_id: int, asof_date: str) -> dict:
     Servira au debug/historique sur la page Bourse Globale.
     """
     import datetime as _dt
-    from services.market_history import get_price_asof, get_fx_asof, convert_weekly
+    from services.market_history import get_price_asof, get_fx_asof
 
     # 1) Liste des comptes bourse
     accounts = repo.list_accounts(conn, person_id=person_id)
     if accounts is None or accounts.empty:
-        return {}
+        return {"quality_status": "no_accounts", "missing_prices": [], "missing_fx": []}
     bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
     acc_ids = [int(x) for x in bourse_acc["id"].tolist()]
 
     # 2) Positions à cette date
     pos = positions.compute_positions_asof(conn, person_id=person_id, asof_date=asof_date, account_ids=acc_ids)
     if pos is None or pos.empty:
-        return {"total_val": 0.0, "total_invested": 0.0, "df": pd.DataFrame()}
+        return {
+            "total_val": None,
+            "total_invested": None,
+            "total_pnl": None,
+            "df": pd.DataFrame(),
+            "quality_status": "no_positions",
+            "missing_prices": [],
+            "missing_fx": [],
+        }
 
     # Map account info
     acc_map = {int(r["id"]): {"name": str(r["name"]), "ccy": str(r["currency"] or "EUR").upper()} for _, r in bourse_acc.iterrows()}
 
+    price_cache: dict[str, float | None] = {}
+    fx_cache: dict[str, float | None] = {}
     rows = []
     total_val_eur = 0.0
+    missing_prices: list[str] = []
+    missing_fx: list[dict] = []
 
     for _, r in pos.iterrows():
         aid = int(r["account_id"])
@@ -831,16 +954,33 @@ def get_bourse_state_asof(conn, person_id: int, asof_date: str) -> dict:
         if not sym or qty <= 0: continue
 
         # Prix à la date (weekly fallback ou exact)
-        px = get_price_asof(conn, sym, asof_date) or 0.0
-        val_native = qty * float(px)
+        if sym not in price_cache:
+            price_cache[sym] = get_price_asof(conn, sym, asof_date)
+        px = price_cache[sym]
+        valuation_status = "ok"
+        val_native = None
+        if px is None:
+            valuation_status = "missing_price"
+            if sym not in missing_prices:
+                missing_prices.append(sym)
+        else:
+            val_native = qty * float(px)
         
         # Taux de change (asset_ccy -> EUR)
-        fx_rate = 1.0
-        if asset_ccy != "EUR":
-            fx_rate = get_fx_asof(conn, asset_ccy, "EUR", asof_date) or 1.0
+        fx_rate = 1.0 if asset_ccy == "EUR" else None
+        if valuation_status == "ok" and asset_ccy != "EUR":
+            if asset_ccy not in fx_cache:
+                fx_cache[asset_ccy] = get_fx_asof(conn, asset_ccy, "EUR", asof_date)
+            if fx_cache[asset_ccy] is None:
+                valuation_status = "missing_fx"
+                missing_fx.append({"symbol": sym, "currency": asset_ccy, "date": asof_date})
+            else:
+                fx_rate = float(fx_cache[asset_ccy])
         
-        val_eur = val_native * fx_rate
-        total_val_eur += val_eur
+        val_eur = None
+        if valuation_status == "ok" and val_native is not None and fx_rate is not None:
+            val_eur = val_native * fx_rate
+            total_val_eur += val_eur
 
         rows.append({
             "symbol": sym,
@@ -850,15 +990,22 @@ def get_bourse_state_asof(conn, person_id: int, asof_date: str) -> dict:
             "currency": asset_ccy,
             "fx_rate": fx_rate,
             "value": val_eur,
+            "valuation_status": valuation_status,
             "compte": acc_map.get(aid, {}).get("name", "Inconnu"),
         })
 
     # 3) Montant investi à cette date
     invested_eur = compute_invested_amount_eur_asof(conn, person_id, asof_date)
 
+    has_rows = bool(rows)
+    has_valued_rows = any(r.get("value") is not None for r in rows)
+    total_val = total_val_eur if has_valued_rows else None
     return {
-        "total_val": total_val_eur,
+        "total_val": total_val,
         "total_invested": invested_eur,
-        "total_pnl": total_val_eur - invested_eur,
-        "df": pd.DataFrame(rows).sort_values("value", ascending=False)
+        "total_pnl": (total_val - invested_eur) if total_val is not None and invested_eur > 0 else None,
+        "df": pd.DataFrame(rows).sort_values("value", ascending=False, na_position="last"),
+        "quality_status": "partial" if (missing_prices or missing_fx) else ("ok" if has_rows else "no_positions"),
+        "missing_prices": missing_prices,
+        "missing_fx": missing_fx,
     }

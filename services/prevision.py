@@ -9,7 +9,7 @@ from .prevision_models import PrevisionConfig, PrevisionBase, PrevisionResult
 from .prevision_base import build_prevision_base_for_scope
 from .prevision_engines import run_deterministic_projection, run_monte_carlo_projection
 from .prevision_risk import compute_risk_metrics
-from .prevision_goals import compute_goal_metrics
+from .prevision_goals import compute_goal_metrics, compute_fire_date
 from .prevision_explain import generate_prevision_diagnostics
 
 from .prevision_stress_models import StressScenario, StressResult
@@ -46,10 +46,15 @@ def run_prevision(
     # 3. Enrichissements
     result.risk_metrics = compute_risk_metrics(result)
     result.goal_metrics = compute_goal_metrics(result)
-    
-    # 4. Diagnostics et insights
+
+    # 4. Date FIRE (dépenses annuelles × fire_multiple du config)
+    fire_target = base.fire_annual_expenses * config.fire_multiple
+    if fire_target > 0:
+        result.fire_date = compute_fire_date(result.median_series, fire_target)
+
+    # 5. Diagnostics et insights
     result.diagnostics = generate_prevision_diagnostics(result)
-    
+
     return result
 
 def run_stress_prevision(

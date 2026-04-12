@@ -3,7 +3,12 @@ import pandas as pd
 
 from services import family_snapshots as fs
 from services.projections import ScenarioParams, load_initial_patrimoine_from_family, project_patrimoine
-from services.family_dashboard import compute_allocations_family
+from services.family_dashboard import (
+    compute_allocations_family,
+    compute_family_kpis,
+    prepare_family_alloc_pie_data,
+    prepare_family_area_chart_data,
+)
 
 
 def _insert_person(conn, person_id: int = 1, name: str = "Test") -> None:
@@ -176,3 +181,81 @@ def test_compute_allocations_family_pas_de_valeurs_negatives():
 
     for key, val in alloc.items():
         assert val >= 0.0, f"{key} est négatif : {val}"
+
+
+def test_family_dashboard_kpis_simple_manual_dataset():
+    df = pd.DataFrame(
+        [
+            {
+                "week_date": "2025-01-01",
+                "patrimoine_net": 1000.0,
+                "patrimoine_brut": 1200.0,
+                "liquidites_total": 200.0,
+                "bourse_holdings": 300.0,
+                "pe_value": 100.0,
+                "ent_value": 100.0,
+                "immobilier_value": 500.0,
+                "credits_remaining": 200.0,
+            },
+            {
+                "week_date": "2026-01-10",
+                "patrimoine_net": 1200.0,
+                "patrimoine_brut": 1400.0,
+                "liquidites_total": 250.0,
+                "bourse_holdings": 350.0,
+                "pe_value": 100.0,
+                "ent_value": 100.0,
+                "immobilier_value": 600.0,
+                "credits_remaining": 200.0,
+            },
+        ]
+    )
+    df["week_date"] = pd.to_datetime(df["week_date"])
+
+    kpis = compute_family_kpis(df)
+    assert kpis["patrimoine_net"] == pytest.approx(1200.0)
+    assert kpis["perf_12m"] == pytest.approx(20.0)
+    assert kpis["perf_3m"] == pytest.approx(20.0)
+    assert kpis["cagr"] is not None
+
+
+def test_family_dashboard_alloc_charts_variations_manual_dataset():
+    df = pd.DataFrame(
+        [
+            {
+                "week_date": "2026-01-01",
+                "patrimoine_net": 1000.0,
+                "patrimoine_brut": 1200.0,
+                "liquidites_total": 100.0,
+                "bourse_holdings": 200.0,
+                "pe_value": 50.0,
+                "ent_value": 50.0,
+                "immobilier_value": 600.0,
+                "credits_remaining": 200.0,
+            },
+            {
+                "week_date": "2026-01-08",
+                "patrimoine_net": 1100.0,
+                "patrimoine_brut": 1300.0,
+                "liquidites_total": 120.0,
+                "bourse_holdings": 240.0,
+                "pe_value": 50.0,
+                "ent_value": 50.0,
+                "immobilier_value": 640.0,
+                "credits_remaining": 200.0,
+            },
+        ]
+    )
+    df["week_date"] = pd.to_datetime(df["week_date"])
+
+    alloc = compute_allocations_family(df)
+    pie_df = prepare_family_alloc_pie_data(df, alloc)
+    area_df = prepare_family_area_chart_data(df)
+
+    # Bourse: 200 -> 240 => +20%
+    bourse_row = pie_df[pie_df["Catégorie"] == "Bourse"].iloc[0]
+    assert float(bourse_row["var_pct"]) == pytest.approx(20.0)
+
+    # Totaux area: part_pct somme à 100 par semaine
+    sums = area_df.groupby("week_date")["part_pct"].sum()
+    assert all(v == pytest.approx(100.0) for v in sums.tolist())

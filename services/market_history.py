@@ -259,7 +259,12 @@ def get_fx_asof(conn, base_ccy: str, quote_ccy: str, week_date: str,
 
     return None
 
-def convert_weekly(conn, amount: float, from_ccy: str, to_ccy: str, week_date: str) -> float:
+def convert_weekly(conn, amount: float, from_ccy: str, to_ccy: str, week_date: str) -> float | None:
+    """
+    Contrat aligné sur `services.fx.convert` :
+    - même devise => retourne le montant tel quel
+    - taux introuvable => retourne None (jamais le montant brut silencieux)
+    """
     from_ccy = (from_ccy or "EUR").upper()
     to_ccy = (to_ccy or "EUR").upper()
     if from_ccy == to_ccy:
@@ -269,10 +274,10 @@ def convert_weekly(conn, amount: float, from_ccy: str, to_ccy: str, week_date: s
     if rate is None:
         _logger.error(
             "convert_weekly: taux %s→%s introuvable pour la semaine %s. "
-            "VALEUR ANNULÉE (0.0) pour éviter une valorisation erronée — vérifier fx_rates_weekly.",
+            "Retourne None pour marquer le prix comme manquant.",
             from_ccy, to_ccy, week_date
         )
         with _missing_fx_lock:
             _missing_fx_pairs.add((from_ccy, to_ccy))
-        return 0.0  # Sécurité : on préfère 0 que des milliards imaginaires (ex: COP counted as EUR)
+        return None
     return float(amount) * float(rate)

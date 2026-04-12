@@ -1,37 +1,30 @@
 """
-Page Import — remplace pages/3_Import.py
-Permet d'importer des CSV de dépenses/revenus, des transactions Bankin,
-des transactions Trade Republic (via pytr), et de configurer des crédits.
+Page Import — orchestrateur.
+Les panels dépenses/revenus/Bankin sont dans _import_panels.py.
+Le panel Trade Republic est dans _tr_panel.py.
 """
-import os
-import tempfile
-import pandas as pd
+import time
+from services import import_lookup_service as lookup
+from qt_ui.pages._import_panels import (
+    BTN_STYLE as _BTN_STYLE, INPUT_STYLE as _INPUT_STYLE,
+    LABEL_STYLE as _LABEL_STYLE, GROUP_STYLE as _GROUP_STYLE,
+    make_label as _make_label, build_depenses_panel, build_bankin_panel,
+)
+from qt_ui.pages._tr_panel import TrImportPanel
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QCheckBox, QGroupBox, QLineEdit, QDoubleSpinBox,
     QSpinBox, QScrollArea, QDateEdit, QStackedWidget, QMessageBox,
-    QFileDialog, QTextEdit, QSizePolicy, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
-from PyQt6.QtCore import Qt, QDate, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QColor
-
-
-_BTN_STYLE = """
-    QPushButton { background: #1e3a5f; color: #60a5fa; border: none;
-                  border-radius: 6px; padding: 8px 16px; font-size: 13px; }
-    QPushButton:hover { background: #1e4a7f; }
-    QPushButton:disabled { background: #1a1f2e; color: #475569; }
-"""
-_INPUT_STYLE = "background: #1a1f2e; color: #e2e8f0; border: 1px solid #2a3040; border-radius: 4px; padding: 4px; font-size: 13px;"
-_LABEL_STYLE = "color: #94a3b8; font-size: 12px; margin-bottom: 2px;"
-_GROUP_STYLE = "QGroupBox { color: #94a3b8; border: 1px solid #1e2538; border-radius: 6px; padding: 8px; margin-top: 6px; } QGroupBox::title { subcontrol-position: top left; padding: 2px 8px; }"
-
-
-def _make_label(text: str) -> QLabel:
-    lbl = QLabel(text)
-    lbl.setStyleSheet(_LABEL_STYLE)
-    return lbl
+from qt_ui.theme import (
+    BG_PRIMARY, BG_CARD, BORDER_SUBTLE,
+    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, TEXT_DISABLED,
+    COLOR_SUCCESS, COLOR_WARNING,
+    STYLE_TITLE_XL, STYLE_STATUS, STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR, STYLE_STATUS_WARNING,
+)
 
 
 class ImportPage(QScrollArea):
@@ -39,12 +32,20 @@ class ImportPage(QScrollArea):
         super().__init__(parent)
         self._conn = conn
         self._csv_path: str | None = None
+        self._people_cache_ttl_sec = 30.0
+        self._accounts_cache_ttl_sec = 20.0
+        self._history_cache_ttl_sec = 10.0
+        self._people_cache_df = None
+        self._person_id_by_name: dict[str, int] = {}
+        self._accounts_cache_by_person: dict[int, tuple[float, object]] = {}
+        self._last_people_refresh_ts = 0.0
+        self._last_history_refresh_ts = 0.0
 
         self.setWidgetResizable(True)
-        self.setStyleSheet("QScrollArea { border: none; background: #0e1117; }")
+        self.setStyleSheet(f"QScrollArea {{ border: none; background: {BG_PRIMARY}; }}")
 
         container = QWidget()
-        container.setStyleSheet("background: #0e1117;")
+        container.setStyleSheet(f"background: {BG_PRIMARY};")
         main_layout = QVBoxLayout(container)
         main_layout.setContentsMargins(24, 20, 24, 20)
         main_layout.setSpacing(16)
@@ -52,7 +53,7 @@ class ImportPage(QScrollArea):
 
         # Header
         header = QLabel("📥  Importer / Configurer")
-        header.setStyleSheet("color: #e2e8f0; font-size: 22px; font-weight: bold;")
+        header.setStyleSheet(STYLE_TITLE_XL)
         main_layout.addWidget(header)
 
         # Sélecteurs
@@ -86,10 +87,18 @@ class ImportPage(QScrollArea):
 
         # Stack des sous-panneaux
         self._stack = QStackedWidget()
-        self._panel_depenses = self._build_depenses_panel("depenses")
-        self._panel_revenus = self._build_depenses_panel("revenus")
-        self._panel_bankin = self._build_bankin_panel()
-        self._panel_tr = self._build_tr_panel()
+        self._panel_depenses = build_depenses_panel(
+            self._conn, self._person_combo.currentText, self._refresh_history, "depenses"
+        )
+        self._panel_revenus = build_depenses_panel(
+            self._conn, self._person_combo.currentText, self._refresh_history, "revenus"
+        )
+        self._panel_bankin = build_bankin_panel(
+            self._conn, self._person_combo.currentText, self._refresh_history
+        )
+        self._panel_tr = TrImportPanel(
+            self._conn, self._person_combo.currentText, self._refresh_history
+        )
         self._panel_credit = self._build_credit_panel()
 
         self._stack.addWidget(self._panel_depenses)
@@ -100,7 +109,7 @@ class ImportPage(QScrollArea):
 
         main_layout.addWidget(self._stack)
 
-        # ── Historique des imports (AM-19) ──────────────────────────────────
+        # ── Historique des imports ───────────────────────────────────────────
         self._history_panel = self._build_history_panel()
         main_layout.addWidget(self._history_panel)
 
@@ -108,986 +117,8 @@ class ImportPage(QScrollArea):
 
         self._refresh_people()
 
-    def _build_depenses_panel(self, table_type: str) -> QWidget:
-        w = QWidget()
-        w.setStyleSheet("background: #0e1117;")
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-
-        grp = QGroupBox("Fichier CSV")
-        grp.setStyleSheet(_GROUP_STYLE)
-        gv = QVBoxLayout(grp)
-
-        cap = QLabel("Format attendu : Date | Catégories... | Total (Total ignoré)")
-        cap.setStyleSheet("color: #64748b; font-size: 11px;")
-        gv.addWidget(cap)
-
-        file_row = QHBoxLayout()
-        # Store file path per panel
-        file_lbl = QLabel("Aucun fichier sélectionné")
-        file_lbl.setStyleSheet("color: #64748b; font-size: 12px;")
-        btn_file = QPushButton("📂  Choisir un CSV")
-        btn_file.setStyleSheet(_BTN_STYLE)
-        file_row.addWidget(btn_file)
-        file_row.addWidget(file_lbl, 1)
-        gv.addLayout(file_row)
-
-        chk_delete = QCheckBox("Remplacer les données des mois importés (pas l'historique complet)")
-        chk_delete.setChecked(True)
-        chk_delete.setStyleSheet("color: #94a3b8;")
-        gv.addWidget(chk_delete)
-
-        btn_import = QPushButton("✅  Importer")
-        btn_import.setStyleSheet(_BTN_STYLE)
-        gv.addWidget(btn_import)
-
-        result_lbl = QLabel()
-        result_lbl.setWordWrap(True)
-        result_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
-        gv.addWidget(result_lbl)
-
-        layout.addWidget(grp)
-        layout.addStretch()
-
-        # Store references on the widget
-        w._file_path = None
-        w._file_lbl = file_lbl
-        w._chk_delete = chk_delete
-        w._result_lbl = result_lbl
-        w._table_type = table_type
-
-        def pick_file():
-            path, _ = QFileDialog.getOpenFileName(w, "Choisir un CSV", "", "CSV (*.csv)")
-            if path:
-                w._file_path = path
-                file_lbl.setText(path.split("/")[-1].split("\\")[-1])
-                result_lbl.setText("")
-
-        def do_import():
-            if not w._file_path:
-                result_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
-                result_lbl.setText("Veuillez sélectionner un fichier CSV.")
-                return
-            person = self._person_combo.currentText()
-            try:
-                from services.imports import import_wide_csv_to_monthly_table
-                from services.import_history import create_batch, close_batch
-                import os
-                pid = self._conn.execute(
-                    "SELECT id FROM people WHERE name = ?", (person,)
-                ).fetchone()
-                pid = int(pid[0]) if pid else None
-                itype = "DEPENSES" if table_type == "depenses" else "REVENUS"
-                batch_id = create_batch(
-                    self._conn,
-                    import_type=itype,
-                    person_id=pid,
-                    person_name=person,
-                    filename=os.path.basename(w._file_path),
-                )
-                with open(w._file_path, "rb") as f:
-                    res = import_wide_csv_to_monthly_table(
-                        self._conn, table=table_type, person_name=person,
-                        file=f, delete_existing=w._chk_delete.isChecked(),
-                        import_batch_id=batch_id,
-                    )
-                close_batch(self._conn, batch_id, res["nb_lignes"])
-                result_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
-                result_lbl.setText(
-                    f"Import OK ✅ — {res['nb_lignes']} lignes dans {res['table']}\n"
-                    f"Mois : {res['mois']}\nCatégories : {res['categories']}"
-                )
-                self._refresh_history()
-            except Exception as e:
-                result_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
-                result_lbl.setText(f"Erreur : {e}")
-
-        btn_file.clicked.connect(pick_file)
-        btn_import.clicked.connect(do_import)
-
-        return w
-
-    def _build_bankin_panel(self) -> QWidget:
-        w = QWidget()
-        w.setStyleSheet("background: #0e1117;")
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-
-        grp = QGroupBox("Import Bankin (transactions)")
-        grp.setStyleSheet(_GROUP_STYLE)
-        gv = QVBoxLayout(grp)
-
-        cap = QLabel("Importe le CSV Bankin dans la table transactions (et optionnellement remplit dépenses/revenus).")
-        cap.setStyleSheet("color: #64748b; font-size: 11px;")
-        gv.addWidget(cap)
-
-        file_row = QHBoxLayout()
-        file_lbl = QLabel("Aucun fichier sélectionné")
-        file_lbl.setStyleSheet("color: #64748b; font-size: 12px;")
-        btn_file = QPushButton("📂  Choisir un CSV Bankin")
-        btn_file.setStyleSheet(_BTN_STYLE)
-        file_row.addWidget(btn_file)
-        file_row.addWidget(file_lbl, 1)
-        gv.addLayout(file_row)
-
-        chk_fill = QCheckBox("Créer aussi les totaux mensuels (dépenses/revenus)")
-        chk_fill.setChecked(True)
-        chk_fill.setStyleSheet("color: #94a3b8;")
-        gv.addWidget(chk_fill)
-
-        chk_purge = QCheckBox("Supprimer les anciennes transactions de cette personne")
-        chk_purge.setChecked(False)
-        chk_purge.setStyleSheet("color: #94a3b8;")
-        gv.addWidget(chk_purge)
-
-        btn_import = QPushButton("✅  Importer Bankin")
-        btn_import.setStyleSheet(_BTN_STYLE)
-        gv.addWidget(btn_import)
-
-        result_lbl = QLabel()
-        result_lbl.setWordWrap(True)
-        result_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
-        gv.addWidget(result_lbl)
-
-        layout.addWidget(grp)
-        layout.addStretch()
-
-        w._file_path = None
-
-        def pick_file():
-            path, _ = QFileDialog.getOpenFileName(w, "Choisir un CSV Bankin", "", "CSV (*.csv)")
-            if path:
-                w._file_path = path
-                file_lbl.setText(path.split("/")[-1].split("\\")[-1])
-                result_lbl.setText("")
-
-        def do_import():
-            if not w._file_path:
-                result_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
-                result_lbl.setText("Veuillez sélectionner un fichier CSV.")
-                return
-            person = self._person_combo.currentText()
-            try:
-                from services.imports import import_bankin_csv
-                from services.import_history import create_batch, close_batch
-                import os
-                pid = self._conn.execute(
-                    "SELECT id FROM people WHERE name = ?", (person,)
-                ).fetchone()
-                pid = int(pid[0]) if pid else None
-                batch_id = create_batch(
-                    self._conn,
-                    import_type="BANKIN",
-                    person_id=pid,
-                    person_name=person,
-                    filename=os.path.basename(w._file_path),
-                )
-                with open(w._file_path, "rb") as f:
-                    res = import_bankin_csv(
-                        self._conn, person_name=person, file=f,
-                        also_fill_monthly_tables=chk_fill.isChecked(),
-                        purge_existing_transactions=chk_purge.isChecked(),
-                        import_batch_id=batch_id,
-                    )
-                close_batch(self._conn, batch_id, res["transactions_inserted"])
-                result_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
-                result_lbl.setText(
-                    f"Import Bankin OK ✅ — {res['transactions_inserted']} transactions\n"
-                    f"Mois dépenses : {res['months_depenses']}\n"
-                    f"Mois revenus : {res['months_revenus']}"
-                )
-                self._refresh_history()
-            except Exception as e:
-                result_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
-                result_lbl.setText(f"Erreur : {e}")
-
-        btn_file.clicked.connect(pick_file)
-        btn_import.clicked.connect(do_import)
-
-        return w
-
     # ------------------------------------------------------------------
-    # Panel Trade Republic
-    # ------------------------------------------------------------------
-
-    def _build_tr_panel(self) -> QWidget:
-        """
-        Panel Trade Republic — flux 2 étapes :
-          Étape 1 : Se connecter  (pytr login -n PHONE -p PIN --store_credentials)
-                    → pytr affiche un code ; l'utilisateur le saisit ici si demandé.
-          Étape 2 : Exporter     (pytr export_transactions --outputdir DIR)
-                    → utilise les credentials sauvegardés, sans PIN.
-        """
-        w = QScrollArea()
-        w.setWidgetResizable(True)
-        w.setStyleSheet("QScrollArea { border: none; background: #0e1117; }")
-
-        inner = QWidget()
-        inner.setStyleSheet("background: #0e1117;")
-        layout = QVBoxLayout(inner)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-        w.setWidget(inner)
-
-        # ── Étape 1 : Connexion ──────────────────────────────────────────────
-        step1_grp = QGroupBox("Étape 1 — Connexion Trade Republic")
-        step1_grp.setStyleSheet(_GROUP_STYLE)
-        s1v = QVBoxLayout(step1_grp)
-
-        row_phone = QHBoxLayout()
-        row_phone.addWidget(_make_label("Téléphone (format +33…)  "))
-        tr_phone_edit = QLineEdit()
-        tr_phone_edit.setPlaceholderText("+33612345678")
-        tr_phone_edit.setStyleSheet(_INPUT_STYLE)
-        tr_phone_edit.setMinimumWidth(180)
-        row_phone.addWidget(tr_phone_edit)
-        btn_save_phone = QPushButton("💾 Sauvegarder")
-        btn_save_phone.setStyleSheet(_BTN_STYLE)
-        btn_save_phone.setFixedWidth(130)
-        row_phone.addWidget(btn_save_phone)
-        row_phone.addStretch()
-        s1v.addLayout(row_phone)
-
-        row_pin = QHBoxLayout()
-        row_pin.addWidget(_make_label("Code PIN TR (4 chiffres)  "))
-        tr_pin_edit = QLineEdit()
-        tr_pin_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        tr_pin_edit.setMaxLength(4)
-        tr_pin_edit.setFixedWidth(70)
-        tr_pin_edit.setStyleSheet(_INPUT_STYLE)
-        row_pin.addWidget(tr_pin_edit)
-        row_pin.addStretch()
-        s1v.addLayout(row_pin)
-
-        note1 = QLabel(
-            "ℹ️  Login web : Trade Republic envoie une notification push "
-            "sur votre téléphone pour confirmer la connexion.\n"
-            "L'ancien mode 'App Login' n'est plus supporté par TR. "
-            "Si la connexion échoue ('Expecting value'), cliquez sur :\n👉 'Mettre à jour pytr' pour contourner automatiquement la protection anti-bots."
-        )
-        note1.setWordWrap(True)
-        note1.setStyleSheet("color: #60a5fa; font-size: 11px; margin-top: 4px; margin-bottom: 8px;")
-        s1v.addWidget(note1)
-
-        btn_row_login = QHBoxLayout()
-        btn_login = QPushButton("🔐  Étape 1 — Se connecter à Trade Republic")
-        btn_login.setStyleSheet(_BTN_STYLE)
-        btn_row_login.addWidget(btn_login)
-
-        btn_update_pytr = QPushButton("🔄  Mettre à jour pytr")
-        btn_update_pytr.setStyleSheet(
-            "QPushButton { background: #1a2a1a; color: #4ade80; border: 1px solid #166534; "
-            "border-radius: 6px; padding: 8px 12px; font-size: 12px; }"
-            "QPushButton:hover { background: #1e3a1e; }"
-        )
-        btn_update_pytr.setToolTip("pip install --upgrade pytr")
-        btn_row_login.addWidget(btn_update_pytr)
-
-        btn_reset_creds = QPushButton("🗑️  Reset credentials")
-        btn_reset_creds.setStyleSheet(
-            "QPushButton { background: #2a1a1a; color: #f87171; border: 1px solid #7f1d1d; "
-            "border-radius: 6px; padding: 8px 12px; font-size: 12px; }"
-            "QPushButton:hover { background: #3a1a1a; }"
-        )
-        btn_reset_creds.setToolTip(
-            "Supprime ~/.pytr/credentials pour forcer un nouveau login complet.\n"
-            "Utile si la connexion échoue avec 'Expecting value' (credentials périmés)."
-        )
-        btn_row_login.addWidget(btn_reset_creds)
-        btn_row_login.addStretch()
-        s1v.addLayout(btn_row_login)
-
-        # Zone log (temps réel pytr)
-        log_edit = QTextEdit()
-        log_edit.setReadOnly(True)
-        log_edit.setFixedHeight(150)
-        log_edit.setStyleSheet(
-            "background: #0a0e16; color: #94a3b8; border: 1px solid #1e2538; "
-            "border-radius: 4px; font-family: monospace; font-size: 11px;"
-        )
-        s1v.addWidget(log_edit)
-
-        # Saisie du code interactif (caché par défaut)
-        code_frame = QWidget()
-        code_frame.setStyleSheet(
-            "background: #1a2535; border: 1px solid #2a4a6a; border-radius: 6px; padding: 4px;"
-        )
-        code_row = QHBoxLayout(code_frame)
-        code_row.setContentsMargins(8, 6, 8, 6)
-        code_lbl = QLabel("Code reçu :")
-        code_lbl.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 12px;")
-        code_edit = QLineEdit()
-        code_edit.setMaxLength(10)
-        code_edit.setFixedWidth(120)
-        code_edit.setStyleSheet(_INPUT_STYLE)
-        code_edit.setPlaceholderText("ex: AB12 ou 123456")
-        btn_send_code = QPushButton("✅ Valider")
-        btn_send_code.setStyleSheet(_BTN_STYLE)
-        code_row.addWidget(code_lbl)
-        code_row.addWidget(code_edit)
-        code_row.addWidget(btn_send_code)
-        code_row.addStretch()
-        s1v.addWidget(code_frame)
-
-        # Caché initialement
-        code_frame.hide()
-
-        layout.addWidget(step1_grp)
-
-        # ── Étape 2 : Export ─────────────────────────────────────────────────
-        step2_grp = QGroupBox("Étape 2 — Exporter les transactions")
-        step2_grp.setStyleSheet(_GROUP_STYLE)
-        s2v = QVBoxLayout(step2_grp)
-
-        acc_lbl = _make_label("Compte par défaut (si inconnu ou espèce) :")
-        s2v.addWidget(acc_lbl)
-
-        acc_row = QHBoxLayout()
-        tr_account_combo = QComboBox()
-        tr_account_combo.setStyleSheet(_INPUT_STYLE)
-        acc_row.addWidget(tr_account_combo)
-
-        chk_multi_account = QCheckBox("J'ai plusieurs comptes (répartition auto)")
-        chk_multi_account.setChecked(True)
-        chk_multi_account.setStyleSheet("color: #94a3b8;")
-        acc_row.addWidget(chk_multi_account)
-        acc_row.addStretch()
-        s2v.addLayout(acc_row)
-
-        btn_row2 = QHBoxLayout()
-        btn_export = QPushButton("🔄  Étape 2 — Exporter depuis Trade Republic")
-        btn_export.setStyleSheet(_BTN_STYLE)
-        btn_export.setEnabled(False)   # activé après login réussi
-        btn_row2.addWidget(btn_export)
-
-        btn_import_csv = QPushButton("📂  Importer un CSV existant")
-        btn_import_csv.setStyleSheet(_BTN_STYLE)
-        btn_row2.addWidget(btn_import_csv)
-        btn_row2.addStretch()
-        s2v.addLayout(btn_row2)
-
-        layout.addWidget(step2_grp)
-
-        # ── Configuration Multi-Comptes (masqué par défaut) ──────────────────
-        multi_acc_grp = QGroupBox("Configuration des actifs détectés (Multi-Comptes)")
-        multi_acc_grp.setStyleSheet(_GROUP_STYLE)
-        multi_v = QVBoxLayout(multi_acc_grp)
-        
-        multi_acc_scroll = QScrollArea()
-        multi_acc_scroll.setWidgetResizable(True)
-        multi_acc_scroll.setMaximumHeight(200)
-        multi_acc_scroll.setStyleSheet("QScrollArea { border: none; background: #0a0e16; }")
-        multi_item_widget = QWidget()
-        multi_item_widget.setStyleSheet("background: #0a0e16;")
-        multi_item_layout = QVBoxLayout(multi_item_widget)
-        multi_item_layout.setSpacing(4)
-        multi_item_layout.setContentsMargins(4, 4, 4, 4)
-        multi_acc_scroll.setWidget(multi_item_widget)
-        multi_v.addWidget(multi_acc_scroll)
-        
-        btn_apply_mapping = QPushButton("🔄 Générer l'aperçu avec cette configuration")
-        btn_apply_mapping.setStyleSheet(_BTN_STYLE)
-        multi_v.addWidget(btn_apply_mapping)
-        multi_acc_grp.hide()
-        layout.addWidget(multi_acc_grp)
-
-        # ── Aperçu + import ──────────────────────────────────────────────────
-        prev_grp = QGroupBox("Aperçu des transactions à importer")
-        prev_grp.setStyleSheet(_GROUP_STYLE)
-        prev_v = QVBoxLayout(prev_grp)
-
-        preview_table = QTableWidget(0, 8)
-        preview_table.setHorizontalHeaderLabels(
-            ["Date", "Compte", "Type", "Titre", "Ticker", "Qté", "Prix", "Montant (€)"]
-        )
-        preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        preview_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        preview_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        preview_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        preview_table.setStyleSheet(
-            "QTableWidget { background: #0a0e16; color: #e2e8f0; border: 1px solid #1e2538; "
-            "gridline-color: #1e2538; font-size: 12px; }"
-            "QHeaderView::section { background: #1a1f2e; color: #94a3b8; border: none; padding: 4px; }"
-        )
-        preview_table.setMinimumHeight(180)
-        prev_v.addWidget(preview_table)
-
-        summary_lbl = QLabel()
-        summary_lbl.setStyleSheet("color: #94a3b8; font-size: 12px;")
-        prev_v.addWidget(summary_lbl)
-
-        btn_confirm = QPushButton("✅  Confirmer et importer en base")
-        btn_confirm.setStyleSheet(_BTN_STYLE)
-        btn_confirm.setEnabled(False)
-        prev_v.addWidget(btn_confirm)
-
-        result_lbl = QLabel()
-        result_lbl.setWordWrap(True)
-        result_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
-        prev_v.addWidget(result_lbl)
-
-        layout.addWidget(prev_grp)
-        layout.addStretch()
-
-        # ── Références sur le widget ──────────────────────────────────────────
-        w._tr_phone_edit = tr_phone_edit
-        w._tr_account_combo = tr_account_combo
-        w._pending_filepath = None
-        w._pytr_proc = None      # PytrProcess en cours (login)
-        w._poll_timer = None     # QTimer de polling
-        w._ticker_map = {}
-        w._combo_by_ticker = {}
-
-        # ── Helpers ──────────────────────────────────────────────────────────
-
-        def _log(msg: str, color: str = "#94a3b8") -> None:
-            from services.tr_import import strip_ansi
-            clean = strip_ansi(msg).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            log_edit.append(f'<span style="color:{color}">{clean}</span>')
-
-        def _get_person_id() -> int | None:
-            person = self._person_combo.currentText()
-            row = self._conn.execute(
-                "SELECT id FROM people WHERE name = ?", (person,)
-            ).fetchone()
-            if not row:
-                return None
-            return int(row[0] if not hasattr(row, "keys") else row["id"])
-
-        def _save_phone() -> None:
-            pid = _get_person_id()
-            if not pid:
-                _log("Personne introuvable.", "#ef4444")
-                return
-            phone = tr_phone_edit.text().strip()
-            if not phone:
-                _log("Numéro vide.", "#ef4444")
-                return
-            try:
-                from services.tr_import import save_tr_phone
-                save_tr_phone(self._conn, pid, phone)
-                _log(f"✔ Téléphone sauvegardé : {phone}", "#22c55e")
-            except Exception as e:
-                _log(f"Erreur sauvegarde : {e}", "#ef4444")
-
-        # ── Étape 1 : login interactif ────────────────────────────────────────
-
-        def _do_login() -> None:
-            phone = tr_phone_edit.text().strip()
-            pin = tr_pin_edit.text().strip()
-            if not phone:
-                _log("Saisissez le numéro de téléphone.", "#ef4444")
-                return
-            if not pin:
-                _log("Saisissez le code PIN.", "#ef4444")
-                return
-
-            btn_login.setEnabled(False)
-            btn_export.setEnabled(False)
-            code_frame.hide()
-            log_edit.clear()
-
-            _log(f"Connexion à Trade Republic… (Web Login)", "#60a5fa")
-
-            pytr_args = ["login", "-n", phone, "-p", pin, "--store_credentials"]
-
-            from services.tr_import import PytrProcess
-            proc = PytrProcess(pytr_args)
-            proc.start()
-            w._pytr_proc = proc
-
-            timer = QTimer()
-            w._poll_timer = timer
-
-            def _poll() -> None:
-                if w._pytr_proc is None:
-                    timer.stop()
-                    return
-
-                # Lecture de toutes les lignes disponibles
-                while True:
-                    line = proc.next_line(timeout=0.0)
-                    if line is None:
-                        # Fin du processus
-                        timer.stop()
-                        code_frame.hide()
-                        rc = proc.returncode if proc.returncode is not None else -1
-                        if rc == 0:
-                            _log("✅ Connexion réussie ! Vous pouvez maintenant exporter.", "#22c55e")
-                            btn_export.setEnabled(True)
-                        else:
-                            _log(f"⛔  Connexion échouée (code {rc}).", "#ef4444")
-                            # Aide contextuelle selon l'erreur
-                            recent = log_edit.toPlainText().lower()
-                            if "expecting value" in recent:
-                                # Credentials périmés → suppression automatique + retry
-                                from services.tr_import import clear_pytr_credentials, pytr_has_credentials
-                                if pytr_has_credentials():
-                                    _log("", "#f59e0b")
-                                    _log("🔄 Credentials périmés détectés — suppression et nouvelle tentative automatique…", "#f59e0b")
-                                    clear_pytr_credentials()
-                                    btn_login.setEnabled(True)
-                                    w._pytr_proc = None
-                                    _do_login()
-                                    return
-                                else:
-                                    _log("", "#ef4444")
-                                    _log("💡 Cause : réponse vide de l'API Trade Republic (protection anti-bots).", "#f59e0b")
-                                    _log("👉 Vérifiez depuis votre navigateur si TR demande un Captcha manuel.", "#f59e0b")
-                            elif "invalid" in recent or "wrong" in recent or "incorrect" in recent:
-                                _log("💡 PIN ou numéro de téléphone incorrect.", "#f59e0b")
-                            elif "too many" in recent or "rate" in recent or "429" in recent:
-                                _log("💡 Trop de tentatives. Attendez quelques minutes.", "#f59e0b")
-                        btn_login.setEnabled(True)
-                        w._pytr_proc = None
-                        return
-                    if line == "":
-                        # Pas de nouvelle ligne pour l'instant
-                        break
-
-                    # Affichage dans le log (ANSI déjà strippé dans _log)
-                    _log(line)
-
-                    lower = line.lower()
-
-                    # Plus de reset device car l'App Login n'est plus utilisé
-                    # ── Détection de demande de code ─────────────────────────
-                    # Web login : "Enter the code you received to your mobile app"
-                    # App login : "You should have received a SMS with a token. Please type it in:"
-                    # App login : "SMS requested. Enter the confirmation code:"
-                    if (
-                        ("enter" in lower and ("code" in lower or "token" in lower))
-                        or "code:" in lower
-                        or "4-character" in lower
-                        or "sms" in lower and "code" in lower
-                        or "confirmation code" in lower
-                        or "token" in lower and ("type" in lower or "enter" in lower)
-                        or "notification" in lower and "enter" in lower
-                    ):
-                        code_frame.show()
-                        code_edit.setFocus()
-                        _log("⬆️  Saisissez le code reçu (app TR ou SMS) puis cliquez ✅ Valider.", "#f59e0b")
-
-            timer.timeout.connect(_poll)
-            timer.start(150)   # polling toutes les 150 ms
-
-        def _send_code() -> None:
-            code = code_edit.text().strip()
-            if not code or w._pytr_proc is None:
-                return
-            w._pytr_proc.send_input(code)
-            _log(f"✔ Code envoyé : {code}", "#f59e0b")
-            code_edit.clear()
-            code_frame.hide()
-
-        # ── Étape 2 : export ─────────────────────────────────────────────────
-
-        def _do_export() -> None:
-            account_id = tr_account_combo.currentData()
-            if not account_id:
-                _log("Aucun compte sélectionné.", "#ef4444")
-                return
-
-            btn_export.setEnabled(False)
-            _log("Export des transactions en cours…", "#60a5fa")
-
-            output_dir = os.path.join(tempfile.gettempdir(), "tr_export")
-
-            class _ExportThread(QThread):
-                done = pyqtSignal(int, str)
-
-                def __init__(self, out_dir):
-                    super().__init__()
-                    self._out = out_dir
-
-                def run(self):
-                    from services.tr_import import run_pytr_export
-                    rc, msg = run_pytr_export(self._out)
-                    self.done.emit(rc, msg)
-
-            thread = _ExportThread(output_dir)
-            w._export_thread = thread
-
-            def _on_export_done(rc: int, msg: str) -> None:
-                w._export_thread = None
-                btn_export.setEnabled(True)
-                if msg:
-                    for line in msg.splitlines():
-                        _log(line)
-                if rc == 0:
-                    _log("✅ Export terminé.", "#22c55e")
-                    from services.tr_import import find_tr_csv
-                    csv_path = find_tr_csv(output_dir)
-                    if csv_path:
-                        _log(f"CSV : {csv_path}", "#94a3b8")
-                        _run_preview(csv_path)
-                    else:
-                        _log("CSV introuvable.", "#ef4444")
-                else:
-                    _log(f"Erreur export (code {rc}).", "#ef4444")
-
-            thread.done.connect(_on_export_done)
-            thread.start()
-
-        # ── Preview (thread pour ne pas bloquer l'UI pendant la résolution ISIN) ──
-
-        class _PredictionThread(QThread):
-            done = pyqtSignal(list)
-            error = pyqtSignal(str)
-
-            def __init__(self, filepath, pid):
-                super().__init__()
-                self._filepath = filepath
-                self._pid = pid
-
-            def run(self):
-                try:
-                    from services.db import get_conn
-                    from services.tr_import import extract_tr_tickers_with_predictions
-                    with get_conn() as local_conn:
-                        results = extract_tr_tickers_with_predictions(local_conn, self._filepath, self._pid)
-                    self.done.emit(results)
-                except Exception as e:
-                    self.error.emit(str(e))
-
-        class _PreviewThread(QThread):
-            """Lance import_tr_transactions(dry_run=True) dans un thread séparé.
-            La résolution ISIN→ticker fait des appels API qui peuvent prendre
-            quelques secondes — on ne bloque pas l'UI pendant ce temps."""
-            done = pyqtSignal(object)   # résultat dict ou Exception
-            error = pyqtSignal(str)
-
-            def __init__(self, filepath, pid, acc_id, ticker_map):
-                super().__init__()
-                self._filepath = filepath
-                self._pid = pid
-                self._acc_id = acc_id
-                self._ticker_map = ticker_map
-
-            def run(self):
-                try:
-                    from services.db import get_conn
-                    from services.tr_import import import_tr_transactions
-                    with get_conn() as local_conn:
-                        result = import_tr_transactions(
-                            local_conn, self._filepath, self._pid, self._acc_id, 
-                            dry_run=True, ticker_account_map=self._ticker_map
-                        )
-                    self.done.emit(result)
-                except Exception as e:
-                    self.error.emit(str(e))
-
-        def _execute_preview(filepath: str) -> None:
-            account_id = tr_account_combo.currentData()
-            pid = _get_person_id()
-            thread = _PreviewThread(filepath, pid, account_id, w._ticker_map)
-            w._preview_thread = thread  # garder une référence
-
-            def _on_preview_done(result) -> None:
-                w._preview_thread = None
-                btn_export.setEnabled(True)
-                btn_import_csv.setEnabled(True)
-                btn_apply_mapping.setEnabled(True)
-                w._pending_filepath = filepath
-                preview_table.setRowCount(0)
-
-                acc_labels = {tr_account_combo.itemData(i): tr_account_combo.itemText(i) 
-                              for i in range(tr_account_combo.count())}
-
-                for r in result.get("preview", []):
-                    ri = preview_table.rowCount()
-                    preview_table.insertRow(ri)
-                    eff_acc = r.get("effective_account_id", account_id)
-                    acc_text = acc_labels.get(eff_acc, str(eff_acc))
-                    
-                    vals = [
-                        r.get("date", ""),
-                        acc_text,
-                        r.get("type", ""),
-                        r.get("title", ""),
-                        r.get("symbol", r.get("isin", "")),
-                        str(r.get("shares") or ""),
-                        str(r.get("price") or ""),
-                        f"{r.get('amount', 0):.2f}",
-                    ]
-                    for ci, v in enumerate(vals):
-                        item = QTableWidgetItem(v)
-                        if r.get("duplicate"):
-                            item.setForeground(QColor("#64748b"))
-                        if ci == 4 and r.get("isin"):
-                            item.setToolTip(f"ISIN : {r.get('isin', '')}")
-                        preview_table.setItem(ri, ci, item)
-
-                n_ins = result.get("to_insert", 0)
-                n_dup = result.get("duplicates", 0)
-                n_skip = result.get("skipped", 0)
-                n_resolved = result.get("resolved_tickers", 0)
-                unresolved = result.get("unresolved_isins", [])
-
-                summary_parts = [
-                    f"{n_ins} à importer",
-                    f"{n_dup} doublons ignorés",
-                    f"{n_skip} lignes invalides",
-                    f"{n_resolved} tickers résolus",
-                ]
-                if unresolved:
-                    summary_parts.append(f"{len(unresolved)} ISIN(s) non résolus")
-                summary_lbl.setText("  •  ".join(summary_parts))
-
-                if unresolved:
-                    _log(
-                        f"⚠️  {len(unresolved)} ISIN(s) sans ticker : "
-                        + ", ".join(unresolved[:5])
-                        + (" …" if len(unresolved) > 5 else ""),
-                        "#f59e0b",
-                    )
-
-                btn_confirm.setEnabled(n_ins > 0)
-                result_lbl.setText("")
-
-            def _on_preview_error(msg: str) -> None:
-                w._preview_thread = None
-                btn_export.setEnabled(True)
-                btn_import_csv.setEnabled(True)
-                btn_apply_mapping.setEnabled(True)
-                summary_lbl.setText("")
-                _log(f"Erreur lecture CSV : {msg}", "#ef4444")
-
-            thread.done.connect(_on_preview_done)
-            thread.error.connect(_on_preview_error)
-            thread.start()
-
-        def _apply_mapping_and_preview():
-            btn_apply_mapping.setEnabled(False)
-            w._ticker_map = {}
-            for sym, combo in w._combo_by_ticker.items():
-                w._ticker_map[sym] = combo.currentData()
-            _execute_preview(w._pending_filepath)
-            
-        btn_apply_mapping.clicked.connect(_apply_mapping_and_preview)
-
-        def _run_preview(filepath: str) -> None:
-            account_id = tr_account_combo.currentData()
-            if not account_id:
-                _log("Aucun compte sélectionné.", "#ef4444")
-                return
-
-            pid = _get_person_id()
-            if not pid:
-                _log("Personne introuvable.", "#ef4444")
-                return
-
-            btn_confirm.setEnabled(False)
-            btn_export.setEnabled(False)
-            btn_import_csv.setEnabled(False)
-            btn_apply_mapping.setEnabled(False)
-            summary_lbl.setText("⏳  Analyse en cours…")
-            preview_table.setRowCount(0)
-            result_lbl.setText("")
-            w._pending_filepath = filepath
-
-            if chk_multi_account.isChecked():
-                multi_acc_grp.show()
-                pred_thread = _PredictionThread(filepath, pid)
-                w._prediction_thread = pred_thread
-                def _on_pred_done(results):
-                    w._prediction_thread = None
-                    while multi_item_layout.count():
-                        c = multi_item_layout.takeAt(0)
-                        if c.widget(): c.widget().deleteLater()
-                    w._combo_by_ticker.clear()
-                    
-                    if not results:
-                        lbl = QLabel("Aucun ticker trouvé dans l'export.")
-                        lbl.setStyleSheet("color: #94a3b8; font-size: 12px;")
-                        multi_item_layout.addWidget(lbl)
-                    else:
-                        for rx in results:
-                            sym = rx["symbol"]
-                            pred_acc = rx["predicted_account_id"]
-                            row_w = QWidget()
-                            row_w.setStyleSheet("background: transparent;")
-                            rl = QHBoxLayout(row_w)
-                            rl.setContentsMargins(0, 0, 0, 0)
-                            name_lbl = QLabel(f"[{sym}] {rx['title'][:30]}")
-                            name_lbl.setStyleSheet("color: #e2e8f0; font-size: 12px;")
-                            name_lbl.setMinimumWidth(180)
-                            rl.addWidget(name_lbl)
-                            
-                            cbo = QComboBox()
-                            cbo.setStyleSheet(_INPUT_STYLE)
-                            for i in range(tr_account_combo.count()):
-                                cbo.addItem(tr_account_combo.itemText(i), tr_account_combo.itemData(i))
-                            if pred_acc:
-                                idx = cbo.findData(pred_acc)
-                                if idx >= 0:
-                                    cbo.setCurrentIndex(idx)
-                            w._combo_by_ticker[sym] = cbo
-                            rl.addWidget(cbo)
-                            rl.addStretch()
-                            multi_item_layout.addWidget(row_w)
-                            
-                    _apply_mapping_and_preview()
-                
-                def _on_pred_error(err):
-                    w._prediction_thread = None
-                    _log(f"Erreur prédiction multi-compte : {err}", "#ef4444")
-                    _execute_preview(filepath)
-                    
-                pred_thread.done.connect(_on_pred_done)
-                pred_thread.error.connect(_on_pred_error)
-                pred_thread.start()
-            else:
-                multi_acc_grp.hide()
-                w._ticker_map = {}
-                _execute_preview(filepath)
-
-        def _pick_csv() -> None:
-            path, _ = QFileDialog.getOpenFileName(
-                inner, "Choisir un CSV Trade Republic", "", "CSV (*.csv)"
-            )
-            if path:
-                _log(f"CSV sélectionné : {path}", "#94a3b8")
-                _run_preview(path)
-
-        def _confirm_import() -> None:
-            filepath = w._pending_filepath
-            account_id = tr_account_combo.currentData()
-            account_label = tr_account_combo.currentText()
-            pid = _get_person_id()
-            person = self._person_combo.currentText()
-            if not filepath or not account_id or not pid:
-                return
-            try:
-                from services.tr_import import import_tr_transactions
-                from services.import_history import create_batch, close_batch
-                import os
-                batch_id = create_batch(
-                    self._conn,
-                    import_type="TR",
-                    person_id=pid,
-                    person_name=person,
-                    account_id=account_id,
-                    account_name=account_label,
-                    filename=os.path.basename(filepath),
-                )
-                result = import_tr_transactions(
-                    self._conn, filepath, pid, account_id,
-                    dry_run=False, ticker_account_map=w._ticker_map,
-                    import_batch_id=batch_id,
-                )
-                n = result["to_insert"]
-                close_batch(self._conn, batch_id, n)
-                result_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
-                result_lbl.setText(f"Import OK ✅ — {n} transactions enregistrées.")
-                btn_confirm.setEnabled(False)
-                _log(f"✅ {n} transactions importées (batch #{batch_id}).", "#22c55e")
-                self._refresh_history()
-            except Exception as e:
-                result_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
-                result_lbl.setText(f"Erreur : {e}")
-
-        # ── Mise à jour pytr ─────────────────────────────────────────────────
-        def _do_update_pytr() -> None:
-            btn_update_pytr.setEnabled(False)
-            _log("📦  pip install --upgrade pytr en cours…", "#60a5fa")
-
-            class _UpgradeThread(QThread):
-                done = pyqtSignal(int, str)
-                def run(self):
-                    import subprocess, sys, shutil
-                    # Chercher pip dans le même Python que pytr
-                    from services.tr_import import _find_pytr_cmd
-                    pytr_cmd = _find_pytr_cmd()
-                    py = pytr_cmd[0] if pytr_cmd[0] != "-m" else sys.executable
-                    pip = shutil.which("pip") or shutil.which("pip3")
-                    cmds = [[py, "-m", "pip", "install", "--upgrade", "pytr"]]
-                    if pip:
-                        cmds.append([pip, "install", "--upgrade", "pytr"])
-                    for cmd in cmds:
-                        try:
-                            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-                            if r.returncode == 0:
-                                self.done.emit(0, (r.stdout or r.stderr or "").strip())
-                                return
-                        except Exception as e:
-                            pass
-                    self.done.emit(1, "Échec mise à jour. Lancez manuellement : pip install --upgrade pytr")
-
-            t = _UpgradeThread()
-            w._upgrade_thread = t
-
-            def _on_upgrade(rc, msg):
-                w._upgrade_thread = None
-                btn_update_pytr.setEnabled(True)
-                from services.tr_import import strip_ansi
-                for line in strip_ansi(msg).splitlines()[-5:]:  # Dernières 5 lignes
-                    if line.strip():
-                        _log(line, "#22c55e" if rc == 0 else "#ef4444")
-                if rc == 0:
-                    _log("✅  pytr mis à jour. Relancez la connexion.", "#22c55e")
-                else:
-                    _log("❌  Mise à jour échouée. Voir les logs ci-dessus.", "#ef4444")
-
-            t.done.connect(_on_upgrade)
-            t.start()
-
-        # ── Reset credentials ─────────────────────────────────────────────────
-        def _do_reset_creds() -> None:
-            from services.tr_import import clear_pytr_credentials, get_pytr_credentials_path
-            cred_path = get_pytr_credentials_path()
-            if clear_pytr_credentials():
-                _log(f"✔ Credentials supprimés ({cred_path}).", "#22c55e")
-                _log("Relancez maintenant la connexion (Étape 1).", "#94a3b8")
-            else:
-                _log("ℹ️ Aucun credentials stocké localement.", "#94a3b8")
-
-        # ── Connexions signaux ────────────────────────────────────────────────
-        btn_save_phone.clicked.connect(_save_phone)
-        btn_login.clicked.connect(_do_login)
-        btn_send_code.clicked.connect(_send_code)
-        code_edit.returnPressed.connect(_send_code)
-        btn_export.clicked.connect(_do_export)
-        btn_import_csv.clicked.connect(_pick_csv)
-        btn_confirm.clicked.connect(_confirm_import)
-        btn_update_pytr.clicked.connect(_do_update_pytr)
-        btn_reset_creds.clicked.connect(_do_reset_creds)
-
-        # Refresh comptes quand personne change
-        w._refresh_accounts = lambda person_id: self._refresh_tr_accounts(
-            tr_account_combo, tr_phone_edit, person_id
-        )
-
-        return w
-
-    def _refresh_tr_accounts(
-        self, combo: QComboBox, phone_edit: QLineEdit, person_id: int
-    ) -> None:
-        """Recharge les comptes PEA/CTO pour la personne sélectionnée."""
-        combo.clear()
-        try:
-            df = pd.read_sql_query(
-                """SELECT id, name, account_type FROM accounts
-                   WHERE person_id = ? AND account_type IN ('PEA', 'CTO')
-                   ORDER BY account_type, name""",
-                self._conn,
-                params=[person_id],
-            )
-            for _, r in df.iterrows():
-                combo.addItem(f"{r['name']} ({r['account_type']})", int(r["id"]))
-
-            # Charger le téléphone sauvegardé
-            from services.tr_import import get_tr_phone
-            phone = get_tr_phone(self._conn, person_id)
-            if phone:
-                phone_edit.setText(phone)
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    # Panel Historique des imports (AM-19)
+    # Panel Historique des imports
     # ------------------------------------------------------------------
 
     _HISTORY_COLS = ["#", "Type", "Personne", "Compte / Fichier", "Date", "Lignes", "Statut", "Action"]
@@ -1099,20 +130,22 @@ class ImportPage(QScrollArea):
         v = QVBoxLayout(grp)
         v.setSpacing(8)
 
-        # Barre d'outils
         toolbar = QHBoxLayout()
         btn_refresh = QPushButton("🔄  Rafraîchir")
         btn_refresh.setStyleSheet(_BTN_STYLE)
         btn_refresh.setFixedWidth(130)
-        btn_refresh.clicked.connect(self._refresh_history)
+        btn_refresh.clicked.connect(lambda: self._refresh_history(force=True))
         toolbar.addWidget(btn_refresh)
         toolbar.addStretch()
         note = QLabel("🗑️ Annuler supprime les transactions / lignes du batch de la base de données.")
-        note.setStyleSheet("color: #64748b; font-size: 11px;")
+        note.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
         toolbar.addWidget(note)
         v.addLayout(toolbar)
 
-        # Tableau
+        self._history_status = QLabel("Prêt.")
+        self._history_status.setStyleSheet(STYLE_STATUS)
+        v.addWidget(self._history_status)
+
         tbl = QTableWidget(0, len(self._HISTORY_COLS))
         tbl.setHorizontalHeaderLabels(self._HISTORY_COLS)
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -1124,25 +157,51 @@ class ImportPage(QScrollArea):
         tbl.setMinimumHeight(160)
         tbl.setMaximumHeight(280)
         tbl.setStyleSheet(
-            "QTableWidget { background: #0a0e16; color: #e2e8f0; border: 1px solid #1e2538; "
-            "gridline-color: #1e2538; font-size: 12px; }"
-            "QHeaderView::section { background: #1a1f2e; color: #94a3b8; border: none; padding: 4px; }"
+            f"QTableWidget {{ background: {BG_PRIMARY}; color: {TEXT_PRIMARY}; border: 1px solid {BORDER_SUBTLE}; "
+            f"gridline-color: {BORDER_SUBTLE}; font-size: 12px; }}"
+            f"QHeaderView::section {{ background: {BG_CARD}; color: {TEXT_SECONDARY}; border: none; padding: 4px; }}"
         )
         v.addWidget(tbl)
 
         self._history_table = tbl
         return grp
 
-    def _refresh_history(self) -> None:
+    @staticmethod
+    def _is_cache_fresh(last_ts: float, ttl_sec: float) -> bool:
+        if last_ts <= 0:
+            return False
+        return (time.monotonic() - last_ts) <= ttl_sec
+
+    def _refresh_history(self, *, force: bool = False) -> None:
         """Recharge le tableau historique depuis la DB."""
+        if not force and self._is_cache_fresh(self._last_history_refresh_ts, self._history_cache_ttl_sec):
+            return
+        self._history_status.setStyleSheet(STYLE_STATUS)
+        self._history_status.setText("⏳ Chargement de l'historique...")
         try:
             from services.import_history import list_batches
             batches = list_batches(self._conn, limit=50)
-        except Exception:
+        except Exception as e:
+            self._history_status.setStyleSheet(STYLE_STATUS_ERROR)
+            self._history_status.setText(f"❌ Erreur de chargement : {e}")
             return
 
         tbl = self._history_table
         tbl.setRowCount(0)
+        if not batches:
+            tbl.insertRow(0)
+            tbl.setItem(0, 0, QTableWidgetItem("—"))
+            tbl.setItem(0, 1, QTableWidgetItem("📥"))
+            tbl.setItem(0, 2, QTableWidgetItem("—"))
+            tbl.setItem(0, 3, QTableWidgetItem("—"))
+            tbl.setItem(0, 4, QTableWidgetItem("—"))
+            tbl.setItem(0, 5, QTableWidgetItem("0"))
+            tbl.setItem(0, 6, QTableWidgetItem("⚠️ Aucun import"))
+            tbl.setItem(0, 7, QTableWidgetItem("—"))
+            self._history_status.setStyleSheet(STYLE_STATUS_WARNING)
+            self._history_status.setText("⚠️ Aucun import enregistré.")
+            self._last_history_refresh_ts = time.monotonic()
+            return
 
         for b in batches:
             ri = tbl.rowCount()
@@ -1153,31 +212,23 @@ class ImportPage(QScrollArea):
             status = b["status"]
             rolled_back = (status == "ROLLED_BACK")
 
-            # Colonne 0 — id
             tbl.setItem(ri, 0, QTableWidgetItem(str(b["id"])))
-            # Colonne 1 — type
             tbl.setItem(ri, 1, QTableWidgetItem(f"{icon} {itype}"))
-            # Colonne 2 — personne
             tbl.setItem(ri, 2, QTableWidgetItem(b["person_name"] or "—"))
-            # Colonne 3 — compte / fichier
             detail = b["account_name"] or b["filename"] or "—"
             tbl.setItem(ri, 3, QTableWidgetItem(detail))
-            # Colonne 4 — date
             dt = (b["imported_at"] or "")[:16].replace("T", " ")
             tbl.setItem(ri, 4, QTableWidgetItem(dt))
-            # Colonne 5 — nb lignes
             nb_lbl = f"{b['nb_rows']} ({b['alive_rows']} en base)"
             tbl.setItem(ri, 5, QTableWidgetItem(nb_lbl))
-            # Colonne 6 — statut
             status_text = "✅ Actif" if not rolled_back else "🗑️ Annulé"
             status_item = QTableWidgetItem(status_text)
-            status_item.setForeground(QColor("#22c55e" if not rolled_back else "#64748b"))
+            status_item.setForeground(QColor(COLOR_SUCCESS if not rolled_back else TEXT_MUTED))
             tbl.setItem(ri, 6, status_item)
 
-            # Colonne 7 — bouton Annuler (seulement si actif, lignes présentes, et type annulable)
             if not rolled_back and itype == "CREDIT":
                 lbl = QTableWidgetItem("⚠️ Manuel")
-                lbl.setForeground(QColor("#f59e0b"))
+                lbl.setForeground(QColor(COLOR_WARNING))
                 lbl.setToolTip("Les crédits ne peuvent pas être annulés automatiquement.\nSupprimez le crédit manuellement depuis la page Crédits.")
                 tbl.setItem(ri, 7, lbl)
             elif not rolled_back and b["alive_rows"] > 0:
@@ -1194,12 +245,14 @@ class ImportPage(QScrollArea):
             else:
                 tbl.setItem(ri, 7, QTableWidgetItem("—"))
 
-            # Griser la ligne si annulée
             if rolled_back:
                 for col in range(tbl.columnCount()):
                     item = tbl.item(ri, col)
                     if item:
-                        item.setForeground(QColor("#475569"))
+                        item.setForeground(QColor(TEXT_DISABLED))
+        self._history_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        self._history_status.setText(f"✅ Historique chargé ({len(batches)} batch(s)).")
+        self._last_history_refresh_ts = time.monotonic()
 
     def _rollback_batch(self, batch_id: int, nb_rows: int) -> None:
         """Demande confirmation puis annule le batch."""
@@ -1222,24 +275,28 @@ class ImportPage(QScrollArea):
                 "Annulation réussie",
                 f"✅ Batch #{batch_id} annulé — {total} ligne(s) supprimée(s).",
             )
-            self._refresh_history()
+            self._refresh_history(force=True)
         except Exception as e:
             QMessageBox.critical(self, "Erreur", f"Impossible d'annuler le batch :\n{e}")
+
+    # ------------------------------------------------------------------
+    # Panel Crédit
+    # ------------------------------------------------------------------
 
     def _build_credit_panel(self) -> QWidget:
         w = QScrollArea()
         w.setWidgetResizable(True)
-        w.setStyleSheet("QScrollArea { border: none; background: #0e1117; }")
+        w.setStyleSheet(f"QScrollArea {{ border: none; background: {BG_PRIMARY}; }}")
 
         inner = QWidget()
-        inner.setStyleSheet("background: #0e1117;")
+        inner.setStyleSheet(f"background: {BG_PRIMARY};")
         layout = QVBoxLayout(inner)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
         w.setWidget(inner)
 
         cap = QLabel("Tu renseignes la fiche crédit ici. L'amortissement est généré automatiquement (avec gestion du différé).")
-        cap.setStyleSheet("color: #64748b; font-size: 11px;")
+        cap.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
         layout.addWidget(cap)
 
         # Sélection compte crédit
@@ -1406,29 +463,52 @@ class ImportPage(QScrollArea):
 
         self._credit_result = QLabel()
         self._credit_result.setWordWrap(True)
-        self._credit_result.setStyleSheet("color: #22c55e; font-size: 12px;")
+        self._credit_result.setStyleSheet(STYLE_STATUS)
         layout.addWidget(self._credit_result)
         layout.addStretch()
 
         btn_save.clicked.connect(self._on_save_credit)
-        self._person_combo_ref = None  # will be set in refresh
+        self._person_combo_ref = None
 
         return w
 
+    # ------------------------------------------------------------------
+    # Méthodes de page
+    # ------------------------------------------------------------------
+
     def refresh(self) -> None:
         """Rafraîchit les listes de personnes et comptes."""
-        self._refresh_people()
+        self._refresh_people(force=False)
 
-    def _refresh_people(self) -> None:
+    def _refresh_people(self, *, force: bool = False) -> None:
+        if not force and self._is_cache_fresh(self._last_people_refresh_ts, self._people_cache_ttl_sec):
+            self._refresh_history(force=False)
+            return
+
+        selected_name = self._person_combo.currentText()
         try:
             from services import repositories as repo
             people = repo.list_people(self._conn)
+            self._people_cache_df = people
+            self._person_id_by_name = {}
+            if people is not None and not people.empty:
+                self._person_id_by_name = {
+                    str(r["name"]): int(r["id"])
+                    for _, r in people.iterrows()
+                }
+            self._last_people_refresh_ts = time.monotonic()
+            self._accounts_cache_by_person.clear()
+
             self._person_combo.blockSignals(True)
             self._person_combo.clear()
             if people is not None and not people.empty:
                 self._person_combo.addItems(people["name"].tolist())
+                idx = self._person_combo.findText(selected_name)
+                if idx >= 0:
+                    self._person_combo.setCurrentIndex(idx)
             self._person_combo.blockSignals(False)
         except Exception:
+            self._person_combo.clear()
             self._person_combo.addItems(["Papa", "Maman", "Maxime", "Valentin"])
 
         # BUG-03 FIX: ne connecter le signal qu'une seule fois
@@ -1436,39 +516,73 @@ class ImportPage(QScrollArea):
             self._person_combo.currentIndexChanged.connect(self._on_person_changed)
             self._person_signal_connected = True
         self._on_person_changed()
-        self._refresh_history()
+        self._refresh_history(force=False)
 
-    def _on_person_changed(self) -> None:
+    def _on_person_changed(self, *_args) -> None:
         person = self._person_combo.currentText()
         try:
-            row = self._conn.execute("SELECT id FROM people WHERE name = ?", (person,)).fetchone()
-            if not row:
+            person_id = self._person_id_by_name.get(person)
+            if person_id is None:
+                person_id = lookup.get_person_id_by_name(
+                    self._conn,
+                    person,
+                    people_df=self._people_cache_df,
+                )
+            if person_id is None:
                 return
-            person_id = int(row[0] if not hasattr(row, '__getitem__') else row["id"])
+            now = time.monotonic()
+            cached = self._accounts_cache_by_person.get(int(person_id))
+            if cached and (now - cached[0]) <= self._accounts_cache_ttl_sec:
+                accounts_df = cached[1]
+            else:
+                from services import repositories as repo
+                accounts_df = repo.list_accounts(self._conn, person_id=int(person_id))
+                self._accounts_cache_by_person[int(person_id)] = (now, accounts_df)
+
+            tr_accounts = lookup.list_accounts_by_types(
+                self._conn,
+                int(person_id),
+                ["PEA", "CTO"],
+                accounts_df=accounts_df,
+            )
 
             # Refresh TR accounts
             if hasattr(self._panel_tr, "_refresh_accounts"):
-                self._panel_tr._refresh_accounts(person_id)
+                from services.tr_import import get_tr_phone
+                self._panel_tr._refresh_accounts(person_id, accounts=tr_accounts, phone=get_tr_phone(self._conn, int(person_id)))
 
             # Comptes crédit
-            df_credit = pd.read_sql_query(
-                "SELECT id, name FROM accounts WHERE person_id = ? AND account_type = 'CREDIT' ORDER BY name",
-                self._conn, params=[person_id]
+            credit_accounts = lookup.list_accounts_by_types(
+                self._conn,
+                int(person_id),
+                ["CREDIT"],
+                accounts_df=accounts_df,
             )
             self._credit_account_combo.clear()
-            if not df_credit.empty:
-                for _, r in df_credit.iterrows():
-                    self._credit_account_combo.addItem(f"{r['name']} (id={r['id']})", int(r["id"]))
+            if credit_accounts:
+                for acc in credit_accounts:
+                    self._credit_account_combo.addItem(f"{acc['name']} (id={acc['id']})", int(acc["id"]))
+            else:
+                self._credit_account_combo.addItem("Aucun compte CREDIT disponible", None)
+                self._credit_result.setStyleSheet(STYLE_STATUS_WARNING)
+                self._credit_result.setText("⚠️ Aucun compte crédit pour cette personne.")
 
             # Comptes banque
-            df_banque = pd.read_sql_query(
-                "SELECT id, name FROM accounts WHERE person_id = ? AND account_type = 'BANQUE' ORDER BY name",
-                self._conn, params=[person_id]
+            banque_accounts = lookup.list_accounts_by_types(
+                self._conn,
+                int(person_id),
+                ["BANQUE"],
+                accounts_df=accounts_df,
             )
             self._payer_account_combo.clear()
-            if not df_banque.empty:
-                for _, r in df_banque.iterrows():
-                    self._payer_account_combo.addItem(f"{r['name']} (id={r['id']})", int(r["id"]))
+            if banque_accounts:
+                for acc in banque_accounts:
+                    self._payer_account_combo.addItem(f"{acc['name']} (id={acc['id']})", int(acc["id"]))
+            else:
+                self._payer_account_combo.addItem("Aucun compte BANQUE disponible", None)
+                if self._credit_account_combo.currentData() is not None:
+                    self._credit_result.setStyleSheet(STYLE_STATUS_WARNING)
+                    self._credit_result.setText("⚠️ Aucun compte banque payeur pour cette personne.")
         except Exception:
             pass
 
@@ -1478,17 +592,16 @@ class ImportPage(QScrollArea):
     def _on_save_credit(self) -> None:
         person = self._person_combo.currentText()
         try:
-            row = self._conn.execute("SELECT id FROM people WHERE name = ?", (person,)).fetchone()
-            if not row:
-                self._credit_result.setStyleSheet("color: #ef4444; font-size: 12px;")
-                self._credit_result.setText("Personne introuvable.")
+            person_id = lookup.get_person_id_by_name(self._conn, person)
+            if person_id is None:
+                self._credit_result.setStyleSheet(STYLE_STATUS_ERROR)
+                self._credit_result.setText("❌ Personne introuvable.")
                 return
-            person_id = int(row[0] if not hasattr(row, '__getitem__') else row["id"])
 
             account_id = self._credit_account_combo.currentData()
             if account_id is None:
-                self._credit_result.setStyleSheet("color: #ef4444; font-size: 12px;")
-                self._credit_result.setText("Sélectionnez un compte crédit.")
+                self._credit_result.setStyleSheet(STYLE_STATUS_ERROR)
+                self._credit_result.setText("❌ Sélectionnez un compte crédit.")
                 return
             payer_account_id = self._payer_account_combo.currentData()
             date_debut = self._c_date_debut.date().toString("yyyy-MM-dd")
@@ -1540,9 +653,9 @@ class ImportPage(QScrollArea):
             n = replace_amortissement(self._conn, credit_id, rows)
             close_batch(self._conn, batch_id, n)
 
-            self._credit_result.setStyleSheet("color: #22c55e; font-size: 12px;")
-            self._credit_result.setText(f"Crédit enregistré ✅ | Amortissement généré ✅ ({n} lignes)")
+            self._credit_result.setStyleSheet(STYLE_STATUS_SUCCESS)
+            self._credit_result.setText(f"✅ Crédit enregistré — amortissement généré ({n} lignes).")
 
         except Exception as e:
-            self._credit_result.setStyleSheet("color: #ef4444; font-size: 12px;")
-            self._credit_result.setText(f"Erreur : {e}")
+            self._credit_result.setStyleSheet(STYLE_STATUS_ERROR)
+            self._credit_result.setText(f"❌ Erreur : {e}")

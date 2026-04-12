@@ -5,6 +5,27 @@ from .prevision_models import PrevisionBase
 
 logger = logging.getLogger(__name__)
 
+
+def _get_fire_annual_expenses(conn, scope_type: str, scope_id) -> float:
+    """
+    Retourne les dépenses annuelles moyennes (base de calcul FIRE)
+    à partir du cashflow des 12 derniers mois disponibles.
+    """
+    try:
+        from services.cashflow import get_cashflow_for_scope
+        df_cf = get_cashflow_for_scope(conn, scope_type, scope_id)
+        if df_cf is None or df_cf.empty:
+            return 0.0
+        last_12 = df_cf.tail(12)
+        if "expenses" not in last_12.columns:
+            return 0.0
+        avg_monthly = float(last_12["expenses"].mean())
+        return avg_monthly * 12.0
+    except Exception as exc:
+        logger.warning("Impossible de calculer fire_annual_expenses pour %s=%s : %s",
+                       scope_type, scope_id, exc)
+        return 0.0
+
 def _get_aggregated_debts_schedule(conn, person_ids: List[int], horizon_years: int = 30) -> pd.Series:
     """
     Agrège les restes à vivre (CRD) de tous les crédits actifs pour une liste de personnes.
@@ -50,7 +71,7 @@ def _get_aggregated_debts_schedule(conn, person_ids: List[int], horizon_years: i
             
     return total_crd
 
-def build_prevision_base_for_scope(conn, scope_type: str, scope_id: int) -> PrevisionBase:
+def build_prevision_base_for_scope(conn, scope_type: str, scope_id) -> PrevisionBase:
     """
     Construit la base patrimoniale de départ pour une projection,
     en respectant strictement les sources de vérité existantes (SSOT).
@@ -99,8 +120,9 @@ def build_prevision_base_for_scope(conn, scope_type: str, scope_id: int) -> Prev
     elif scope_type_lower == "family":
         from services.family_dashboard import get_family_series, compute_allocations_family, compute_family_kpis
         from services.cashflow import compute_savings_metrics
-        
-        df_family = get_family_series(conn, family_id=scope_id)
+
+        family_id = int(scope_id) if scope_id is not None else 1
+        df_family = get_family_series(conn, family_id=family_id)
         if df_family is not None and not df_family.empty:
             kpis = compute_family_kpis(df_family)
             allocs = compute_allocations_family(df_family)
@@ -118,7 +140,7 @@ def build_prevision_base_for_scope(conn, scope_type: str, scope_id: int) -> Prev
             # et le computed savings metric ne marche bien que pour 'person'.
             # On utilise le cashflow_for_scope générique.
             from services.cashflow import get_cashflow_for_scope
-            df_cf = get_cashflow_for_scope(conn, "family", scope_id)
+            df_cf = get_cashflow_for_scope(conn, "family", family_id)
             if df_cf is not None and not df_cf.empty:
                 last_12 = df_cf.tail(12)
                 base_kwargs["current_savings_per_year"] = float(last_12["savings"].mean() * 12) if not last_12.empty else 0.0
@@ -137,6 +159,26 @@ def build_prevision_base_for_scope(conn, scope_type: str, scope_id: int) -> Prev
     # Champs non supportés en V1
     warnings.append("Crypto n'est pas encore directement géré par une agrégation SSOT, forcé à 0.0")
     warnings.append("Revenus passifs totaux non réconciliés SSOT pour base prevision, forcé à 0.0")
+
+    # Dépenses annuelles pour le calcul FIRE
+    base_kwargs["fire_annual_expenses"] = _get_fire_annual_expenses(
+        conn, scope_type_lower, scope_id
+    )
+
+    # Si l'échéancier de dette est vide / tout à 0 alors que le snapshot indique
+    # un crédit > 0, on repasse en fallback "dette fixe" côté engine (debts_schedule=None)
+    # pour préserver la cohérence au mois 0 (net simulé = net snapshot).
+    schedule = base_kwargs.get("debts_schedule")
+    current_credits = float(base_kwargs.get("current_credits") or 0.0)
+    if isinstance(schedule, pd.Series):
+        schedule_num = pd.to_numeric(schedule, errors="coerce").fillna(0.0)
+        if current_credits > 0.0 and (schedule_num.empty or float(schedule_num.abs().max()) == 0.0):
+            base_kwargs["debts_schedule"] = None
+            warnings.append(
+                "Échéancier de dette indisponible : fallback sur current_credits fixe pour cohérence du net."
+            )
+        else:
+            base_kwargs["debts_schedule"] = schedule_num
 
     # Écriture
     base = PrevisionBase(

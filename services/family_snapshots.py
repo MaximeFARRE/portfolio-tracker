@@ -1,3 +1,16 @@
+"""
+services/family_snapshots.py
+
+Source canonique (SSOT) des données brutes du patrimoine famille.
+
+Ce module est le seul autorisé à :
+- lire et écrire dans `patrimoine_snapshots_family_weekly`,
+- agréger les snapshots hebdomadaires par personne pour construire la série famille,
+- rebuilder la série famille depuis les snapshots individuels.
+
+Frontière : ce module NE contient PAS de KPI dérivés, de métriques de performance
+ou de logique de présentation. Ces responsabilités appartiennent à `family_dashboard.py`.
+"""
 from __future__ import annotations
 import pandas as pd
 from datetime import datetime
@@ -15,14 +28,18 @@ FAMILY_WEEKLY_COLUMNS = [
     "credits_remaining",
 ]
 
+# _now_paris_iso existe aussi dans snapshots.py — on l'importe pour éviter la duplication.
+from services.snapshots import _now_paris_iso
 
-def _now_paris_iso() -> str:
-    tz = pytz.timezone("Europe/Paris")
-    return datetime.now(tz).replace(microsecond=0).isoformat()
 
 
 def list_family_weekly_snapshots(conn, family_id: int = 1) -> pd.DataFrame:
-    return pd.read_sql_query(
+    _COLS = [
+        "week_date", "created_at", "mode",
+        "patrimoine_net", "patrimoine_brut", "liquidites_total",
+        "bourse_holdings", "pe_value", "ent_value", "immobilier_value", "credits_remaining",
+    ]
+    rows = conn.execute(
         """
         SELECT week_date, created_at, mode,
                patrimoine_net, patrimoine_brut, liquidites_total,
@@ -31,9 +48,9 @@ def list_family_weekly_snapshots(conn, family_id: int = 1) -> pd.DataFrame:
         WHERE family_id = ?
         ORDER BY week_date ASC
         """,
-        conn,
-        params=(int(family_id),),
-    )
+        (int(family_id),),
+    ).fetchall()
+    return pd.DataFrame(rows, columns=_COLS) if rows else pd.DataFrame(columns=_COLS)
 
 
 def _normalize_family_weekly_series(df: pd.DataFrame) -> pd.DataFrame:
@@ -67,8 +84,10 @@ def get_family_weekly_series(conn, family_id: int = 1, fallback_person_ids: list
     if not fallback_person_ids:
         return df_family
 
+    _AGG_COLS = ["week_date", "patrimoine_net", "patrimoine_brut", "liquidites_total",
+                 "bourse_holdings", "pe_value", "ent_value", "immobilier_value", "credits_remaining"]
     q = ",".join(["?"] * len(fallback_person_ids))
-    df_people = pd.read_sql_query(
+    rows = conn.execute(
         f"""
         SELECT week_date,
                SUM(patrimoine_net) AS patrimoine_net,
@@ -84,10 +103,39 @@ def get_family_weekly_series(conn, family_id: int = 1, fallback_person_ids: list
         GROUP BY week_date
         ORDER BY week_date ASC
         """,
-        conn,
-        params=tuple([int(x) for x in fallback_person_ids]),
-    )
+        tuple([int(x) for x in fallback_person_ids]),
+    ).fetchall()
+    df_people = pd.DataFrame(rows, columns=_AGG_COLS) if rows else pd.DataFrame(columns=_AGG_COLS)
     return _normalize_family_weekly_series(df_people)
+
+
+def _aggregate_person_snapshots_by_week(conn, person_ids: list[int]) -> pd.DataFrame:
+    """
+    Agrège les snapshots hebdomadaires de plusieurs personnes par semaine (SUM).
+    Helper interne mutualisé — évite la répétition de cette requête SQL dans chaque rebuild famille.
+    """
+    _AGG_COLS = ["week_date", "patrimoine_net", "patrimoine_brut", "liquidites_total",
+                 "bourse_holdings", "pe_value", "ent_value", "immobilier_value", "credits_remaining"]
+    q = ",".join(["?"] * len(person_ids))
+    rows = conn.execute(
+        f"""
+        SELECT week_date,
+               SUM(patrimoine_net)      AS patrimoine_net,
+               SUM(patrimoine_brut)     AS patrimoine_brut,
+               SUM(liquidites_total)    AS liquidites_total,
+               SUM(bourse_holdings)     AS bourse_holdings,
+               SUM(pe_value)            AS pe_value,
+               SUM(ent_value)           AS ent_value,
+               SUM(immobilier_value)    AS immobilier_value,
+               SUM(credits_remaining)   AS credits_remaining
+        FROM patrimoine_snapshots_weekly
+        WHERE person_id IN ({q})
+        GROUP BY week_date
+        ORDER BY week_date ASC
+        """,
+        tuple([int(x) for x in person_ids]),
+    ).fetchall()
+    return pd.DataFrame(rows, columns=_AGG_COLS) if rows else pd.DataFrame(columns=_AGG_COLS)
 
 
 def upsert_family_snapshot(conn, family_id: int, week_date: str, mode: str, payload: dict) -> None:
@@ -141,27 +189,9 @@ def rebuild_family_weekly(conn, person_ids: list[int], lookback_days: int = 90, 
     for pid in person_ids:
         wk_snap.rebuild_snapshots_person(conn, person_id=int(pid), lookback_days=int(lookback_days))
 
-    # 2) agrégation
-    q = ",".join(["?"] * len(person_ids))
-    df = pd.read_sql_query(
-        f"""
-        SELECT week_date,
-               SUM(patrimoine_net) AS patrimoine_net,
-               SUM(patrimoine_brut) AS patrimoine_brut,
-               SUM(liquidites_total) AS liquidites_total,
-               SUM(bourse_holdings) AS bourse_holdings,
-               SUM(pe_value) AS pe_value,
-               SUM(ent_value) AS ent_value,
-               SUM(immobilier_value) AS immobilier_value,
-               SUM(credits_remaining) AS credits_remaining
-        FROM patrimoine_snapshots_weekly
-        WHERE person_id IN ({q})
-        GROUP BY week_date
-        ORDER BY week_date ASC
-        """,
-        conn,
-        params=tuple([int(x) for x in person_ids]),
-    )
+    # 2) agrégation via le helper mutualisé
+    df = _aggregate_person_snapshots_by_week(conn, person_ids)
+
 
     if df.empty:
         return {"did_run": False, "reason": "no_weekly_person_snapshots"}
@@ -191,27 +221,9 @@ def rebuild_family_weekly_missing_only(conn, person_ids: list[int], lookback_day
     for pid in person_ids:
         wk_snap.rebuild_snapshots_person_missing_only(conn, person_id=int(pid), lookback_days=int(lookback_days), recalc_days=int(recalc_days))
 
-    # 2) agrégation (identique à ton rebuild_family_weekly)
-    q = ",".join(["?"] * len(person_ids))
-    df = pd.read_sql_query(
-        f"""
-        SELECT week_date,
-               SUM(patrimoine_net) AS patrimoine_net,
-               SUM(patrimoine_brut) AS patrimoine_brut,
-               SUM(liquidites_total) AS liquidites_total,
-               SUM(bourse_holdings) AS bourse_holdings,
-               SUM(pe_value) AS pe_value,
-               SUM(ent_value) AS ent_value,
-               SUM(immobilier_value) AS immobilier_value,
-               SUM(credits_remaining) AS credits_remaining
-        FROM patrimoine_snapshots_weekly
-        WHERE person_id IN ({q})
-        GROUP BY week_date
-        ORDER BY week_date ASC
-        """,
-        conn,
-        params=tuple([int(x) for x in person_ids]),
-    )
+    # 2) agrégation via le helper mutualisé
+    df = _aggregate_person_snapshots_by_week(conn, person_ids)
+
 
     if df.empty:
         return {"did_run": False, "reason": "no_weekly_person_snapshots"}
@@ -252,27 +264,9 @@ def rebuild_family_weekly_from_last(
             fallback_lookback_days=int(fallback_lookback_days),
         )
 
-    # 2) agrégation (identique à rebuild_family_weekly)
-    q = ",".join(["?"] * len(person_ids))
-    df = pd.read_sql_query(
-        f"""
-        SELECT week_date,
-               SUM(patrimoine_net) AS patrimoine_net,
-               SUM(patrimoine_brut) AS patrimoine_brut,
-               SUM(liquidites_total) AS liquidites_total,
-               SUM(bourse_holdings) AS bourse_holdings,
-               SUM(pe_value) AS pe_value,
-               SUM(ent_value) AS ent_value,
-               SUM(immobilier_value) AS immobilier_value,
-               SUM(credits_remaining) AS credits_remaining
-        FROM patrimoine_snapshots_weekly
-        WHERE person_id IN ({q})
-        GROUP BY week_date
-        ORDER BY week_date ASC
-        """,
-        conn,
-        params=tuple([int(x) for x in person_ids]),
-    )
+    # 2) agrégation via le helper mutualisé
+    df = _aggregate_person_snapshots_by_week(conn, person_ids)
+
 
     if df.empty:
         return {"did_run": False, "reason": "no_weekly_person_snapshots"}
@@ -317,27 +311,9 @@ def rebuild_family_weekly_backdated_aware(
             )
         )
 
-    # agrégation famille (comme tes autres rebuild)
-    q = ",".join(["?"] * len(person_ids))
-    df = pd.read_sql_query(
-        f"""
-        SELECT week_date,
-               SUM(patrimoine_net) AS patrimoine_net,
-               SUM(patrimoine_brut) AS patrimoine_brut,
-               SUM(liquidites_total) AS liquidites_total,
-               SUM(bourse_holdings) AS bourse_holdings,
-               SUM(pe_value) AS pe_value,
-               SUM(ent_value) AS ent_value,
-               SUM(immobilier_value) AS immobilier_value,
-               SUM(credits_remaining) AS credits_remaining
-        FROM patrimoine_snapshots_weekly
-        WHERE person_id IN ({q})
-        GROUP BY week_date
-        ORDER BY week_date ASC
-        """,
-        conn,
-        params=tuple([int(x) for x in person_ids]),
-    )
+    # agrégation famille via le helper mutualisé
+    df = _aggregate_person_snapshots_by_week(conn, person_ids)
+
 
     if df.empty:
         return {"did_run": False, "reason": "no_weekly_person_snapshots", "people": res_people}

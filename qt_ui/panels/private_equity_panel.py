@@ -31,6 +31,23 @@ def _form_label(text: str) -> QLabel:
     return lbl
 
 
+def _finite_float(v) -> float | None:
+    if v is None:
+        return None
+    try:
+        f = float(v)
+        return None if pd.isna(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_eur(v) -> str:
+    f = _finite_float(v)
+    if f is None:
+        return "—"
+    return f"{f:,.2f} €".replace(",", " ")
+
+
 class PrivateEquityPanel(QWidget):
     def __init__(self, conn, person_id: int, parent=None):
         super().__init__(parent)
@@ -275,8 +292,8 @@ class PrivateEquityPanel(QWidget):
                     "Info": "Aucun projet PE. Créez-en un dans l'onglet ➕ Saisie."
                 }]))
                 self._table_tx.set_dataframe(pd.DataFrame())
-                self._kpi_value.set_content("Valeur PE totale", "0,00 €")
-                self._kpi_invested.set_content("Investi total", "0,00 €")
+                self._kpi_value.set_content("Valeur PE totale", "—")
+                self._kpi_invested.set_content("Investi total", "—")
                 self._kpi_pnl.set_content("PnL latent", "—")
                 return
 
@@ -289,41 +306,42 @@ class PrivateEquityPanel(QWidget):
                     self._table_projects.set_dataframe(positions)
                     kpis = pe.compute_pe_kpis(positions)
 
-                    total_val  = float(kpis.get("value", 0))
-                    total_inv  = float(kpis.get("invested", 0))
-                    pnl        = float(kpis.get("pnl", 0))
+                    total_val  = _finite_float(kpis.get("value"))
+                    total_inv  = _finite_float(kpis.get("invested"))
+                    pnl        = _finite_float(kpis.get("pnl"))
                     moic       = kpis.get("moic")
-                    cash_out   = float(kpis.get("cash_out", 0))
-                    fees       = float(kpis.get("fees", 0))
+                    cash_out   = _finite_float(kpis.get("cash_out"))
+                    fees       = _finite_float(kpis.get("fees"))
                     n_total    = int(kpis.get("n_total", 0))
                     n_en_cours = int(kpis.get("n_en_cours", 0))
                     n_sortis   = int(kpis.get("n_sortis", 0))
                     n_faillite = int(kpis.get("n_faillite", 0))
-                    success    = kpis.get("success_rate")
-                    avg_days   = kpis.get("avg_holding_days")
+                    success    = _finite_float(kpis.get("success_rate"))
+                    avg_days   = _finite_float(kpis.get("avg_holding_days"))
 
                     # Ligne 1
                     self._kpi_value.set_content(
-                        "Valeur PE totale", f"{total_val:,.2f} €".replace(",", " ")
+                        "Valeur PE totale", _fmt_eur(total_val)
                     )
                     self._kpi_invested.set_content(
-                        "Investi total", f"{total_inv:,.2f} €".replace(",", " ")
+                        "Investi total", _fmt_eur(total_inv)
                     )
                     self._kpi_pnl.set_content(
-                        "PnL latent", f"{pnl:+,.2f} €".replace(",", " "),
-                        delta=f"{pnl:+.2f}", delta_positive=pnl >= 0,
+                        "PnL latent", "—" if pnl is None else f"{pnl:+,.2f} €".replace(",", " "),
+                        delta="" if pnl is None else f"{pnl:+.2f}",
+                        delta_positive=True if pnl is None else pnl >= 0,
                     )
                     self._kpi_moic.set_content(
                         "MOIC global",
-                        f"{moic:.2f}x" if moic is not None else "—",
+                        f"{moic:.2f}x" if _finite_float(moic) is not None else "—",
                     )
 
                     # Ligne 2
                     self._kpi_cash_out.set_content(
-                        "Distributions reçues", f"{cash_out:,.2f} €".replace(",", " ")
+                        "Distributions reçues", _fmt_eur(cash_out)
                     )
                     self._kpi_fees.set_content(
-                        "Frais totaux", f"{fees:,.2f} €".replace(",", " ")
+                        "Frais totaux", _fmt_eur(fees)
                     )
                     proj_label = (
                         f"{n_en_cours} en cours"
