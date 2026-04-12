@@ -1,3 +1,14 @@
+"""
+services/family_dashboard.py
+
+KPI dérivés et préparation de données pour le dashboard famille.
+
+Ce module consomme `family_snapshots.get_family_weekly_series` comme source de données
+et produit des agrégations, métriques et payloads prêts pour l'UI.
+
+Frontière : ce module NE lit PAS directement la base de données pour la série famille.
+Toute donnée brute patrimoine famille passe par `family_snapshots.py` (SSOT).
+"""
 from __future__ import annotations
 
 import logging
@@ -272,6 +283,28 @@ def compute_leaderboards(conn, people: pd.DataFrame, person_ids: List[int], comm
         "top_perf_12m": perf12[:3],
         "top_expo_bourse": expo.head(3),
     }
+
+
+def get_people_without_snapshot(people: pd.DataFrame, df_people: pd.DataFrame) -> list:
+    """
+    Retourne la liste des noms de personnes absentes de df_people faute de snapshot.
+
+    Paramètres
+    ----------
+    people    : DataFrame complet des personnes (colonne ``name``).
+    df_people : DataFrame résultat de ``compute_people_table`` (colonne ``Personne``).
+
+    Retourne une liste triée de noms, vide si tous les snapshots sont présents.
+    """
+    if people is None or people.empty:
+        return []
+    all_names = {str(n) for n in people["name"].tolist()}
+    present_names = (
+        {str(n) for n in df_people["Personne"].tolist()}
+        if df_people is not None and not df_people.empty
+        else set()
+    )
+    return sorted(all_names - present_names)
 
 
 def compute_family_debug(conn, people: pd.DataFrame, common_week: Optional[pd.Timestamp]) -> pd.DataFrame:

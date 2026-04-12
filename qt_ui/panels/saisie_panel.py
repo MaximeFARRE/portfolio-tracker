@@ -48,10 +48,12 @@ def _auto_symbol(name: str, conn) -> str:
     Génère un symbole unique à partir du nom pour les actifs non cotés.
     Ex : "SCPI Primovie" → "SCPI_PRIMOVIE", ou "SCPI_PRIMOVIE_1" si déjà pris.
     """
+    from services import panel_data_access as pda
+
     base = re.sub(r"[^A-Z0-9]", "_", name.upper())
     base = re.sub(r"_+", "_", base).strip("_")[:20] or "ACTIF"
     sym, counter = base, 1
-    while conn.execute("SELECT id FROM assets WHERE symbol = ?", (sym,)).fetchone():
+    while pda.asset_symbol_exists(conn, sym):
         sym = f"{base[:17]}_{counter}"
         counter += 1
     return sym
@@ -309,10 +311,12 @@ class SaisiePanel(QWidget):
             self._new_symbol_hint.setVisible(False)
 
     def _on_asset_selected(self) -> None:
+        from services import panel_data_access as pda
+
         aid = self._asset_combo.currentData()
         self._asset_id = aid
         if aid:
-            row = self._conn.execute("SELECT symbol, name FROM assets WHERE id = ?", (aid,)).fetchone()
+            row = pda.get_asset_symbol_name(self._conn, aid)
             if row:
                 sym = row[0] if not hasattr(row, '__getitem__') else row["symbol"]
                 name = row[1] if not hasattr(row, '__getitem__') else row["name"]
@@ -408,9 +412,8 @@ class SaisiePanel(QWidget):
                 atype_effectif = new_atype
                 if atype_effectif is None:
                     # Actif existant — on vérifie son type en base
-                    row = self._conn.execute(
-                        "SELECT asset_type FROM assets WHERE id = ?", (asset_id,)
-                    ).fetchone()
+                    from services import panel_data_access as pda
+                    row = pda.get_asset_type(self._conn, asset_id)
                     atype_effectif = row["asset_type"] if row else ""
                 if atype_effectif in _ASSET_TYPES_NON_COTES:
                     try:

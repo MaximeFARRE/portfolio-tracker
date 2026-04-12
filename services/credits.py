@@ -55,14 +55,12 @@ def upsert_credit(conn, data: Dict[str, Any]) -> int:
 
 
 def get_credit_by_account(conn, account_id: int) -> Optional[dict]:
-    df = pd.read_sql_query(
-        "SELECT * FROM credits WHERE account_id = ?",
-        conn,
-        params=(int(account_id),),
-    )
-    if df.empty:
+    cursor = conn.execute("SELECT * FROM credits WHERE account_id = ?", (int(account_id),))
+    cols = [d[0] for d in cursor.description]
+    rows = cursor.fetchall()
+    if not rows:
         return None
-    return df.iloc[0].to_dict()
+    return dict(zip(cols, rows[0]))
 
 
 def list_credits_by_person(conn, person_id: int, only_active: bool = True) -> pd.DataFrame:
@@ -71,7 +69,10 @@ def list_credits_by_person(conn, person_id: int, only_active: bool = True) -> pd
     if only_active:
         q += " AND actif = 1"
     q += " ORDER BY id DESC"
-    return pd.read_sql_query(q, conn, params=params)
+    cursor = conn.execute(q, params)
+    cols = [d[0] for d in cursor.description]
+    rows = cursor.fetchall()
+    return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
 
 # ---------------------------
@@ -128,16 +129,17 @@ def replace_amortissement(conn, credit_id: int, rows: List[Dict[str, Any]]) -> i
 
 
 def get_amortissements(conn, credit_id: int) -> pd.DataFrame:
-    return pd.read_sql_query(
+    _COLS = ["date_echeance", "mensualite", "capital_amorti", "interets", "assurance", "crd", "annee", "mois"]
+    rows = conn.execute(
         """
         SELECT date_echeance, mensualite, capital_amorti, interets, assurance, crd, annee, mois
         FROM credit_amortissements
         WHERE credit_id = ?
         ORDER BY date_echeance
         """,
-        conn,
-        params=[int(credit_id)]
-    )
+        (int(credit_id),),
+    ).fetchall()
+    return pd.DataFrame(rows, columns=_COLS) if rows else pd.DataFrame(columns=_COLS)
 
 
 # ---------------------------
@@ -313,7 +315,8 @@ def build_amortissement(params: CreditParams) -> List[Dict[str, Any]]:
             mensualite = float(mensualite_calc) + assurance_mois
             interets = crd * r_m
             principal_part = float(mensualite_calc) - interets
-            capital_amorti = max(principal_part, 0.0)
+            # Empêche d'amortir plus que le capital restant (Bug 9)
+            capital_amorti = max(min(principal_part, crd), 0.0)
             crd = max(crd - capital_amorti, 0.0)
 
         rows.append({
@@ -337,18 +340,18 @@ def get_crd_a_date(conn, credit_id: int, date_ref: str) -> float:
     Prend la dernière échéance <= date_ref.
     Si rien trouvé, fallback sur le premier CRD.
     """
-    df = pd.read_sql_query(
+    rows = conn.execute(
         """
         SELECT date_echeance, crd
         FROM credit_amortissements
         WHERE credit_id = ?
         ORDER BY date_echeance
         """,
-        conn,
-        params=[int(credit_id)],
-    )
-    if df.empty:
+        (int(credit_id),),
+    ).fetchall()
+    if not rows:
         return 0.0
+    df = pd.DataFrame(rows, columns=["date_echeance", "crd"])
 
     df["date_echeance"] = pd.to_datetime(df["date_echeance"], errors="coerce")
     df["crd"] = pd.to_numeric(df["crd"], errors="coerce").fillna(0.0)
@@ -431,16 +434,16 @@ def get_credit_dates(conn, credit_id: int) -> dict:
       - date_debut_remboursement: première échéance où capital_amorti > 0
       - date_fin: dernière échéance du tableau
     """
-    df = pd.read_sql_query(
+    rows = conn.execute(
         """
         SELECT date_echeance, capital_amorti
         FROM credit_amortissements
         WHERE credit_id = ?
         ORDER BY date_echeance
         """,
-        conn,
-        params=[int(credit_id)],
-    )
+        (int(credit_id),),
+    ).fetchall()
+    df = pd.DataFrame(rows, columns=["date_echeance", "capital_amorti"]) if rows else pd.DataFrame(columns=["date_echeance", "capital_amorti"])
 
     if df.empty:
         return {

@@ -19,7 +19,7 @@ from PyQt6.QtCore import QDate, Qt
 
 from qt_ui.widgets import PlotlyView, DataTableWidget, MetricLabel
 from qt_ui.theme import (
-    BG_PRIMARY, STYLE_BTN_PRIMARY_BORDERED, STYLE_BTN_SUCCESS,
+    BG_PRIMARY, ACCENT_BLUE, STYLE_BTN_PRIMARY_BORDERED, STYLE_BTN_SUCCESS,
     STYLE_INPUT_FOCUS, STYLE_FORM_LABEL, STYLE_GROUP, STYLE_SECTION,
     STYLE_TITLE, STYLE_STATUS, STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR,
     STYLE_TAB_INNER, STYLE_SCROLLAREA, STYLE_PROGRESS,
@@ -503,7 +503,7 @@ class CreditsOverviewPanel(QWidget):
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(
                     x=df_total["date"], y=df_total["crd_total"],
-                    mode="lines", name="CRD total", line=dict(color="#60a5fa"),
+                    mode="lines", name="CRD total", line=dict(color=ACCENT_BLUE),
                 ))
                 fig.add_trace(go.Scatter(
                     x=[pd.to_datetime(today)], y=[total_crd],
@@ -541,12 +541,12 @@ class CreditsOverviewPanel(QWidget):
     def _on_credit_selected(self, _idx: int) -> None:
         """Pré-remplit le formulaire de modification avec les valeurs du crédit sélectionné."""
         try:
+            from services import panel_data_access as pda
+
             credit_id = self._upd_combo.currentData()
             if credit_id is None:
                 return
-            row = self._conn.execute(
-                "SELECT * FROM credits WHERE id = ?;", (int(credit_id),)
-            ).fetchone()
+            row = pda.get_credit_by_id(self._conn, credit_id)
             if not row:
                 return
 
@@ -656,6 +656,7 @@ class CreditsOverviewPanel(QWidget):
     def _save_updated_credit(self) -> None:
         try:
             from services.credits import upsert_credit
+            from services import panel_data_access as pda
 
             credit_id = self._upd_combo.currentData()
             if credit_id is None:
@@ -664,9 +665,7 @@ class CreditsOverviewPanel(QWidget):
                 return
 
             # Récupérer l'account_id existant
-            row = self._conn.execute(
-                "SELECT account_id, person_id FROM credits WHERE id = ?;", (int(credit_id),)
-            ).fetchone()
+            row = pda.get_credit_account_and_person(self._conn, credit_id)
             if not row:
                 self._upd_status.setStyleSheet(STYLE_STATUS_ERROR)
                 self._upd_status.setText("❌  Crédit introuvable en base.")
@@ -717,9 +716,9 @@ class CreditsOverviewPanel(QWidget):
             from services.credits import (
                 build_amortissement, replace_amortissement, CreditParams,
             )
-            row = self._conn.execute(
-                "SELECT * FROM credits WHERE id = ?;", (int(credit_id),)
-            ).fetchone()
+            from services import panel_data_access as pda
+
+            row = pda.get_credit_by_id(self._conn, credit_id)
             if not row:
                 status_label.setStyleSheet(STYLE_STATUS_ERROR)
                 status_label.setText("❌  Crédit introuvable.")

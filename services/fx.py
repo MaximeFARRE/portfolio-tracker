@@ -72,15 +72,18 @@ def ensure_fx_rate(conn, base_ccy: str, quote_ccy: str) -> float | None:
 def convert(conn, amount: float, from_ccy: str, to_ccy: str) -> float | None:
     """
     Convertit amount de from_ccy vers to_ccy.
+    Contrat aligné sur `services.market_history.convert_weekly` :
+    - même devise => retourne le montant tel quel
+    - taux introuvable => retourne None (jamais le montant brut silencieux)
 
     Retourne None si le taux de change est introuvable, afin que l'appelant
     puisse détecter l'échec et ne pas utiliser un montant non converti.
     Les appelants qui tolèrent un fallback à 0 peuvent écrire :
         result = convert(...) or 0.0
     """
-    from_ccy = (from_ccy or "").upper()
-    to_ccy = (to_ccy or "").upper()
-    if not from_ccy or not to_ccy or from_ccy == to_ccy:
+    from_ccy = (from_ccy or "EUR").upper()
+    to_ccy = (to_ccy or "EUR").upper()
+    if from_ccy == to_ccy:
         return float(amount)
 
     rate = ensure_fx_rate(conn, from_ccy, to_ccy)

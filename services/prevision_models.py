@@ -40,6 +40,8 @@ class PrevisionConfig:
     target_goal_amount: Optional[float] = None
     inflation_rate: float = 0.02
     seed: Optional[int] = 42
+    # Multiple FIRE (dépenses annuelles × fire_multiple = cible patrimoine FIRE)
+    fire_multiple: float = 25.0
 
 @dataclass
 class PrevisionBase:
@@ -59,6 +61,8 @@ class PrevisionBase:
     # Flux annuels
     current_savings_per_year: float = 0.0
     current_passive_income_per_year: float = 0.0
+    # Dépenses annuelles (base de calcul pour la cible FIRE)
+    fire_annual_expenses: float = 0.0
     
     # Suivi et diagnostique
     metadata: Dict[str, str] = field(default_factory=dict)
@@ -117,3 +121,5 @@ class PrevisionResult:
     risk_metrics: Optional[RiskMetrics] = None
     goal_metrics: Optional[GoalMetrics] = None
     diagnostics: List[str] = field(default_factory=list)
+    # Date FIRE estimée (calculée après simulation)
+    fire_date: Optional[dict] = None

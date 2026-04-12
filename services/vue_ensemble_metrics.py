@@ -28,60 +28,7 @@ def _opt(v) -> float | None:
         return None
 
 
-_ALLOC_COLUMNS = ["Catégorie", "Valeur"]
-_CASHFLOW_COLUMNS = ["mois", "revenus", "depenses", "epargne", "taux_epargne"]
-_EPARGNE_COLUMNS = [*_CASHFLOW_COLUMNS, "mois_label"]
-
-
-def _empty_alloc_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=_ALLOC_COLUMNS)
-
-
-def _empty_cashflow_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=_CASHFLOW_COLUMNS)
-
-
-def _empty_epargne_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=_EPARGNE_COLUMNS)
-
-
-def _normalize_cashflow_for_panel(df_cashflow: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalise la série cashflow pour les usages graphiques de vue_ensemble_panel.
-    """
-    if df_cashflow is None or df_cashflow.empty:
-        logger.info("_normalize_cashflow_for_panel: série cashflow vide")
-        return _empty_cashflow_df()
-
-    df = df_cashflow.copy()
-    if "mois" not in df.columns:
-        if "mois_dt" in df.columns:
-            df["mois"] = pd.to_datetime(df["mois_dt"], errors="coerce").dt.strftime("%Y-%m-01")
-        else:
-            logger.warning(
-                "_normalize_cashflow_for_panel: colonnes 'mois' et 'mois_dt' absentes"
-            )
-            return _empty_cashflow_df()
-
-    for col in ["revenus", "depenses", "epargne"]:
-        if col not in df.columns:
-            logger.warning(
-                "_normalize_cashflow_for_panel: colonne '%s' absente, remplacée par 0",
-                col,
-            )
-            df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-
-    if "taux_epargne" not in df.columns:
-        logger.warning(
-            "_normalize_cashflow_for_panel: colonne 'taux_epargne' absente, remplacée par NaN"
-        )
-        df["taux_epargne"] = pd.NA
-    df["taux_epargne"] = pd.to_numeric(df["taux_epargne"], errors="coerce")
-
-    return df[_CASHFLOW_COLUMNS].reset_index(drop=True)
-
-
+# business metrics
 def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     """
     Calcule et retourne toutes les métriques du dashboard patrimoine.
@@ -129,6 +76,14 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     m["week_date"] = pd.Timestamp(last["week_date"]).strftime("%Y-%m-%d")
     m["asof_date"] = m["week_date"]
 
+    # ── Qualité du snapshot stocké (DQ-02) ────────────────────────────────
+    try:
+        from services.snapshots_read import get_latest_snapshot_notes
+        m["snapshot_notes"] = get_latest_snapshot_notes(conn, person_id)
+    except Exception as exc:
+        logger.warning("get_vue_ensemble_metrics: snapshot_notes indisponible : %s", exc)
+        m["snapshot_notes"] = None
+
     # ── 2. Patrimoine net historique ──────────────────────────────────────
     anchor_dt = None
     try:
@@ -167,7 +122,23 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
 
     df_cf = m.get("df_cashflow", pd.DataFrame())
     if not df_cf.empty:
-        last12 = df_cf.tail(12)
+        # Sécurise les KPI sur 12 mois calendaires complets (mois manquants = 0).
+        df_kpi = df_cf.copy()
+        df_kpi["_mois_dt"] = pd.to_datetime(df_kpi["mois"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+        df_kpi = df_kpi.dropna(subset=["_mois_dt"]).copy()
+        if not df_kpi.empty:
+            last_m = df_kpi["_mois_dt"].max()
+            idx = pd.date_range(start=last_m - pd.DateOffset(months=11), end=last_m, freq="MS")
+            last12 = (
+                df_kpi.set_index("_mois_dt")
+                .reindex(idx, fill_value=0.0)
+                .reset_index(drop=True)
+            )
+            for col in ["revenus", "depenses", "epargne"]:
+                last12[col] = pd.to_numeric(last12[col], errors="coerce").fillna(0.0)
+        else:
+            last12 = pd.DataFrame(columns=["revenus", "depenses", "epargne"])
+
         m["epargne_12m"]       = float(last12["epargne"].sum())
         m["depenses_moy_12m"]  = float(last12["depenses"].mean())
         m["capacite_epargne_avg"] = float(last12["epargne"].mean())
@@ -175,11 +146,16 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
         m["taux_epargne_avg"] = (
             (m["epargne_12m"] / rev_sum_12m * 100) if rev_sum_12m > 0 else None
         )
+        # Couverture cashflow (DQ-07): nombre de mois avec au moins revenus ou dépenses non nuls
+        m["cashflow_coverage_months_12"] = int((
+            (last12["revenus"] != 0.0) | (last12["depenses"] != 0.0)
+        ).sum())
     else:
-        m["epargne_12m"]          = None
-        m["depenses_moy_12m"]     = None
-        m["capacite_epargne_avg"] = None
-        m["taux_epargne_avg"]     = None
+        m["epargne_12m"]                   = None
+        m["depenses_moy_12m"]              = None
+        m["capacite_epargne_avg"]          = None
+        m["taux_epargne_avg"]              = None
+        m["cashflow_coverage_months_12"]   = 0
 
     # ── 4. Santé patrimoniale ─────────────────────────────────────────────
     brut = m["brut"]
@@ -240,6 +216,61 @@ def get_vue_ensemble_metrics(conn, person_id: int) -> dict:
     m["reserve_securite"] = (m["liq"] / dep_moy) if (dep_moy and dep_moy > 0) else None
 
     return m
+
+
+# presentation helpers
+_ALLOC_COLUMNS = ["Catégorie", "Valeur"]
+_CASHFLOW_COLUMNS = ["mois", "revenus", "depenses", "epargne", "taux_epargne"]
+_EPARGNE_COLUMNS = [*_CASHFLOW_COLUMNS, "mois_label"]
+
+
+def _empty_alloc_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=_ALLOC_COLUMNS)
+
+
+def _empty_cashflow_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=_CASHFLOW_COLUMNS)
+
+
+def _empty_epargne_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=_EPARGNE_COLUMNS)
+
+
+def _normalize_cashflow_for_panel(df_cashflow: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalise la série cashflow pour les usages graphiques de vue_ensemble_panel.
+    """
+    if df_cashflow is None or df_cashflow.empty:
+        logger.info("_normalize_cashflow_for_panel: série cashflow vide")
+        return _empty_cashflow_df()
+
+    df = df_cashflow.copy()
+    if "mois" not in df.columns:
+        if "mois_dt" in df.columns:
+            df["mois"] = pd.to_datetime(df["mois_dt"], errors="coerce").dt.strftime("%Y-%m-01")
+        else:
+            logger.warning(
+                "_normalize_cashflow_for_panel: colonnes 'mois' et 'mois_dt' absentes"
+            )
+            return _empty_cashflow_df()
+
+    for col in ["revenus", "depenses", "epargne"]:
+        if col not in df.columns:
+            logger.warning(
+                "_normalize_cashflow_for_panel: colonne '%s' absente, remplacée par 0",
+                col,
+            )
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    if "taux_epargne" not in df.columns:
+        logger.warning(
+            "_normalize_cashflow_for_panel: colonne 'taux_epargne' absente, remplacée par NaN"
+        )
+        df["taux_epargne"] = pd.NA
+    df["taux_epargne"] = pd.to_numeric(df["taux_epargne"], errors="coerce")
+
+    return df[_CASHFLOW_COLUMNS].reset_index(drop=True)
 
 
 def prepare_vue_ensemble_alloc_pie_data(metrics: dict) -> pd.DataFrame:

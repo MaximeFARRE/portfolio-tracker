@@ -1,6 +1,7 @@
 import io
 import pytest
-from services.imports import _to_float, _month_key_from_date, import_wide_csv_to_monthly_table
+import pandas as pd
+from services.imports import _to_float, _month_key_from_date, _parse_date_strict, import_wide_csv_to_monthly_table
 
 
 # ─── _to_float ───────────────────────────────────────────
@@ -31,6 +32,37 @@ def test_to_float_invalide():
     assert _to_float("abc") == pytest.approx(0.0)
 
 
+# ─── _parse_date_strict ─────────────────────────────────
+# Vérifie que le parsing explicite est non-ambigu et sans warning.
+
+def test_parse_date_strict_fr():
+    d = _parse_date_strict("30/09/2025")
+    assert d.year == 2025 and d.month == 9 and d.day == 30
+
+
+def test_parse_date_strict_iso():
+    d = _parse_date_strict("2025-03-15")
+    assert d.year == 2025 and d.month == 3 and d.day == 15
+
+
+def test_parse_date_strict_desambiguation_fr():
+    # "01/02/2025" doit être interprété comme jour=1 mois=2 (FR), PAS mois=1 jour=2.
+    d = _parse_date_strict("01/02/2025")
+    assert d.month == 2 and d.day == 1
+
+
+def test_parse_date_strict_inconnu():
+    assert pd.isna(_parse_date_strict("not-a-date"))
+
+
+def test_parse_date_strict_no_warning(recwarn):
+    """Aucun UserWarning ne doit être émis lors du parsing de dates FR ou ISO."""
+    _parse_date_strict("30/09/2025")
+    _parse_date_strict("2025-03-15")
+    warnings = [w for w in recwarn.list if issubclass(w.category, UserWarning)]
+    assert warnings == [], f"UserWarning inattendu : {warnings}"
+
+
 # ─── _month_key_from_date ────────────────────────────────
 
 def test_month_key_format_fr():
@@ -53,6 +85,15 @@ def test_month_key_date_invalide():
 def test_month_key_vide():
     with pytest.raises(ValueError):
         _month_key_from_date("")
+
+
+def test_month_key_no_warning(recwarn):
+    """_month_key_from_date ne doit émettre aucun UserWarning."""
+    _month_key_from_date("30/09/2025")
+    _month_key_from_date("2025-03-15")
+    _month_key_from_date("01/02/2025")
+    warnings = [w for w in recwarn.list if issubclass(w.category, UserWarning)]
+    assert warnings == [], f"UserWarning inattendu : {warnings}"
 
 
 # ─── import_wide_csv_to_monthly_table ────────────────────────────────────────

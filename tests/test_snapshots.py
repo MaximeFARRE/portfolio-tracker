@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+import sqlite3
 from utils.validators import sens_flux, sens_flux_safe
 
 
@@ -60,3 +61,48 @@ def test_solde_negatif():
     ])
     # 100 - 200 = -100
     assert solde_compte(tx) == pytest.approx(-100.0)
+
+
+def _mk_conn_for_watermark_tests():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE transactions (
+            id INTEGER PRIMARY KEY,
+            person_id INTEGER NOT NULL,
+            created_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def test_has_new_transactions_since_person_watermark_false_when_no_tx():
+    from services.snapshots_rebuild import has_new_transactions_since_person_watermark
+    conn = _mk_conn_for_watermark_tests()
+    assert has_new_transactions_since_person_watermark(conn, 1) is False
+
+
+def test_has_new_transactions_since_person_watermark_true_without_watermark():
+    from services.snapshots_rebuild import has_new_transactions_since_person_watermark
+    conn = _mk_conn_for_watermark_tests()
+    conn.execute("INSERT INTO transactions(id, person_id, created_at) VALUES (1, 1, '2026-01-01T10:00:00+01:00')")
+    conn.commit()
+    assert has_new_transactions_since_person_watermark(conn, 1) is True
+
+
+def test_has_new_transactions_since_person_watermark_with_existing_watermark():
+    from services.snapshots_rebuild import (
+        has_new_transactions_since_person_watermark,
+        _set_person_watermark,
+    )
+    conn = _mk_conn_for_watermark_tests()
+    conn.execute("INSERT INTO transactions(id, person_id, created_at) VALUES (10, 1, '2026-01-01T10:00:00+01:00')")
+    conn.commit()
+    _set_person_watermark(conn, 1, 10, "2026-01-01T10:00:00+01:00")
+    assert has_new_transactions_since_person_watermark(conn, 1) is False
+
+    conn.execute("INSERT INTO transactions(id, person_id, created_at) VALUES (11, 1, '2026-01-02T10:00:00+01:00')")
+    conn.commit()
+    assert has_new_transactions_since_person_watermark(conn, 1) is True

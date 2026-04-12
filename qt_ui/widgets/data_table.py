@@ -6,7 +6,7 @@ AM-12 : FilterBar avec filtres combo / date_range / number_range
 AM-13 : Tri amélioré via PandasTableModel.sort() + indicateur visuel
 """
 import pandas as pd
-from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, pyqtSignal, QDate
+from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, pyqtSignal, QDate, QTimer
 from PyQt6.QtWidgets import (
     QTableView, QWidget, QVBoxLayout, QHBoxLayout, QAbstractItemView,
     QHeaderView, QLineEdit, QLabel, QStyledItemDelegate, QComboBox,
@@ -160,11 +160,33 @@ _STYLE_FILTER_COMBO = f"""
     QComboBox {{
         background: {BG_CARD}; color: {TEXT_SECONDARY};
         border: 1px solid {BORDER_DEFAULT}; border-radius: 4px;
-        padding: 2px 6px; font-size: 12px; min-width: 90px;
+        padding: 4px 8px; font-size: 13px; min-width: 130px;
     }}
     QComboBox:focus {{ border: 1px solid {ACCENT_BLUE}; }}
-    QComboBox QAbstractItemView {{ background: {BG_CARD}; color: white; }}
-    QComboBox::drop-down {{ border: none; }}
+    QComboBox::drop-down {{ border: none; width: 20px; }}
+    QComboBox QAbstractItemView {{
+        background: #1e2538;
+        color: #e2e8f0;
+        border: 1px solid {BORDER_DEFAULT};
+        border-radius: 4px;
+        padding: 4px;
+        min-width: 200px;
+        font-size: 13px;
+        outline: none;
+    }}
+    QComboBox QAbstractItemView::item {{
+        padding: 6px 12px;
+        min-height: 28px;
+        border-radius: 3px;
+    }}
+    QComboBox QAbstractItemView::item:hover {{
+        background: {ACCENT_BLUE};
+        color: white;
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background: {ACCENT_BLUE};
+        color: white;
+    }}
 """
 
 _STYLE_FILTER_SPIN = f"""
@@ -284,6 +306,8 @@ class FilterBar(QWidget):
                 lbl.setStyleSheet(_STYLE_FILTER_LABEL)
                 combo = QComboBox()
                 combo.setStyleSheet(_STYLE_FILTER_COMBO)
+                combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+                combo.view().setMinimumWidth(200)
                 combo.addItem("Tous")
                 combo.currentTextChanged.connect(self.filters_changed)
                 self._row1.addWidget(lbl)
@@ -455,6 +479,7 @@ class DataTableWidget(QWidget):
         super().__init__(parent)
         self._loading = False
         self._full_df: pd.DataFrame = pd.DataFrame()
+        self._search_blob: pd.Series | None = None
         self._model = PandasTableModel()
         self._view = QTableView()
         self._view.setModel(self._model)
@@ -471,7 +496,7 @@ class DataTableWidget(QWidget):
         self._search_bar = QLineEdit()
         self._search_bar.setPlaceholderText("🔍  Filtrer...")
         self._search_bar.setStyleSheet(STYLE_INPUT + " max-height: 28px;")
-        self._search_bar.textChanged.connect(self._on_filter_changed)
+        self._search_bar.textChanged.connect(self._queue_simple_filter)
         self._search_bar.setClearButtonEnabled(True)
         if searchable:
             layout.addWidget(self._search_bar)
@@ -481,6 +506,16 @@ class DataTableWidget(QWidget):
         # ── FilterBar (AM-12) — créée mais masquée jusqu'à set_filter_config() ──
         self._filter_bar: FilterBar | None = None
         self._filter_config: list[dict] = []
+        self._pending_simple_filter_text: str = ""
+        self._simple_filter_debounce = QTimer(self)
+        self._simple_filter_debounce.setSingleShot(True)
+        self._simple_filter_debounce.setInterval(120)
+        self._simple_filter_debounce.timeout.connect(self._apply_pending_simple_filter)
+
+        self._advanced_filter_debounce = QTimer(self)
+        self._advanced_filter_debounce.setSingleShot(True)
+        self._advanced_filter_debounce.setInterval(120)
+        self._advanced_filter_debounce.timeout.connect(self._on_advanced_filter_changed)
 
         # Configuration de la vue
         self._view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -527,7 +562,7 @@ class DataTableWidget(QWidget):
             # L'insérer avant la table (position 0 du layout)
             layout = self.layout()
             layout.insertWidget(0, self._filter_bar)
-            self._filter_bar.filters_changed.connect(self._on_advanced_filter_changed)
+            self._filter_bar.filters_changed.connect(self._queue_advanced_filter_changed)
 
         self._filter_bar.set_config(config)
 
@@ -549,13 +584,12 @@ class DataTableWidget(QWidget):
         if self._full_df.empty:
             return
 
-        df = self._full_df.copy()
+        df = self._full_df
 
         # Filtre texte global
         text = self._filter_bar.get_search_text()
         if text:
-            mask = df.apply(lambda row: any(text in str(v).lower() for v in row), axis=1)
-            df = df[mask]
+            df = self._apply_text_filter(df, text)
 
         # Filtres avancés
         filter_vals = self._filter_bar.get_filter_values()
@@ -614,6 +648,7 @@ class DataTableWidget(QWidget):
 
     def set_dataframe(self, df: pd.DataFrame) -> None:
         self._full_df = df if df is not None else pd.DataFrame()
+        self._invalidate_search_cache()
 
         # Si FilterBar active, repopuler les combos AVANT de réinitialiser les filtres
         if self._filter_bar is not None:
@@ -692,9 +727,53 @@ class DataTableWidget(QWidget):
             self._apply_hidden_cols()
             return
         query = text.strip().lower()
-        mask = self._full_df.apply(
-            lambda row: any(query in str(v).lower() for v in row), axis=1
-        )
-        self._model.set_dataframe(self._full_df[mask].reset_index(drop=True))
+        filtered = self._apply_text_filter(self._full_df, query)
+        self._model.set_dataframe(filtered.reset_index(drop=True))
         self._apply_delegates()
         self._apply_hidden_cols()
+
+    def _queue_simple_filter(self, text: str) -> None:
+        self._pending_simple_filter_text = text
+        self._simple_filter_debounce.start()
+
+    def _apply_pending_simple_filter(self) -> None:
+        self._on_filter_changed(self._pending_simple_filter_text)
+
+    def _queue_advanced_filter_changed(self) -> None:
+        self._advanced_filter_debounce.start()
+
+    def _invalidate_search_cache(self) -> None:
+        self._search_blob = None
+
+    def _ensure_search_blob(self) -> pd.Series:
+        if self._search_blob is not None and len(self._search_blob) == len(self._full_df):
+            return self._search_blob
+        if self._full_df.empty:
+            self._search_blob = pd.Series(dtype="object")
+            return self._search_blob
+        # Concatène chaque ligne en un texte unique réutilisable pour les recherches.
+        self._search_blob = (
+            self._full_df.fillna("")
+            .astype(str)
+            .agg(" ".join, axis=1)
+            .str.lower()
+        )
+        return self._search_blob
+
+    def _apply_text_filter(self, df: pd.DataFrame, query: str) -> pd.DataFrame:
+        if df.empty or not query:
+            return df
+        query_norm = str(query).strip().lower()
+        if not query_norm:
+            return df
+        if df is self._full_df:
+            blob = self._ensure_search_blob()
+        else:
+            blob = (
+                df.fillna("")
+                .astype(str)
+                .agg(" ".join, axis=1)
+                .str.lower()
+            )
+        mask = blob.str.contains(query_norm, regex=False, na=False)
+        return df[mask]

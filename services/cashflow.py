@@ -48,12 +48,14 @@ def get_cashflow_for_scope(
         params = (int(scope_id),)
 
     try:
-        income_df = pd.read_sql_query(income_sql.format(where_clause=where_clause), conn, params=params)
+        rows_inc = conn.execute(income_sql.format(where_clause=where_clause), params).fetchall()
+        income_df = pd.DataFrame(rows_inc, columns=["mois", "amount"]) if rows_inc else pd.DataFrame(columns=["mois", "amount"])
     except Exception:
         income_df = pd.DataFrame(columns=["mois", "amount"])
 
     try:
-        expense_df = pd.read_sql_query(expense_sql.format(where_clause=where_clause), conn, params=params)
+        rows_exp = conn.execute(expense_sql.format(where_clause=where_clause), params).fetchall()
+        expense_df = pd.DataFrame(rows_exp, columns=["mois", "amount"]) if rows_exp else pd.DataFrame(columns=["mois", "amount"])
     except Exception:
         expense_df = pd.DataFrame(columns=["mois", "amount"])
 
@@ -96,15 +98,10 @@ def get_person_monthly_savings_series(
     Colonnes retournées :
         mois, revenus, depenses, epargne, taux_epargne
     """
-    from services.revenus_repository import compute_taux_epargne_mensuel
-
+    # On utilise get_cashflow_for_scope (dans ce même module) pour éviter
+    # toute dépendance circulaire avec revenus_repository.compute_taux_epargne_mensuel.
     try:
-        df = compute_taux_epargne_mensuel(
-            conn,
-            int(person_id),
-            n_mois=int(n_mois),
-            end_month=end_month,
-        )
+        df_raw = get_cashflow_for_scope(conn, "person", int(person_id))
     except Exception as exc:
         logger.warning(
             "get_person_monthly_savings_series: échec calcul série person_id=%s : %s",
@@ -115,21 +112,57 @@ def get_person_monthly_savings_series(
             columns=["mois", "revenus", "depenses", "epargne", "taux_epargne"]
         )
 
-    if df is None or df.empty:
+    if df_raw is None or df_raw.empty:
         return pd.DataFrame(
             columns=["mois", "revenus", "depenses", "epargne", "taux_epargne"]
         )
 
-    expected = ["mois", "revenus", "depenses", "epargne", "taux_epargne"]
-    for col in expected:
-        if col not in df.columns:
-            logger.warning(
-                "get_person_monthly_savings_series: colonne '%s' absente pour person_id=%s",
-                col,
-                person_id,
-            )
-            df[col] = pd.NA
-    return df[expected].reset_index(drop=True)
+    n_mois = int(n_mois)
+    if n_mois <= 0:
+        return pd.DataFrame(
+            columns=["mois", "revenus", "depenses", "epargne", "taux_epargne"]
+        )
+
+    # Renommage des colonnes SSOT → colonnes attendues
+    df = df_raw.rename(
+        columns={"income": "revenus", "expenses": "depenses", "savings": "epargne"}
+    ).copy()
+    df["mois_dt"] = pd.to_datetime(df["mois_dt"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    df = df.dropna(subset=["mois_dt"]).copy()
+    if df.empty:
+        return pd.DataFrame(
+            columns=["mois", "revenus", "depenses", "epargne", "taux_epargne"]
+        )
+
+    # Ancre de fin: mois fourni (même si date intra-mois) sinon dernier mois observé.
+    end_anchor = pd.to_datetime(end_month, errors="coerce") if end_month else pd.NaT
+    if pd.isna(end_anchor):
+        end_anchor = df["mois_dt"].max()
+    end_anchor = pd.Timestamp(end_anchor).to_period("M").to_timestamp()
+
+    # Fenêtre calendaire explicite avec reindex + remplissage 0 sur les mois manquants.
+    df = df[df["mois_dt"] <= end_anchor].copy()
+    start_anchor = end_anchor - pd.DateOffset(months=n_mois - 1)
+    full_months = pd.date_range(start=start_anchor, end=end_anchor, freq="MS")
+    df = (
+        df.set_index("mois_dt")
+        .reindex(full_months, fill_value=0.0)
+        .rename_axis("mois_dt")
+        .reset_index()
+    )
+    for col in ["revenus", "depenses", "epargne"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    df["epargne"] = df["revenus"] - df["depenses"]
+    df["mois"] = pd.to_datetime(df["mois_dt"], errors="coerce").dt.strftime("%Y-%m-01")
+
+    # Taux d'épargne : NA si pas de revenus ce mois-là
+    df["taux_epargne"] = df.apply(
+        lambda r: round(float(r["epargne"]) / float(r["revenus"]) * 100, 1)
+        if _to_float(r["revenus"]) > 0 else pd.NA,
+        axis=1,
+    )
+
+    return df[["mois", "revenus", "depenses", "epargne", "taux_epargne"]].reset_index(drop=True)
 
 def compute_savings_metrics(conn_or_df, person_id: Optional[int] = None,
                             n_mois: int = 24) -> dict:
@@ -167,9 +200,7 @@ def compute_savings_metrics(conn_or_df, person_id: Optional[int] = None,
         logger.warning("compute_savings_metrics: person_id manquant")
         return _empty_savings_result()
 
-    from services.revenus_repository import compute_taux_epargne_mensuel
-
-    df = compute_taux_epargne_mensuel(conn, person_id, n_mois=n_mois)
+    df = get_person_monthly_savings_series(conn, person_id, n_mois=n_mois)
 
     if df is None or df.empty:
         logger.info(
@@ -191,10 +222,15 @@ def compute_savings_metrics(conn_or_df, person_id: Optional[int] = None,
             "sur les 12 derniers mois (person_id=%s)", person_id,
         )
 
-    avg_savings_12m = float(last12["epargne"].mean()) if not last12.empty else 0.0
+    months_with_data = last12[
+        (pd.to_numeric(last12["revenus"], errors="coerce").fillna(0.0) != 0.0)
+        | (pd.to_numeric(last12["depenses"], errors="coerce").fillna(0.0) != 0.0)
+    ].copy()
+    base_avg = months_with_data if not months_with_data.empty else last12
 
-    avg_income = float(last12["revenus"].mean()) if not last12.empty else 0.0
-    avg_expenses = float(last12["depenses"].mean()) if not last12.empty else 0.0
+    avg_savings_12m = float(base_avg["epargne"].mean()) if not base_avg.empty else 0.0
+    avg_income = float(base_avg["revenus"].mean()) if not base_avg.empty else 0.0
+    avg_expenses = float(base_avg["depenses"].mean()) if not base_avg.empty else 0.0
 
     # Streak de mois consécutifs avec épargne positive (depuis le plus récent)
     streak = 0
@@ -215,6 +251,7 @@ def compute_savings_metrics(conn_or_df, person_id: Optional[int] = None,
         "monthly_series": df,
         "avg_rate_12m": avg_rate_12m,
         "avg_savings_12m": avg_savings_12m,
+        "has_cashflow": not base_avg.empty,
     }
 
 
@@ -231,6 +268,7 @@ def _empty_savings_result() -> dict:
         ),
         "avg_rate_12m": 0.0,
         "avg_savings_12m": 0.0,
+        "has_cashflow": False,
     }
 
 
@@ -368,6 +406,7 @@ def _compute_savings_kpis_from_cashflow(monthly_df: pd.DataFrame) -> dict:
             "avg_monthly_savings": 0.0,
             "savings_rate_12m": 0.0,
             "positive_savings_streak": 0,
+            "has_cashflow": False,
         }
 
     with_data = monthly_df[
@@ -411,4 +450,5 @@ def _compute_savings_kpis_from_cashflow(monthly_df: pd.DataFrame) -> dict:
         "avg_monthly_savings": avg_savings,
         "savings_rate_12m": savings_rate,
         "positive_savings_streak": int(streak),
+        "has_cashflow": not with_data.empty,
     }

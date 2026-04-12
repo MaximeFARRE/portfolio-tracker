@@ -14,9 +14,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from qt_ui.theme import (
-    BG_PRIMARY, STYLE_BTN_PRIMARY, STYLE_GROUP, STYLE_SECTION,
-    STYLE_SECTION_MARGIN, STYLE_STATUS, CHART_GREEN, CHART_RED,
-    plotly_layout, plotly_time_series_layout, COLOR_SUCCESS, COLOR_WARNING, COLOR_ERROR, TEXT_MUTED,
+    BG_PRIMARY, BG_CARD, BORDER_DEFAULT, STYLE_BTN_PRIMARY, STYLE_GROUP, STYLE_SECTION,
+    STYLE_SECTION_MARGIN, STYLE_STATUS, STYLE_STATUS_SUCCESS, STYLE_STATUS_WARNING,
+    STYLE_STATUS_ERROR, CHART_GREEN, CHART_RED,
+    plotly_layout, plotly_time_series_layout,
+    COLOR_SUCCESS, COLOR_WARNING, COLOR_ERROR, TEXT_MUTED, TEXT_SECONDARY,
 )
 from qt_ui.widgets import PlotlyView, KpiCard, MetricLabel, LoadingOverlay
 from utils.format_monnaie import money
@@ -62,6 +64,17 @@ def _months_str(v) -> str:
         return "—"
 
 
+def _finite_float(v):
+    """Normalise une valeur numérique en float fini, sinon None."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+        return None if math.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
 def _tone_gain(v) -> str:
     if v is None:
         return "neutral"
@@ -100,6 +113,21 @@ def _color_for_rate(rate) -> str:
     if rate >= 0:
         return COLOR_WARNING
     return COLOR_ERROR
+
+
+def _empty_figure(msg: str = "Aucune donnée disponible") -> go.Figure:
+    """Figure Plotly vide avec un message centré — remplace un widget blank."""
+    fig = go.Figure()
+    fig.add_annotation(
+        text=msg, x=0.5, y=0.5, xref="paper", yref="paper",
+        showarrow=False, font=dict(size=13, color="#64748b"),
+    )
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+        margin=dict(l=0, r=0, t=0, b=0),
+    )
+    return fig
 
 
 # ─── Thread rebuild ────────────────────────────────────────────────────────
@@ -268,11 +296,29 @@ class VueEnsemblePanel(QWidget):
         # ── Alerte FX manquants ───────────────────────────────────────────
         self._fx_alert_label = QLabel()
         self._fx_alert_label.setStyleSheet(
-            "color: #f59e0b; background: #1c1a10; border: 1px solid #f59e0b; "
-            "border-radius: 4px; padding: 4px 8px; font-size: 12px;"
+            f"color: {COLOR_WARNING}; background: {BG_CARD}; border: 1px solid {COLOR_WARNING}; "
+            f"border-radius: 4px; padding: 4px 8px; font-size: 12px;"
         )
         self._fx_alert_label.setVisible(False)
         layout.addWidget(self._fx_alert_label)
+
+        # ── Alerte couverture épargne incomplète ──────────────────────────
+        self._coverage_alert_label = QLabel()
+        self._coverage_alert_label.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; background: {BG_CARD}; border: 1px solid {BORDER_DEFAULT}; "
+            f"border-radius: 4px; padding: 4px 8px; font-size: 12px;"
+        )
+        self._coverage_alert_label.setVisible(False)
+        layout.addWidget(self._coverage_alert_label)
+
+        # ── Alerte qualité snapshot (DQ-02) ───────────────────────────────
+        self._snapshot_quality_label = QLabel()
+        self._snapshot_quality_label.setStyleSheet(
+            f"color: {COLOR_WARNING}; background: {BG_CARD}; border: 1px solid {COLOR_WARNING}; "
+            f"border-radius: 4px; padding: 4px 8px; font-size: 12px;"
+        )
+        self._snapshot_quality_label.setVisible(False)
+        layout.addWidget(self._snapshot_quality_label)
 
         layout.addStretch()
 
@@ -297,18 +343,23 @@ class VueEnsemblePanel(QWidget):
 
     def _on_rebuild(self) -> None:
         self._btn_rebuild.setEnabled(False)
-        self._rebuild_status.setText("Rebuild en cours...")
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_WARNING)
+        self._rebuild_status.setText("⏳ Rebuild en cours…")
         self._thread = SnapshotRebuildThread(self._person_id)
         self._thread.finished.connect(self._on_rebuild_done)
-        self._thread.error.connect(
-            lambda e: self._rebuild_status.setText(f"Erreur : {e}")
-        )
+        self._thread.error.connect(self._on_rebuild_error)
         self._thread.start()
 
     def _on_rebuild_done(self, result: str) -> None:
         self._btn_rebuild.setEnabled(True)
-        self._rebuild_status.setText("Rebuild terminé ✅")
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        self._rebuild_status.setText("✅ Rebuild terminé")
         self._load_data()
+
+    def _on_rebuild_error(self, error: str) -> None:
+        self._btn_rebuild.setEnabled(True)
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_ERROR)
+        self._rebuild_status.setText(f"❌ Erreur : {error}")
 
     # ── Chargement principal ──────────────────────────────────────────────
 
@@ -331,11 +382,13 @@ class VueEnsemblePanel(QWidget):
             m = get_vue_ensemble_metrics(self._conn, self._person_id)
 
             if not m:
+                self._semaine_label.setStyleSheet(STYLE_STATUS_WARNING)
                 self._semaine_label.setText(
-                    "Aucune donnée weekly — lancez un rebuild."
+                    "⚠️  Aucune donnée weekly — lancez un rebuild."
                 )
                 return
 
+            self._semaine_label.setStyleSheet(STYLE_STATUS)
             self._semaine_label.setText(f"Données au : {m.get('week_date', '—')}")
 
             # ── Ligne 1 ───────────────────────────────────────────────────
@@ -460,9 +513,33 @@ class VueEnsemblePanel(QWidget):
             else:
                 self._fx_alert_label.setVisible(False)
 
+            # ── Alerte couverture épargne incomplète (DQ-07) ─────────────
+            # Avertir seulement si couverture partielle (1–7 mois), pas si absent (0).
+            n_covered = m.get("cashflow_coverage_months_12", 0)
+            if 0 < n_covered < 8:
+                self._coverage_alert_label.setText(
+                    f"ℹ️  Couverture épargne : {n_covered}/12 mois — "
+                    f"taux d'épargne et KPIs pilotage basés sur des données partielles."
+                )
+                self._coverage_alert_label.setVisible(True)
+            else:
+                self._coverage_alert_label.setVisible(False)
+
+            # ── Alerte qualité snapshot stocké (DQ-02) ───────────────────
+            snap_notes = m.get("snapshot_notes") or ""
+            if "partial" in snap_notes:
+                self._snapshot_quality_label.setText(
+                    f"⚠️  Snapshot partiel — données potentiellement sous-estimées ({snap_notes}). "
+                    f"Rebuild recommandé si les taux FX / prix sont maintenant disponibles."
+                )
+                self._snapshot_quality_label.setVisible(True)
+            else:
+                self._snapshot_quality_label.setVisible(False)
+
         except Exception as exc:
             logger.exception("VueEnsemblePanel._load_data error")
-            self._semaine_label.setText(f"Erreur : {exc}")
+            self._semaine_label.setStyleSheet(STYLE_STATUS_ERROR)
+            self._semaine_label.setText(f"❌ Erreur : {exc}")
         finally:
             # ── 2. Désactivation des Skeletons ──────────────────────────────
             for w in all_widgets:
@@ -480,21 +557,21 @@ class VueEnsemblePanel(QWidget):
 
     def _fill_perfs(self, m: dict) -> None:
         try:
-            p3m = m.get("perf_3m_pct")
-            p12m = m.get("perf_12m_pct")
-            cagr = m.get("cagr_pct")
+            p3m = _finite_float(m.get("perf_3m_pct"))
+            p12m = _finite_float(m.get("perf_12m_pct"))
+            cagr = _finite_float(m.get("cagr_pct"))
 
             self._kpi_3m.set_content(
                 "Évolution 3 mois",
                 _pct(p3m),
                 delta=_pct(p3m) if p3m is not None else "",
-                delta_positive=(p3m or 0) >= 0,
+                delta_positive=p3m >= 0 if p3m is not None else True,
             )
             self._kpi_12m.set_content(
                 "Évolution 12 mois",
                 _pct(p12m),
                 delta=_pct(p12m) if p12m is not None else "",
-                delta_positive=(p12m or 0) >= 0,
+                delta_positive=p12m >= 0 if p12m is not None else True,
             )
 
             if cagr is not None:
@@ -515,6 +592,7 @@ class VueEnsemblePanel(QWidget):
         try:
             df = m.get("df_snap")
             if df is None or df.empty:
+                self._chart_line.set_figure(_empty_figure("Aucun snapshot disponible"))
                 return
             fig = px.line(
                 df, x="_dt", y="patrimoine_net",
@@ -525,20 +603,26 @@ class VueEnsemblePanel(QWidget):
             self._chart_line.set_figure(fig)
         except Exception as exc:
             logger.warning("_build_line_chart error: %s", exc)
+            self._chart_line.set_figure(_empty_figure("Erreur chargement graphique"))
 
     # ── Graphique allocation ──────────────────────────────────────────────
 
     def _build_alloc_chart(self, m: dict) -> None:
         try:
+            def _nonneg(key: str) -> float:
+                value = _finite_float(m.get(key))
+                return max(0.0, value) if value is not None else 0.0
+
             alloc_data = [
-                {"Catégorie": "Liquidités",     "Valeur": max(0.0, m["liq"])},
-                {"Catégorie": "Holdings bourse","Valeur": max(0.0, m["bourse"])},
-                {"Catégorie": "Immobilier",     "Valeur": max(0.0, m["immo_value"])},
-                {"Catégorie": "PE",             "Valeur": max(0.0, m["pe_value"])},
-                {"Catégorie": "Entreprises",    "Valeur": max(0.0, m["ent_value"])},
+                {"Catégorie": "Liquidités",     "Valeur": _nonneg("liq")},
+                {"Catégorie": "Holdings bourse","Valeur": _nonneg("bourse")},
+                {"Catégorie": "Immobilier",     "Valeur": _nonneg("immo_value")},
+                {"Catégorie": "PE",             "Valeur": _nonneg("pe_value")},
+                {"Catégorie": "Entreprises",    "Valeur": _nonneg("ent_value")},
             ]
             alloc_df = pd.DataFrame([a for a in alloc_data if a["Valeur"] > 0])
             if alloc_df.empty:
+                self._chart_alloc.set_figure(_empty_figure("Aucune allocation positive"))
                 return
             fig = px.pie(
                 alloc_df, names="Catégorie", values="Valeur",
@@ -548,6 +632,7 @@ class VueEnsemblePanel(QWidget):
             self._chart_alloc.set_figure(fig)
         except Exception as exc:
             logger.warning("_build_alloc_chart error: %s", exc)
+            self._chart_alloc.set_figure(_empty_figure("Erreur chargement allocation"))
 
     # ── Graphique cashflow ────────────────────────────────────────────────
 
@@ -555,6 +640,7 @@ class VueEnsemblePanel(QWidget):
         try:
             df_cf = m.get("df_cashflow", pd.DataFrame())
             if df_cf is None or df_cf.empty:
+                self._chart_cashflow.set_figure(_empty_figure("Aucune donnée cashflow"))
                 return
             last12 = df_cf.tail(12).copy()
             fig = go.Figure()
@@ -573,6 +659,7 @@ class VueEnsemblePanel(QWidget):
             self._chart_cashflow.set_figure(fig)
         except Exception as exc:
             logger.warning("_build_cashflow_chart error: %s", exc)
+            self._chart_cashflow.set_figure(_empty_figure("Erreur chargement cashflow"))
 
     # ── Graphique taux d'épargne ──────────────────────────────────────────
 
@@ -580,6 +667,7 @@ class VueEnsemblePanel(QWidget):
         try:
             df_cf = m.get("df_cashflow", pd.DataFrame())
             if df_cf is None or df_cf.empty:
+                self._chart_epargne.set_figure(_empty_figure("Aucune donnée cashflow"))
                 return
             df = df_cf.copy()
             df["mois_label"] = (
@@ -650,3 +738,4 @@ class VueEnsemblePanel(QWidget):
             self._chart_epargne.set_figure(fig)
         except Exception as exc:
             logger.warning("_build_epargne_chart error: %s", exc)
+            self._chart_epargne.set_figure(_empty_figure("Erreur chargement taux d epargne"))

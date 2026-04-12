@@ -4,6 +4,7 @@ Couvre : TR/BANKIN, DEPENSES, REVENUS, CREDIT, déjà annulé, introuvable.
 """
 import pytest
 from services.import_history import create_batch, close_batch, rollback_batch, _count_alive_rows
+from services.import_history import list_batches
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -183,3 +184,48 @@ def test_count_alive_rows_credit_utilise_table_credits(conn):
     conn.commit()
 
     assert _count_alive_rows(conn, batch_id, "CREDIT") == 1
+
+
+def test_list_batches_alive_rows_are_computed_for_each_import_type(conn):
+    person_id = _insert_person(conn, "PerfTest")
+    account_id = _insert_account(conn, person_id, "Compte TR", "CTO")
+
+    batch_tr = create_batch(conn, "TR", person_id=person_id, account_id=account_id, account_name="Compte TR")
+    conn.execute(
+        "INSERT INTO transactions(date, person_id, account_id, type, amount, category, import_batch_id) "
+        "VALUES ('2026-01-15', ?, ?, 'DEPOT', 100, 'Test', ?)",
+        (person_id, account_id, batch_tr),
+    )
+    close_batch(conn, batch_tr, 1)
+
+    batch_dep = create_batch(conn, "DEPENSES", person_id=person_id, person_name="PerfTest")
+    conn.execute(
+        "INSERT INTO depenses(person_id, mois, categorie, montant, import_batch_id) "
+        "VALUES (?, '2026-01-01', 'Courses', 10, ?)",
+        (person_id, batch_dep),
+    )
+    close_batch(conn, batch_dep, 1)
+
+    batch_rev = create_batch(conn, "REVENUS", person_id=person_id, person_name="PerfTest")
+    conn.execute(
+        "INSERT INTO revenus(person_id, mois, categorie, montant, import_batch_id) "
+        "VALUES (?, '2026-01-01', 'Salaire', 20, ?)",
+        (person_id, batch_rev),
+    )
+    close_batch(conn, batch_rev, 1)
+
+    batch_credit = create_batch(conn, "CREDIT", person_id=person_id, account_id=account_id, account_name="Compte TR")
+    conn.execute(
+        "INSERT INTO credits(person_id, account_id, nom, capital_emprunte, taux_nominal, duree_mois, date_debut, actif) "
+        "VALUES (?, ?, 'Crédit Test', 1000, 1.0, 12, '2026-01-01', 1)",
+        (person_id, account_id),
+    )
+    close_batch(conn, batch_credit, 1)
+    conn.commit()
+
+    batches = list_batches(conn, limit=20)
+    by_type = {b["import_type"]: b for b in batches}
+    assert by_type["TR"]["alive_rows"] == 1
+    assert by_type["DEPENSES"]["alive_rows"] == 1
+    assert by_type["REVENUS"]["alive_rows"] == 1
+    assert by_type["CREDIT"]["alive_rows"] == 1

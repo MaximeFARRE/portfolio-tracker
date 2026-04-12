@@ -3,6 +3,7 @@ import sqlite3
 import logging
 from pathlib import Path
 from typing import Callable
+from services.common_utils import row_get
 
 try:
     import libsql
@@ -23,6 +24,7 @@ MIG_VER_IMPORT_BATCHES = 9002
 MIG_VER_ADD_IMMO_COLUMNS = 9003
 MIG_VER_ADD_CREDITS_PAYER_ACCOUNT = 9004
 MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX = 9005
+MIG_VER_ADD_PRESET_VOL_COLUMNS = 9006
 
 # ──────────────────────────────────────────────────────────────
 # Compat libsql ↔ sqlite3 : DictRow + WrappedCursor
@@ -149,14 +151,13 @@ class SyncedLibsqlConn:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        # Si pas d'erreur, on commit+sync
         if exc_type is None:
             try:
                 self.commit()
             except Exception:
                 pass
-        # ⚠️ On ne ferme PAS ici : singleton partagé.
-        # La fermeture se fait via close_connection() à l'arrêt de l'app.
+        
+        self.close()
         return False
 
 
@@ -176,7 +177,7 @@ def get_conn():
         conn.execute("PRAGMA cache_size = -64000;")  # 64 MB de cache
         conn.execute("PRAGMA synchronous = NORMAL;")  # Bon compromis perf/sécurité
         _logger.info("Connexion SQLite locale : %s (WAL activé)", DB_PATH)
-        return conn
+        return SyncedLibsqlConn(conn)
 
     # 3) Embedded replica: fichier local + sync_url vers Turso
     replica_path = str(DB_PATH).replace(".db", "_turso.db")
@@ -200,16 +201,6 @@ def get_conn():
         pass
 
     return SyncedLibsqlConn(conn)
-
-def _row_get(row, key: str, idx: int = 0):
-    if row is None:
-        return None
-    try:
-        return row[key]
-    except Exception:
-        return row[idx]
-
-
 def _ensure_schema_version_table(conn) -> None:
     conn.execute(
         """
@@ -363,12 +354,33 @@ def _migrate_add_tx_person_account_index(conn) -> None:
         )
 
 
+def _migrate_add_preset_vol_columns(conn) -> None:
+    """Ajoute les colonnes de volatilité par classe d'actif sur simulation_preset_settings."""
+    if not _table_exists(conn, "simulation_preset_settings"):
+        return
+    _VOL_COLUMNS = {
+        "vol_liquidites_pct":   1.0,
+        "vol_bourse_pct":      15.0,
+        "vol_immobilier_pct":   5.0,
+        "vol_pe_pct":          20.0,
+        "vol_entreprises_pct": 15.0,
+        "vol_crypto_pct":      50.0,
+    }
+    for col, default in _VOL_COLUMNS.items():
+        if not _column_exists(conn, "simulation_preset_settings", col):
+            conn.execute(
+                f"ALTER TABLE simulation_preset_settings "
+                f"ADD COLUMN {col} REAL DEFAULT {default};"
+            )
+
+
 _CODE_MIGRATIONS: list[tuple[int, str, Callable]] = [
     (MIG_VER_ADD_TR_PHONE, "add people.tr_phone", _migrate_add_tr_phone),
     (MIG_VER_IMPORT_BATCHES, "add import_batches + import_batch_id refs", _migrate_import_batches),
     (MIG_VER_ADD_IMMO_COLUMNS, "add immobilier_value columns on snapshot tables", _migrate_add_immobilier_columns),
     (MIG_VER_ADD_CREDITS_PAYER_ACCOUNT, "add credits.payer_account_id", _migrate_add_credits_payer_account),
     (MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX, "add idx_tx_person_account_date", _migrate_add_tx_person_account_index),
+    (MIG_VER_ADD_PRESET_VOL_COLUMNS, "add vol_* columns on simulation_preset_settings", _migrate_add_preset_vol_columns),
 ]
 
 
@@ -492,12 +504,7 @@ def _row_value(row, key: str, idx: int = 0):
     """
     Compat sqlite3.Row (row["c"]) ET tuples libsql (row[0]).
     """
-    if row is None:
-        return None
-    try:
-        return row[key]
-    except Exception:
-        return row[idx]
+    return row_get(row, key, idx)
 
 
 def seed_minimal() -> None:
