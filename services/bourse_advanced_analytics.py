@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from services import bourse_analytics
+from services import efficient_frontier
 from services import market_history
 
 logger = logging.getLogger(__name__)
@@ -568,15 +569,25 @@ def get_var_es_payload(conn, person_id: int) -> dict[str, Any]:
 # 5. FRONTIÈRE EFFICIENTE
 # ═════════════════════════════════════════════════════════════════════════════
 
-def get_efficient_frontier_payload(conn, person_id: int) -> dict[str, Any]:
+def get_efficient_frontier_presets_payload() -> dict[str, Any]:
+    """Expose les presets de diversification pour l'UI."""
+    return {"presets": efficient_frontier.list_frontier_presets()}
+
+
+def get_efficient_frontier_payload(
+    conn,
+    person_id: int,
+    settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
-    Calcule la frontière efficiente via optimisation scipy (SLSQP).
+    Calcule la frontière efficiente avec contraintes de diversification.
 
     Retourne :
     - Points de la frontière (vol, ret)
     - Position du portefeuille actuel
     - Portefeuille de variance minimale
     - Portefeuille de Sharpe maximal
+    - Métriques de diversification/concentration
     """
     weights_df = _get_positions_weights(conn, person_id)
     if weights_df.empty or len(weights_df) < 2:
@@ -602,125 +613,65 @@ def get_efficient_frontier_payload(conn, person_id: int) -> dict[str, Any]:
     ret_data = returns_df[common].dropna()
     n_assets = len(common)
 
+    if n_assets < 2:
+        return _error_payload("Pas assez d'actifs exploitables pour l'optimisation")
+
     # Rendements et covariance annualisés
-    mean_returns = ret_data.mean().values * WEEKS_PER_YEAR
-    cov_matrix = ret_data.cov().values * WEEKS_PER_YEAR
+    mean_returns = ret_data.mean().values.astype(float) * WEEKS_PER_YEAR
+    cov_matrix = ret_data.cov().values.astype(float) * WEEKS_PER_YEAR
 
     # Poids actuels (renormalisés sur les actifs disponibles)
     w_df = weights_df[weights_df["ticker"].isin(common)].copy()
     w_df = w_df.set_index("ticker").loc[common]
-    current_weights = w_df["weight"].values
+    current_weights = w_df["weight"].values.astype(float)
     current_weights = current_weights / current_weights.sum()
 
     # Position du portefeuille actuel
     current_ret = float(current_weights @ mean_returns) * 100
     current_vol = float(math.sqrt(current_weights @ cov_matrix @ current_weights)) * 100
 
-    # Optimisation via scipy
-    from scipy.optimize import minimize
+    constraints, warnings, errors = efficient_frontier.build_constraints_from_settings(
+        settings=settings,
+        n_assets=n_assets,
+    )
+    if errors:
+        return _error_payload(" ".join(errors))
 
-    # Contraintes : somme des poids = 1
-    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
-    # Bornes : long-only (pas de vente à découvert)
-    bounds = [(0.0, 1.0)] * n_assets
-    initial_weights = np.ones(n_assets) / n_assets
-
-    # Portefeuille de variance minimale
-    min_var_result = minimize(
-        lambda w: float(w @ cov_matrix @ w),
-        initial_weights,
-        method="SLSQP",
-        bounds=bounds,
+    optimized = efficient_frontier.optimize_efficient_frontier(
+        mean_returns=mean_returns,
+        cov_matrix=cov_matrix,
+        tickers=common,
+        risk_free_rate=RISK_FREE_RATE,
         constraints=constraints,
+        current_weights=current_weights,
     )
-    min_var_weights = min_var_result.x if min_var_result.success else initial_weights
-    min_var_ret = float(min_var_weights @ mean_returns) * 100
-    min_var_vol = float(math.sqrt(min_var_weights @ cov_matrix @ min_var_weights)) * 100
-
-    # Portefeuille de Sharpe maximal (tangent portfolio)
-    def neg_sharpe(w):
-        ret_ann = float(w @ mean_returns)
-        vol_ann = float(math.sqrt(w @ cov_matrix @ w))
-        if vol_ann <= 0:
-            return 1e6
-        return -(ret_ann - RISK_FREE_RATE) / vol_ann
-
-    max_sharpe_result = minimize(
-        neg_sharpe,
-        initial_weights,
-        method="SLSQP",
-        bounds=bounds,
-        constraints=constraints,
-    )
-    max_sharpe_weights = max_sharpe_result.x if max_sharpe_result.success else initial_weights
-    max_sharpe_ret = float(max_sharpe_weights @ mean_returns) * 100
-    max_sharpe_vol = float(math.sqrt(max_sharpe_weights @ cov_matrix @ max_sharpe_weights)) * 100
-
-    # Points de la frontière (optimisation pour chaque niveau de rendement cible)
-    frontier_points = _compute_frontier_points(
-        mean_returns, cov_matrix, n_assets, bounds, n_points=40
-    )
+    if "error" in optimized:
+        return _error_payload(optimized["error"])
 
     return {
-        "frontier_points": frontier_points,
+        "frontier_points": optimized.get("frontier_points", []),
         "current_portfolio": {
             "vol": round(current_vol, 2),
             "ret": round(current_ret, 2),
         },
         "min_variance": {
-            "vol": round(min_var_vol, 2),
-            "ret": round(min_var_ret, 2),
-            "weights": {common[i]: round(float(min_var_weights[i]) * 100, 1) for i in range(n_assets)},
+            "vol": optimized["min_variance"]["volatility_ann_pct"],
+            "ret": optimized["min_variance"]["return_ann_pct"],
+            "sharpe": optimized["min_variance"]["sharpe"],
+            "weights": optimized["min_variance"]["weights"],
+            "diversification": optimized["min_variance"]["diversification"],
         },
         "max_sharpe": {
-            "vol": round(max_sharpe_vol, 2),
-            "ret": round(max_sharpe_ret, 2),
-            "weights": {common[i]: round(float(max_sharpe_weights[i]) * 100, 1) for i in range(n_assets)},
+            "vol": optimized["max_sharpe"]["volatility_ann_pct"],
+            "ret": optimized["max_sharpe"]["return_ann_pct"],
+            "sharpe": optimized["max_sharpe"]["sharpe"],
+            "weights": optimized["max_sharpe"]["weights"],
+            "diversification": optimized["max_sharpe"]["diversification"],
         },
+        "constraints_applied": optimized.get("constraints_applied", {}),
+        "warnings": warnings + optimized.get("warnings", []),
         "tickers": common,
     }
-
-
-def _compute_frontier_points(
-    mean_returns: np.ndarray,
-    cov_matrix: np.ndarray,
-    n_assets: int,
-    bounds: list[tuple[float, float]],
-    n_points: int = 40,
-) -> list[dict[str, float]]:
-    """
-    Calcule les points de la frontière efficiente par optimisation.
-
-    Pour chaque rendement cible entre min et max, on minimise la variance
-    sous contrainte de rendement = cible et somme des poids = 1.
-    """
-    from scipy.optimize import minimize
-
-    min_ret = float(np.min(mean_returns))
-    max_ret = float(np.max(mean_returns))
-    target_returns = np.linspace(min_ret, max_ret, n_points)
-
-    points = []
-    initial_weights = np.ones(n_assets) / n_assets
-
-    for target_ret in target_returns:
-        constraints = [
-            {"type": "eq", "fun": lambda w: np.sum(w) - 1.0},
-            {"type": "eq", "fun": lambda w, tr=target_ret: float(w @ mean_returns) - tr},
-        ]
-        result = minimize(
-            lambda w: float(w @ cov_matrix @ w),
-            initial_weights,
-            method="SLSQP",
-            bounds=bounds,
-            constraints=constraints,
-        )
-        if result.success:
-            vol = float(math.sqrt(result.x @ cov_matrix @ result.x)) * 100
-            ret = float(result.x @ mean_returns) * 100
-            points.append({"vol": round(vol, 2), "ret": round(ret, 2)})
-
-    return points
 
 
 # ═════════════════════════════════════════════════════════════════════════════

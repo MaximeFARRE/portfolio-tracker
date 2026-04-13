@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QLineEdit, QDateEdit, QGroupBox,
     QRadioButton, QButtonGroup, QMessageBox, QStackedWidget
 )
-from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtCore import Qt, QDate, QTimer, QThread, pyqtSignal
 
 from utils.libelles import LIBELLES_TYPE_OPERATION, code_operation_depuis_libelle
 from utils.validators import operation_requiert_actif, operation_requiert_quantite_prix
@@ -21,6 +21,30 @@ from qt_ui.theme import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _TickerPreviewThread(QThread):
+    done = pyqtSignal(int, str, object)
+
+    def __init__(self, request_id: int, symbol: str):
+        super().__init__()
+        self._request_id = int(request_id)
+        self._symbol = (symbol or "").strip().upper()
+
+    def run(self):
+        try:
+            from services.ticker_preview_service import preview_ticker_live
+            payload = preview_ticker_live(self._symbol)
+        except Exception as e:
+            payload = {
+                "found": False,
+                "name": self._symbol or None,
+                "price": None,
+                "currency": None,
+                "status": "error",
+                "warning": str(e),
+            }
+        self.done.emit(self._request_id, self._symbol, payload)
 
 ASSET_TYPES = [
     "action",
@@ -97,6 +121,13 @@ class SaisiePanel(QWidget):
         self._account_type = account_type
         self._syncing = False
         self._asset_id = None
+        self._ticker_preview_timer = QTimer(self)
+        self._ticker_preview_timer.setSingleShot(True)
+        self._ticker_preview_timer.timeout.connect(self._run_pending_ticker_preview)
+        self._pending_preview_symbol = ""
+        self._pending_preview_target = "new"
+        self._preview_request_id = 0
+        self._ticker_preview_threads: list = []
 
         self.setStyleSheet(f"background: {BG_PRIMARY};")
         layout = QVBoxLayout(self)
@@ -173,6 +204,9 @@ class SaisiePanel(QWidget):
         self._asset_info = QLabel()
         self._asset_info.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
         ev.addWidget(self._asset_info)
+        self._asset_live_preview = QLabel("Nom: — | Prix: — | Devise: — | Statut: —")
+        self._asset_live_preview.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        ev.addWidget(self._asset_live_preview)
         self._asset_stack.addWidget(existing_w)
 
         # Nouvel actif
@@ -191,6 +225,9 @@ class SaisiePanel(QWidget):
         self._new_symbol_hint.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
         self._new_symbol_hint.setVisible(False)
         nc1.addWidget(self._new_symbol_hint)
+        self._new_symbol_live_preview = QLabel("Nom: — | Prix: — | Devise: — | Statut: —")
+        self._new_symbol_live_preview.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        nc1.addWidget(self._new_symbol_live_preview)
         nv.addLayout(nc1)
         nc2 = QVBoxLayout()
         nc2.addWidget(_lbl("Nom"))
@@ -266,6 +303,7 @@ class SaisiePanel(QWidget):
         self._radio_existing.toggled.connect(self._on_asset_mode_changed)
         self._asset_combo.currentIndexChanged.connect(self._on_asset_selected)
         self._new_type.currentIndexChanged.connect(self._on_new_asset_type_changed)
+        self._new_symbol.textChanged.connect(self._on_new_symbol_changed)
         self._qty_spin.valueChanged.connect(self._sync_from_qty_price)
         self._price_spin.valueChanged.connect(self._sync_from_qty_price)
         self._total_spin.valueChanged.connect(self._sync_from_total)
@@ -299,6 +337,10 @@ class SaisiePanel(QWidget):
 
     def _on_asset_mode_changed(self) -> None:
         self._asset_stack.setCurrentIndex(0 if self._radio_existing.isChecked() else 1)
+        if self._radio_existing.isChecked():
+            self._on_asset_selected()
+        else:
+            self._on_new_symbol_changed(self._new_symbol.text())
 
     def _on_new_asset_type_changed(self) -> None:
         """Adapte le champ ticker selon que l'actif est coté ou non coté."""
@@ -321,6 +363,70 @@ class SaisiePanel(QWidget):
                 sym = row[0] if not hasattr(row, '__getitem__') else row["symbol"]
                 name = row[1] if not hasattr(row, '__getitem__') else row["name"]
                 self._asset_info.setText(f"{sym} — {name}")
+                self._schedule_ticker_preview(str(sym), target="existing")
+                return
+        self._asset_info.setText("")
+        self._asset_live_preview.setText("Nom: — | Prix: — | Devise: — | Statut: —")
+        self._asset_live_preview.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+
+    def _on_new_symbol_changed(self, _text: str) -> None:
+        if self._radio_new.isChecked():
+            self._schedule_ticker_preview(self._new_symbol.text(), target="new")
+
+    @staticmethod
+    def _format_ticker_preview(preview: dict) -> str:
+        name = preview.get("name") or "—"
+        price = preview.get("price")
+        price_txt = f"{float(price):.4f}" if price is not None else "—"
+        ccy = preview.get("currency") or "—"
+        status = str(preview.get("status") or "—").upper()
+        return f"Nom: {name} | Prix: {price_txt} | Devise: {ccy} | Statut: {status}"
+
+    @staticmethod
+    def _ticker_preview_color(preview: dict) -> str:
+        status = str(preview.get("status") or "").lower()
+        if status == "ok":
+            return "#22c55e"
+        if status == "partial":
+            return "#f59e0b"
+        if status == "empty":
+            return TEXT_MUTED
+        return "#ef4444"
+
+    def _schedule_ticker_preview(self, symbol: str, *, target: str) -> None:
+        self._pending_preview_symbol = (symbol or "").strip().upper()
+        self._pending_preview_target = target
+        self._preview_request_id += 1
+        self._ticker_preview_timer.start(350)
+
+    def _run_pending_ticker_preview(self) -> None:
+        request_id = self._preview_request_id
+        symbol = self._pending_preview_symbol
+        target = self._pending_preview_target
+        label = self._asset_live_preview if target == "existing" else self._new_symbol_live_preview
+        if not symbol:
+            label.setText("Nom: — | Prix: — | Devise: — | Statut: EMPTY")
+            label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+            return
+
+        label.setText("Chargement preview…")
+        label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        # Nettoyer les threads terminés avant d'en lancer un nouveau
+        self._ticker_preview_threads = [
+            t for t in self._ticker_preview_threads if t.isRunning()
+        ]
+        thread = _TickerPreviewThread(request_id, symbol)
+        self._ticker_preview_threads.append(thread)
+        thread.done.connect(self._on_ticker_preview_done)
+        thread.start()
+
+    def _on_ticker_preview_done(self, request_id: int, _symbol: str, payload: dict) -> None:
+        if request_id != self._preview_request_id:
+            return
+        target = self._pending_preview_target
+        label = self._asset_live_preview if target == "existing" else self._new_symbol_live_preview
+        label.setText(self._format_ticker_preview(payload))
+        label.setStyleSheet(f"color: {self._ticker_preview_color(payload)}; font-size: 11px;")
 
     def _sync_from_qty_price(self) -> None:
         if self._syncing:
