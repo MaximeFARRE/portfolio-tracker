@@ -400,3 +400,89 @@ def rebuild_snapshots_person_backdated_aware(
         "n_ok": n_ok,
         "truncated": truncated,
     }
+
+
+def get_first_transaction_date(conn, person_id: int):
+    """Retourne la date de la premiere transaction pour une personne, ou None."""
+    row = conn.execute(
+        "SELECT MIN(date) AS first_date FROM transactions WHERE person_id = ?",
+        (int(person_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        raw = row["first_date"]
+    except (TypeError, IndexError):
+        raw = row[0]
+    if raw is None:
+        return None
+    import datetime as _dt
+    try:
+        return _dt.date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return None
+
+
+def rebuild_snapshots_person_full_history(
+    conn,
+    person_id: int,
+    cancel_check=None,
+    progress_callback=None,
+) -> dict:
+    """Reconstruit depuis la premiere transaction. progress_callback(week, year, idx, total)."""
+    end = market_history.week_start(_today_paris_date())
+    first_tx_date = get_first_transaction_date(conn, person_id)
+    if first_tx_date is None:
+        return {"did_run": False, "reason": "no_transactions", "mode": "FULL_HISTORY"}
+    start = market_history.week_start(first_tx_date)
+    weeks = _list_weeks(start, end)
+    if not weeks:
+        return {"did_run": False, "reason": "no_weeks", "mode": "FULL_HISTORY"}
+    _sync_person_market_data_for_weeks(conn, person_id, weeks[0], weeks[-1])
+    accounts = repo.list_accounts(conn, person_id=person_id)
+    tx_cache = _build_snapshot_tx_cache(conn, person_id, accounts=accounts)
+    n_ok = 0
+    total_weeks = len(weeks)
+    for week_index, wd in enumerate(weeks):
+        if cancel_check and cancel_check():
+            logging.getLogger(__name__).info(
+                "Full-history rebuild cancelled. %d/%d weeks.", n_ok, total_weeks
+            )
+            break
+        if progress_callback is not None:
+            current_year = int(str(wd)[:4])
+            progress_callback(
+                current_week=str(wd),
+                current_year=current_year,
+                week_index=week_index,
+                total_weeks=total_weeks,
+            )
+        payload = compute_weekly_snapshot_person(
+            conn, person_id, wd, tx_cache=tx_cache, accounts_cache=accounts,
+        )
+        upsert_weekly_snapshot(conn, person_id, wd, mode="REBUILD", payload=payload)
+        n_ok += 1
+    cancelled = bool(cancel_check and cancel_check())
+    if not cancelled:
+        conn.commit()
+        max_row = conn.execute(
+            "SELECT MAX(id) AS max_id, MAX(created_at) AS max_created FROM transactions WHERE person_id=?",
+            (int(person_id),),
+        ).fetchone()
+        _set_person_watermark(
+            conn, person_id,
+            (int(max_row[0]) if max_row and max_row[0] is not None else None),
+            (str(max_row[1]) if max_row and max_row[1] is not None else None),
+        )
+    else:
+        conn.rollback()
+    return {
+        "did_run": True,
+        "mode": "FULL_HISTORY",
+        "person_id": int(person_id),
+        "start": str(weeks[0]),
+        "end": str(weeks[-1]),
+        "n_weeks": total_weeks,
+        "n_ok": n_ok,
+        "cancelled": cancelled,
+    }

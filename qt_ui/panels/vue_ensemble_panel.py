@@ -154,6 +154,38 @@ class SnapshotRebuildThread(QThread):
             self.error.emit(str(exc))
 
 
+class FullHistoryRebuildThread(QThread):
+    """Thread qui reconstruit tous les snapshots depuis la premiere transaction."""
+    progress = pyqtSignal(int, int, int)   # current_year, week_index, total_weeks
+    finished = pyqtSignal(str)
+    error    = pyqtSignal(str)
+
+    def __init__(self, person_id: int):
+        super().__init__()
+        self._person_id = person_id
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Demande l'arret propre du rebuild."""
+        self._cancelled = True
+
+    def run(self):
+        try:
+            from services import snapshots as wk_snap
+            from services.db import get_conn
+            with get_conn() as local_conn:
+                res = wk_snap.rebuild_snapshots_person_full_history(
+                    local_conn,
+                    person_id=self._person_id,
+                    cancel_check=lambda: self._cancelled,
+                    progress_callback=lambda current_week, current_year, week_index, total_weeks:
+                        self.progress.emit(current_year, week_index, total_weeks),
+                )
+            self.finished.emit(str(res))
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 # ─── Panel principal ───────────────────────────────────────────────────────
 
 class VueEnsemblePanel(QWidget):
@@ -170,15 +202,29 @@ class VueEnsemblePanel(QWidget):
 
         # ── Header ────────────────────────────────────────────────────────
         top_row = QHBoxLayout()
+
         self._btn_rebuild = QPushButton("📸  Rebuild snapshots (90j)")
         self._btn_rebuild.setStyleSheet(STYLE_BTN_PRIMARY)
         self._btn_rebuild.clicked.connect(self._on_rebuild)
         top_row.addWidget(self._btn_rebuild)
+
+        self._btn_rebuild_full = QPushButton("🗓️  Rebuild complet (dès la 1re tx)")
+        self._btn_rebuild_full.setStyleSheet(STYLE_BTN_PRIMARY)
+        self._btn_rebuild_full.setToolTip(
+            "Reconstruit l'historique complet depuis la date de la première transaction."
+            "\nPeut prendre plusieurs minutes."
+        )
+        self._btn_rebuild_full.clicked.connect(self._on_rebuild_full)
+        top_row.addWidget(self._btn_rebuild_full)
+
         self._rebuild_status = QLabel()
         self._rebuild_status.setStyleSheet(STYLE_STATUS)
         top_row.addWidget(self._rebuild_status)
         top_row.addStretch()
         layout.addLayout(top_row)
+
+        # ── Thread ────────────────────────────────────────────────────────
+        self._thread_full: FullHistoryRebuildThread | None = None
 
         # ── Ligne 1 — KPI patrimoine ──────────────────────────────────────
         kpi_row1 = QHBoxLayout()
@@ -339,7 +385,7 @@ class VueEnsemblePanel(QWidget):
         self._person_id = person_id
         self._load_data()
 
-    # ── Rebuild ───────────────────────────────────────────────────────────
+    # ── Rebuild rapide (90 j) ─────────────────────────────────────────────
 
     def _on_rebuild(self) -> None:
         self._btn_rebuild.setEnabled(False)
@@ -360,6 +406,51 @@ class VueEnsemblePanel(QWidget):
         self._btn_rebuild.setEnabled(True)
         self._rebuild_status.setStyleSheet(STYLE_STATUS_ERROR)
         self._rebuild_status.setText(f"❌ Erreur : {error}")
+
+    # ── Rebuild complet (depuis la première transaction) ──────────────────
+
+    def _on_rebuild_full(self) -> None:
+        """Lance le rebuild complet depuis la premiere transaction."""
+        if self._thread_full and self._thread_full.isRunning():
+            # Annulation si deja en cours
+            self._thread_full.cancel()
+            self._btn_rebuild_full.setText("🗓️  Rebuild complet (dès la 1re tx)")
+            self._btn_rebuild_full.setEnabled(False)
+            self._rebuild_status.setText("⏸ Annulation en cours…")
+            return
+
+        self._btn_rebuild.setEnabled(False)
+        self._btn_rebuild_full.setText("⏹ Annuler le rebuild")
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_WARNING)
+        self._rebuild_status.setText("⏳ Démarrage du rebuild complet…")
+
+        self._thread_full = FullHistoryRebuildThread(self._person_id)
+        self._thread_full.progress.connect(self._on_rebuild_full_progress)
+        self._thread_full.finished.connect(self._on_rebuild_full_done)
+        self._thread_full.error.connect(self._on_rebuild_full_error)
+        self._thread_full.start()
+
+    def _on_rebuild_full_progress(self, current_year: int, week_index: int, total_weeks: int) -> None:
+        """Met a jour le label avec l'annee en cours de reconstruction."""
+        pct = int(week_index / total_weeks * 100) if total_weeks > 0 else 0
+        self._rebuild_status.setText(
+            f"⏳ Reconstruction {current_year}… ({week_index}/{total_weeks} semaines, {pct}%)"
+        )
+
+    def _on_rebuild_full_done(self, result: str) -> None:
+        self._btn_rebuild.setEnabled(True)
+        self._btn_rebuild_full.setText("🗓️  Rebuild complet (dès la 1re tx)")
+        self._btn_rebuild_full.setEnabled(True)
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        self._rebuild_status.setText("✅ Rebuild complet terminé")
+        self._load_data()
+
+    def _on_rebuild_full_error(self, error: str) -> None:
+        self._btn_rebuild.setEnabled(True)
+        self._btn_rebuild_full.setText("🗓️  Rebuild complet (dès la 1re tx)")
+        self._btn_rebuild_full.setEnabled(True)
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_ERROR)
+        self._rebuild_status.setText(f"❌ Erreur rebuild complet : {error}")
 
     # ── Chargement principal ──────────────────────────────────────────────
 
