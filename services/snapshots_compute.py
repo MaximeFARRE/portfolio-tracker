@@ -49,7 +49,9 @@ def _bank_cash_asof_eur(
     if accounts is None or accounts.empty:
         return 0.0
 
-    banks = accounts[accounts["account_type"].astype(str).str.upper() == "BANQUE"].copy()
+    # Les livrets (LIVRET) sont traités comme des comptes bancaires simples dans les snapshots.
+    # Ils n'ont pas de structure "container" — is_bank_container retourne toujours False pour eux.
+    banks = accounts[accounts["account_type"].astype(str).str.upper().isin(["BANQUE", "LIVRET"])].copy()
     total_eur = 0.0
     week_ts = pd.to_datetime(week_date, errors="coerce")
 

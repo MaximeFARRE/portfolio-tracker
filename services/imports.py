@@ -262,6 +262,11 @@ def map_bankin_to_final(parent_cat: str, cat: str, amount: float) -> str:
 
 
 def _ensure_account(conn: sqlite3.Connection, person_id: int, account_name: str) -> int:
+    # Note : les comptes créés automatiquement via Bankin ont account_type='BANQUE'.
+    # Si un compte importé est un livret (ex: "Livret A BNP"), l'utilisateur doit
+    # changer manuellement son type en LIVRET depuis l'interface pour bénéficier
+    # du KPI dédié. Les transactions (DEPOT/RETRAIT/INTERETS) fonctionnent
+    # correctement quel que soit le type — le solde est capturé dans bank_cash.
     row = conn.execute(
         "SELECT id FROM accounts WHERE person_id = ? AND name = ?",
         (person_id, account_name),

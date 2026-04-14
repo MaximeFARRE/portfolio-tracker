@@ -98,6 +98,30 @@ def _compute_liquidites_like_overview(conn, person_id: int):
 
     bank_total_eur = round(float(bank_total_eur), 2)
 
+    # ── Livrets (DEPOT/RETRAIT/INTERETS, pas de container, toujours EUR) ──────
+    livret_total_eur = 0.0
+    df_livrets = accounts[accounts["account_type"].astype(str).str.upper() == "LIVRET"].copy()
+    for _, acc in df_livrets.iterrows():
+        acc_id = int(acc["id"])
+        acc_ccy = str(acc.get("currency", "EUR") or "EUR").upper()
+        tx = repo.list_transactions(conn, person_id=person_id, account_id=acc_id, limit=100000)
+        total_native = _bank_balance_from_tx(tx)
+        eur = _convert_cached(total_native, acc_ccy, "EUR")
+        if eur is None:
+            logger.warning(
+                "_compute_liquidites: FX %s→EUR indisponible pour livret %s, ignoré du total.",
+                acc_ccy, acc_id,
+            )
+            missing_fx.append({
+                "component": "livret",
+                "account_id": acc_id,
+                "currency": acc_ccy,
+                "amount_native": round(float(total_native), 2),
+            })
+            continue
+        livret_total_eur += eur
+    livret_total_eur = round(float(livret_total_eur), 2)
+
     bourse_total_eur = 0.0
     df_bourse = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
     for _, acc in df_bourse.iterrows():
@@ -147,8 +171,8 @@ def _compute_liquidites_like_overview(conn, person_id: int):
         pe_total_eur = float(df.apply(lambda r: float(r["amount"]) if r["tx_type"] == "DEPOSIT" else -float(r["amount"]), axis=1).sum())
     pe_total_eur = round(float(pe_total_eur), 2)
 
-    total = round(float(bank_total_eur + bourse_total_eur + pe_total_eur), 2)
-    return bank_total_eur, bourse_total_eur, pe_total_eur, total, missing_fx
+    total = round(float(bank_total_eur + livret_total_eur + bourse_total_eur + pe_total_eur), 2)
+    return bank_total_eur, livret_total_eur, bourse_total_eur, pe_total_eur, total, missing_fx
 
 
 def get_liquidites_summary(conn, person_id: int) -> dict:
@@ -156,14 +180,15 @@ def get_liquidites_summary(conn, person_id: int) -> dict:
     Point d'entrée officiel pour la synthèse des liquidités d'une personne.
 
     Retourne un dictionnaire avec :
-        bank_cash_eur    float  — solde comptes bancaires (EUR)
+        bank_cash_eur    float  — solde comptes bancaires BANQUE (EUR)
+        livret_cash_eur  float  — solde livrets réglementés (EUR)
         bourse_cash_eur  float  — cash non investi sur comptes bourse (EUR)
         pe_cash_eur      float  — cash sur plateformes PE (EUR)
-        total_eur        float  — somme des trois
+        total_eur        float  — somme des quatre composantes
 
     `quality_status` vaut `partial` si un compte a été exclu faute de FX.
     """
-    bank, bourse, pe, total, missing_fx = _compute_liquidites_like_overview(conn, person_id)
+    bank, livret, bourse, pe, total, missing_fx = _compute_liquidites_like_overview(conn, person_id)
 
     if total == 0.0 and not missing_fx:
         logger.info(
@@ -177,6 +202,7 @@ def get_liquidites_summary(conn, person_id: int) -> dict:
 
     return {
         "bank_cash_eur": bank,
+        "livret_cash_eur": livret,
         "bourse_cash_eur": bourse,
         "pe_cash_eur": pe,
         "total_eur": total,

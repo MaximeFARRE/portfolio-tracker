@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   person_id INTEGER NOT NULL,
   name TEXT NOT NULL,
-  account_type TEXT NOT NULL,  -- BANQUE, PEA, CTO, CRYPTO, IMMOBILIER, CREDIT, PE
+  account_type TEXT NOT NULL,  -- BANQUE, LIVRET, PEA, CTO, CRYPTO, IMMOBILIER, CREDIT, PE
+  subtype TEXT,                -- pour LIVRET : LIVRET_A, LDDS, LEP, LIVRET_JEUNE, CSL, AUTRE
   institution TEXT,
   currency TEXT NOT NULL DEFAULT 'EUR',
   created_at TEXT DEFAULT (datetime('now')),
