@@ -3,6 +3,7 @@ import pandas as pd
 from services import repositories as repo
 from services import pe_cash_repository as pe_cash_repo
 from services import fx
+from services.asset_panel_mapping import INVESTMENT_ACCOUNT_TYPES
 from utils.validators import sens_flux
 
 logger = logging.getLogger(__name__)
@@ -123,7 +124,9 @@ def _compute_liquidites_like_overview(conn, person_id: int):
     livret_total_eur = round(float(livret_total_eur), 2)
 
     bourse_total_eur = 0.0
-    df_bourse = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    df_bourse = accounts[
+        accounts["account_type"].astype(str).str.upper().isin(INVESTMENT_ACCOUNT_TYPES)
+    ].copy()
     for _, acc in df_bourse.iterrows():
         acc_id = int(acc["id"])
         acc_ccy = str(acc.get("currency", "EUR") or "EUR").upper()

@@ -113,6 +113,13 @@ class PrivateEquityPanel(QWidget):
         self._table_projects.setMinimumHeight(220)
         layout.addWidget(self._table_projects)
 
+        lbl_assets = QLabel("Actifs non cotés issus des comptes")
+        lbl_assets.setStyleSheet(STYLE_SECTION)
+        layout.addWidget(lbl_assets)
+        self._table_account_assets = DataTableWidget()
+        self._table_account_assets.setMinimumHeight(150)
+        layout.addWidget(self._table_account_assets)
+
         lbl_tx = QLabel("Historique des transactions")
         lbl_tx.setStyleSheet(STYLE_SECTION)
         layout.addWidget(lbl_tx)
@@ -286,15 +293,43 @@ class PrivateEquityPanel(QWidget):
             from services import private_equity_repository as pe_repo
             from services import private_equity as pe
 
+            asof = pd.Timestamp.today().date().isoformat()
+            account_assets = pe.get_account_based_pe_assets_asof(
+                self._conn, person_id=self._person_id, asof_date=asof
+            )
+            if account_assets is not None and not account_assets.empty:
+                display_cols = [
+                    c for c in [
+                        "symbol", "asset_type", "quantity", "last_price",
+                        "asset_ccy", "value_eur", "valuation_status",
+                    ] if c in account_assets.columns
+                ]
+                self._table_account_assets.set_dataframe(account_assets[display_cols] if display_cols else account_assets)
+                if "value_eur" in account_assets.columns:
+                    account_assets_value = _finite_float(
+                        pd.to_numeric(account_assets["value_eur"], errors="coerce").dropna().sum()
+                    ) or 0.0
+                else:
+                    account_assets_value = 0.0
+            else:
+                self._table_account_assets.set_dataframe(pd.DataFrame([{
+                    "Info": "Aucun actif mappé Private Equity dans les comptes."
+                }]))
+                account_assets_value = 0.0
+
             projects = pe_repo.list_pe_projects(self._conn, person_id=self._person_id)
             if projects is None or projects.empty:
                 self._table_projects.set_dataframe(pd.DataFrame([{
                     "Info": "Aucun projet PE. Créez-en un dans l'onglet ➕ Saisie."
                 }]))
                 self._table_tx.set_dataframe(pd.DataFrame())
-                self._kpi_value.set_content("Valeur PE totale", "—")
+                if account_assets_value > 0:
+                    self._kpi_value.set_content("Valeur PE totale", _fmt_eur(account_assets_value))
+                else:
+                    self._kpi_value.set_content("Valeur PE totale", "—")
                 self._kpi_invested.set_content("Investi total", "—")
                 self._kpi_pnl.set_content("PnL latent", "—")
+                self._kpi_moic.set_content("MOIC global", "—")
                 return
 
             tx = pe_repo.list_pe_transactions(self._conn, person_id=self._person_id)
@@ -306,7 +341,7 @@ class PrivateEquityPanel(QWidget):
                     self._table_projects.set_dataframe(positions)
                     kpis = pe.compute_pe_kpis(positions)
 
-                    total_val  = _finite_float(kpis.get("value"))
+                    total_val  = (_finite_float(kpis.get("value")) or 0.0) + account_assets_value
                     total_inv  = _finite_float(kpis.get("invested"))
                     pnl        = _finite_float(kpis.get("pnl"))
                     moic       = kpis.get("moic")
@@ -320,9 +355,7 @@ class PrivateEquityPanel(QWidget):
                     avg_days   = _finite_float(kpis.get("avg_holding_days"))
 
                     # Ligne 1
-                    self._kpi_value.set_content(
-                        "Valeur PE totale", _fmt_eur(total_val)
-                    )
+                    self._kpi_value.set_content("Valeur PE totale", _fmt_eur(total_val))
                     self._kpi_invested.set_content(
                         "Investi total", _fmt_eur(total_inv)
                     )
@@ -380,6 +413,13 @@ class PrivateEquityPanel(QWidget):
                 self._table_tx.set_dataframe(pd.DataFrame([{
                     "Info": "Aucune transaction. Saisissez-en une dans l'onglet ➕ Saisie."
                 }]))
+                if account_assets_value > 0:
+                    self._kpi_value.set_content("Valeur PE totale", _fmt_eur(account_assets_value))
+                else:
+                    self._kpi_value.set_content("Valeur PE totale", "—")
+                self._kpi_invested.set_content("Investi total", "—")
+                self._kpi_pnl.set_content("PnL latent", "—")
+                self._kpi_moic.set_content("MOIC global", "—")
 
         except Exception as e:
             logger.error("Erreur chargement données PE: %s", e, exc_info=True)

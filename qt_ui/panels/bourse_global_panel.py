@@ -28,6 +28,7 @@ from qt_ui.theme import (
     plotly_layout, plotly_time_series_layout,
 )
 from services.common_utils import safe_float
+from services.asset_panel_mapping import INVESTMENT_ACCOUNT_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -161,8 +162,9 @@ class RefreshPricesThread(QThread):
                     self.finished.emit("Aucun compte bourse.")
                     return
 
-                bourse_types = {"PEA", "CTO", "CRYPTO"}
-                df_b = df_acc[df_acc["account_type"].astype(str).str.upper().isin(bourse_types)]
+                df_b = df_acc[
+                    df_acc["account_type"].astype(str).str.upper().isin(INVESTMENT_ACCOUNT_TYPES)
+                ]
                 n_ok, n_fail = 0, 0
                 assets_to_refresh: dict[int, str] = {}
                 asset_target_ccy: dict[int, str] = {}
@@ -599,8 +601,9 @@ class BourseGlobalPanel(QWidget):
             if df_acc is None or df_acc.empty:
                 return
 
-            bourse_types = {"PEA", "CTO", "CRYPTO"}
-            df_b = df_acc[df_acc["account_type"].astype(str).str.upper().isin(bourse_types)]
+            df_b = df_acc[
+                df_acc["account_type"].astype(str).str.upper().isin(INVESTMENT_ACCOUNT_TYPES)
+            ]
             if df_b.empty:
                 self._table_pos.set_dataframe(pd.DataFrame([{"Info": "Aucun compte bourse."}]))
                 return

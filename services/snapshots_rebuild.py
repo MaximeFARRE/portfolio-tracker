@@ -7,6 +7,7 @@ import pandas as pd
 
 from services import market_history
 from services import repositories as repo
+from services.asset_panel_mapping import INVESTMENT_ACCOUNT_TYPES
 from services.snapshots_compute import compute_weekly_snapshot_person, upsert_weekly_snapshot
 from services.snapshots_helpers import (
     _get_last_snapshot_week_ts,
@@ -49,7 +50,7 @@ def _build_snapshot_tx_cache(
         else:
             account_ids_to_prefetch.add(acc_id)
 
-    bourse_accs = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])]
+    bourse_accs = accounts[accounts["account_type"].astype(str).str.upper().isin(INVESTMENT_ACCOUNT_TYPES)]
     for _, acc in bourse_accs.iterrows():
         account_ids_to_prefetch.add(int(acc["id"]))
 
