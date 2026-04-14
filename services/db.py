@@ -26,6 +26,7 @@ MIG_VER_ADD_CREDITS_PAYER_ACCOUNT = 9004
 MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX = 9005
 MIG_VER_ADD_PRESET_VOL_COLUMNS = 9006
 MIG_VER_ADD_ASSET_IMPORT_ALIASES = 9007
+MIG_VER_ADD_ACCOUNT_SUBTYPE = 9008
 
 # ──────────────────────────────────────────────────────────────
 # Compat libsql ↔ sqlite3 : DictRow + WrappedCursor
@@ -405,6 +406,15 @@ def _migrate_add_asset_import_aliases(conn) -> None:
     )
 
 
+def _migrate_add_account_subtype(conn) -> None:
+    """Ajoute accounts.subtype pour distinguer les sous-types de livrets."""
+    if not _table_exists(conn, "accounts"):
+        return
+    if _column_exists(conn, "accounts", "subtype"):
+        return
+    conn.execute("ALTER TABLE accounts ADD COLUMN subtype TEXT;")
+
+
 _CODE_MIGRATIONS: list[tuple[int, str, Callable]] = [
     (MIG_VER_ADD_TR_PHONE, "add people.tr_phone", _migrate_add_tr_phone),
     (MIG_VER_IMPORT_BATCHES, "add import_batches + import_batch_id refs", _migrate_import_batches),
@@ -413,6 +423,7 @@ _CODE_MIGRATIONS: list[tuple[int, str, Callable]] = [
     (MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX, "add idx_tx_person_account_date", _migrate_add_tx_person_account_index),
     (MIG_VER_ADD_PRESET_VOL_COLUMNS, "add vol_* columns on simulation_preset_settings", _migrate_add_preset_vol_columns),
     (MIG_VER_ADD_ASSET_IMPORT_ALIASES, "add asset_import_aliases table", _migrate_add_asset_import_aliases),
+    (MIG_VER_ADD_ACCOUNT_SUBTYPE, "add accounts.subtype for livret subtypes", _migrate_add_account_subtype),
 ]
 
 

@@ -23,7 +23,8 @@ def list_people(conn: sqlite3.Connection) -> pd.DataFrame:
 
 # -------- Accounts --------
 def list_accounts(conn: sqlite3.Connection, person_id: Optional[int] = None) -> pd.DataFrame:
-    cols = ["id", "person_id", "name", "account_type", "institution", "currency", "created_at"]
+    # Ordre aligné sur le schema : id, person_id, name, account_type, subtype, institution, currency, created_at
+    cols = ["id", "person_id", "name", "account_type", "subtype", "institution", "currency", "created_at"]
     if person_id is None:
         rows = conn.execute("SELECT * FROM accounts ORDER BY person_id, id;").fetchall()
     else:
@@ -31,13 +32,22 @@ def list_accounts(conn: sqlite3.Connection, person_id: Optional[int] = None) -> 
     return df_from_rows(rows, cols)
 
 
-def create_account(conn: sqlite3.Connection, person_id: int, name: str, account_type: str, institution: Optional[str], currency: str) -> int:
+def create_account(
+    conn: sqlite3.Connection,
+    person_id: int,
+    name: str,
+    account_type: str,
+    institution: Optional[str],
+    currency: str,
+    subtype: Optional[str] = None,
+) -> int:
+    """Crée un compte. Pour account_type='LIVRET', passer subtype (LIVRET_A, LDDS, LEP…)."""
     cur = conn.execute(
         """
-        INSERT INTO accounts(person_id, name, account_type, institution, currency)
-        VALUES (?,?,?,?,?)
+        INSERT INTO accounts(person_id, name, account_type, subtype, institution, currency)
+        VALUES (?,?,?,?,?,?)
         """,
-        (person_id, name, account_type, institution, currency),
+        (person_id, name, account_type, subtype, institution, currency),
     )
     conn.commit()
     return int(cur.lastrowid)
