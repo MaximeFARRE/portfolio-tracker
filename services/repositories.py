@@ -59,6 +59,72 @@ def get_account_currency(conn: sqlite3.Connection, account_id: int) -> str:
     return (val if val else "EUR").upper()
 
 
+def delete_account(
+    conn: sqlite3.Connection,
+    account_id: int,
+    person_id: Optional[int] = None,
+) -> dict:
+    """
+    Supprime un compte.
+
+    Les transactions associées sont supprimées automatiquement par la FK
+    transactions.account_id -> accounts.id (ON DELETE CASCADE).
+    """
+    aid = int(account_id)
+    params: list[int] = [aid]
+    sql = """
+        SELECT id, person_id, name, account_type
+        FROM accounts
+        WHERE id = ?
+    """
+    if person_id is not None:
+        sql += " AND person_id = ?"
+        params.append(int(person_id))
+    sql += " LIMIT 1"
+
+    row = conn.execute(sql, tuple(params)).fetchone()
+    if row is None:
+        if person_id is None:
+            raise ValueError(f"Compte introuvable (id={aid}).")
+        raise ValueError(f"Compte introuvable pour person_id={int(person_id)} (id={aid}).")
+
+    tx_row = conn.execute(
+        "SELECT COUNT(*) AS c FROM transactions WHERE account_id = ?",
+        (aid,),
+    ).fetchone()
+    try:
+        tx_count = int(tx_row["c"]) if tx_row else 0
+    except Exception:
+        tx_count = int(tx_row[0]) if tx_row else 0
+
+    conn.execute("DELETE FROM accounts WHERE id = ?", (aid,))
+    conn.commit()
+
+    still_exists = conn.execute(
+        "SELECT 1 FROM accounts WHERE id = ? LIMIT 1",
+        (aid,),
+    ).fetchone()
+    if still_exists is not None:
+        raise RuntimeError(f"La suppression du compte a échoué (id={aid}).")
+
+    try:
+        account_name = str(row["name"])
+        account_type = str(row["account_type"])
+        owner_id = int(row["person_id"])
+    except Exception:
+        account_name = str(row[2])
+        account_type = str(row[3])
+        owner_id = int(row[1])
+
+    return {
+        "account_id": aid,
+        "person_id": owner_id,
+        "name": account_name,
+        "account_type": account_type,
+        "transactions_deleted": tx_count,
+    }
+
+
 # -------- Assets --------
 def get_asset_by_symbol(conn: sqlite3.Connection, symbol: str):
     if not symbol:
@@ -162,6 +228,45 @@ def list_transactions(conn: sqlite3.Connection, person_id: Optional[int] = None,
     return df_from_rows(rows, cols)
 
 
+def get_transaction(conn: sqlite3.Connection, tx_id: int) -> Optional[dict]:
+    row = conn.execute(
+        """
+        SELECT t.*,
+               a.symbol as asset_symbol, a.name as asset_name,
+               acc.name as account_name,
+               p.name as person_name
+        FROM transactions t
+        LEFT JOIN assets a ON a.id = t.asset_id
+        JOIN accounts acc ON acc.id = t.account_id
+        JOIN people p ON p.id = t.person_id
+        WHERE t.id = ?
+        LIMIT 1
+        """,
+        (int(tx_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return dict(row)
+    except Exception:
+        return {
+            "id": row[0],
+            "date": row[1],
+            "person_id": row[2],
+            "account_id": row[3],
+            "type": row[4],
+            "asset_id": row[5],
+            "quantity": row[6],
+            "price": row[7],
+            "fees": row[8],
+            "amount": row[9],
+            "category": row[10],
+            "note": row[11],
+            "import_batch_id": row[12] if len(row) > 12 else None,
+            "created_at": row[13] if len(row) > 13 else None,
+        }
+
+
 def create_transaction(conn: sqlite3.Connection, data: dict) -> int:
     cur = conn.execute(
         """
@@ -184,6 +289,65 @@ def create_transaction(conn: sqlite3.Connection, data: dict) -> int:
     )
     conn.commit()
     return int(cur.lastrowid)
+
+
+def update_transaction(conn: sqlite3.Connection, tx_id: int, data: dict) -> None:
+    """
+    Met à jour une transaction existante.
+    Seuls les champs explicitement fournis dans `data` sont modifiés.
+    """
+    tx_row = conn.execute(
+        "SELECT id, person_id, account_id FROM transactions WHERE id = ? LIMIT 1",
+        (int(tx_id),),
+    ).fetchone()
+    if tx_row is None:
+        raise ValueError(f"Transaction introuvable (id={int(tx_id)}).")
+
+    payload = dict(data or {})
+    if "type" in payload and payload["type"] is not None:
+        payload["type"] = str(payload["type"]).strip().upper()
+
+    if "account_id" in payload and payload["account_id"] is not None:
+        acc = conn.execute(
+            "SELECT id, person_id FROM accounts WHERE id = ? LIMIT 1",
+            (int(payload["account_id"]),),
+        ).fetchone()
+        if acc is None:
+            raise ValueError(f"Compte introuvable (id={int(payload['account_id'])}).")
+        acc_person_id = int(acc["person_id"]) if hasattr(acc, "keys") else int(acc[1])
+        if "person_id" in payload and payload["person_id"] is not None and int(payload["person_id"]) != acc_person_id:
+            raise ValueError("Incohérence person_id/account_id pour la transaction.")
+        payload["person_id"] = acc_person_id
+
+    allowed_fields = [
+        "date",
+        "person_id",
+        "account_id",
+        "type",
+        "asset_id",
+        "quantity",
+        "price",
+        "fees",
+        "amount",
+        "category",
+        "note",
+    ]
+    set_parts: list[str] = []
+    params: list = []
+    for field in allowed_fields:
+        if field in payload:
+            set_parts.append(f"{field} = ?")
+            params.append(payload[field])
+
+    if not set_parts:
+        return
+
+    params.append(int(tx_id))
+    conn.execute(
+        f"UPDATE transactions SET {', '.join(set_parts)} WHERE id = ?",
+        tuple(params),
+    )
+    conn.commit()
 
 
 def delete_transaction(conn: sqlite3.Connection, tx_id: int) -> None:
