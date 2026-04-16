@@ -253,3 +253,28 @@ class ProjectionService:
         """
         from services.prevision_stress import list_standard_scenarios
         return list_standard_scenarios()
+
+    @staticmethod
+    def build_current_portfolio_backtest(
+        conn: Any,
+        person_id: int,
+        horizon: str = "10y",
+        benchmark_symbol: Optional[str] = None,
+        ignore_limiting_assets: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Point d'entree facade pour le backtest theorique du portefeuille actuel.
+
+        Le moteur est implemente dans services.portfolio_backtest_service.
+        """
+        from services.portfolio_backtest_service import (
+            build_current_portfolio_backtest as _build_current_portfolio_backtest,
+        )
+
+        return _build_current_portfolio_backtest(
+            conn=conn,
+            person_id=person_id,
+            horizon=horizon,
+            benchmark_symbol=(benchmark_symbol or "URTH"),
+            ignore_limiting_assets=bool(ignore_limiting_assets),
+        )
