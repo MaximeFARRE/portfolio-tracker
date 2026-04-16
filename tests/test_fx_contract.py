@@ -258,6 +258,41 @@ class TestBourseAnalyticsMissingFx:
         mock_prices.assert_not_called()
         mock_compute.assert_not_called()
 
+    def test_live_positions_for_account_keeps_non_cote_and_fallbacks_to_pru(self, conn):
+        from services import bourse_analytics
+
+        pos_account = pd.DataFrame(
+            [
+                {
+                    "asset_id": 26,
+                    "symbol": "LENDOPOLIS",
+                    "name": "Lendopolis",
+                    "asset_type": "non_cote",
+                    "quantity": 1000.0,
+                    "pru": 10.0,
+                    "last_price": None,
+                    "value": None,
+                    "pnl_latent": None,
+                    "valuation_status": "missing_price",
+                    "asset_ccy": "EUR",
+                }
+            ]
+        )
+
+        with patch("services.bourse_analytics.repo.get_account", return_value={"id": 10, "currency": "EUR"}), \
+             patch("services.bourse_analytics.repo.list_account_asset_ids", return_value=[26]), \
+             patch("services.bourse_analytics.repo.list_transactions", return_value=pd.DataFrame([{"id": 1}])), \
+             patch("services.bourse_analytics.repo.get_latest_prices", return_value=pd.DataFrame()), \
+             patch("services.portfolio.compute_positions_v2_fx", return_value=pos_account):
+            out = bourse_analytics.get_live_bourse_positions_for_account(conn, account_id=10)
+
+        assert len(out) == 1
+        row = out.iloc[0]
+        assert row["asset_type"] == "non_cote"
+        assert row["last_price"] == pytest.approx(10.0)
+        assert row["value"] == pytest.approx(10000.0)
+        assert row["valuation_status"] == "fallback_buy_price"
+
     def test_live_positions_skips_accounts_without_assets(self, conn):
         from services import bourse_analytics
 
@@ -412,6 +447,69 @@ class TestDataQualityFalseZeroRegressions:
             "amount_native": 1000.0,
         }]
 
+
+class TestFxImpactDecomposition:
+    def test_positions_v2_fx_splits_market_and_currency_effects(self, conn):
+        from services import portfolio
+        from services import repositories as repo
+        from services import market_repository as mrepo
+
+        conn.execute(
+            "INSERT INTO assets(id, symbol, name, asset_type, currency) VALUES (1, 'AAA', 'AAA Corp', 'action', 'USD')"
+        )
+        # FX courant (utilisé pour la valorisation live EUR)
+        repo.insert_fx_rate(conn, "USD", "EUR", "2024-02-01", 1.20)
+        # FX au moment de l'achat (utilisé pour fx_moyen_achat)
+        mrepo.upsert_fx_rate_weekly(conn, "USD", "EUR", "2024-01-01", 1.00)
+
+        tx = pd.DataFrame([
+            {
+                "id": 1,
+                "date": "2024-01-01",
+                "type": "ACHAT",
+                "asset_id": 1,
+                "asset_symbol": "AAA",
+                "asset_name": "AAA Corp",
+                "quantity": 10.0,
+                "price": 100.0,     # devise actif (USD)
+                "amount": 1000.0,   # EUR (coût total)
+                "fees": 0.0,
+            }
+        ])
+        latest_prices = pd.DataFrame([{"asset_id": 1, "price": 120.0, "currency": "USD"}])
+
+        out = portfolio.compute_positions_v2_fx(conn, tx, latest_prices, account_ccy="EUR")
+        row = out.iloc[0]
+
+        # valeur actuelle EUR = 10 * 120 * 1.20 = 1440
+        # valeur sans effet change = 10 * 120 * 1.00 = 1200
+        # fx_gain = 240 ; market_gain = 1200 - 1000 = 200 ; total = 440
+        assert float(row["fx_gain_eur"]) == pytest.approx(240.0)
+        assert float(row["market_gain_eur"]) == pytest.approx(200.0)
+        assert float(row["total_gain_eur"]) == pytest.approx(440.0)
+        # Compat rétro
+        assert float(row["pnl_fx"]) == pytest.approx(float(row["fx_gain_eur"]))
+
+    def test_fx_summary_aggregates_by_currency_and_account_with_missing_breakdown(self):
+        from services import bourse_analytics
+
+        df_positions = pd.DataFrame(
+            [
+                {"asset_ccy": "USD", "fx_gain_eur": 120.0, "compte": "CTO 1"},
+                {"asset_ccy": "USD", "fx_gain_eur": None, "compte": "CTO 2"},
+                {"asset_ccy": "GBP", "fx_gain_eur": -30.0, "compte": "PEA"},
+                {"asset_ccy": "EUR", "fx_gain_eur": 0.0, "compte": "PEA"},  # ignoré (EUR)
+            ]
+        )
+
+        res = bourse_analytics.compute_fx_pnl_summary(df_positions)
+        assert res["total_fx_pnl"] == pytest.approx(90.0)
+        assert res["by_currency"]["USD"] == pytest.approx(120.0)
+        assert res["by_currency"]["GBP"] == pytest.approx(-30.0)
+        assert res["by_account"]["CTO 1"] == pytest.approx(120.0)
+        assert res["by_account"]["PEA"] == pytest.approx(-30.0)
+        assert res["missing_breakdown_count"] == 1
+
     def test_live_position_missing_price_is_not_valued_as_zero(self):
         from services import portfolio
 
@@ -499,3 +597,48 @@ class TestDataQualityFalseZeroRegressions:
             "type": "DIVIDENDE",
             "amount_native": 50.0,
         }]
+
+
+class TestPrivateEquityAccountBasedValuation:
+    def test_account_based_assets_use_manual_price_then_buy_price_fallback(self, conn):
+        from services import private_equity as pe
+
+        conn.execute("INSERT INTO people(id, name) VALUES (1, 'Alice')")
+        conn.execute(
+            "INSERT INTO accounts(id, person_id, name, account_type, currency) VALUES (10, 1, 'PEA-PME', 'PEA_PME', 'EUR')"
+        )
+        conn.execute(
+            "INSERT INTO assets(id, symbol, name, asset_type, currency) VALUES (26, 'LENDOPOLIS', 'Lendopolis', 'non_cote', 'EUR')"
+        )
+        conn.execute(
+            """
+            INSERT INTO transactions(
+                id, date, person_id, account_id, type, asset_id, quantity, price, fees, amount
+            ) VALUES (1, '2025-11-05', 1, 10, 'ACHAT', 26, 100.0, 10.0, 0.0, 1000.0)
+            """
+        )
+        conn.execute(
+            "INSERT INTO prices(asset_id, date, price, currency, source) VALUES (26, '2026-04-14', 12.0, 'EUR', 'MANUEL')"
+        )
+        conn.commit()
+
+        df_manual = pe.get_account_based_pe_assets_asof(conn, person_id=1, asof_date="2026-04-14")
+        assert len(df_manual) == 1
+        row_manual = df_manual.iloc[0]
+        assert row_manual["last_price"] == pytest.approx(12.0)
+        assert row_manual["value_eur"] == pytest.approx(1200.0)
+        assert row_manual["cost_eur"] == pytest.approx(1000.0)
+        assert row_manual["pnl_eur"] == pytest.approx(200.0)
+        assert row_manual["valuation_status"] == "ok"
+
+        conn.execute("DELETE FROM prices WHERE asset_id = 26")
+        conn.commit()
+
+        df_fallback = pe.get_account_based_pe_assets_asof(conn, person_id=1, asof_date="2026-04-14")
+        assert len(df_fallback) == 1
+        row_fallback = df_fallback.iloc[0]
+        assert row_fallback["last_price"] == pytest.approx(10.0)
+        assert row_fallback["value_eur"] == pytest.approx(1000.0)
+        assert row_fallback["cost_eur"] == pytest.approx(1000.0)
+        assert row_fallback["pnl_eur"] == pytest.approx(0.0)
+        assert row_fallback["valuation_status"] == "fallback_buy_price"

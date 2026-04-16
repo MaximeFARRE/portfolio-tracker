@@ -9,17 +9,23 @@ import plotly.graph_objects as go
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFormLayout, QDoubleSpinBox, QComboBox, QDateEdit, QScrollArea,
+    QDialog, QDialogButtonBox, QLineEdit, QMessageBox,
 )
 from qt_ui.components.animated_tab import AnimatedTabWidget
 from PyQt6.QtCore import QDate, QThread, pyqtSignal, Qt
 
 from qt_ui.widgets import PlotlyView, DataTableWidget, MetricLabel, LoadingOverlay
-from qt_ui.panels.saisie_panel import SaisiePanel, ASSET_TYPES, _ASSET_TYPES_NON_COTES
+from qt_ui.panels.saisie_panel import (
+    SaisiePanel, ASSET_TYPES, _ASSET_TYPES_NON_COTES, TYPES_PAR_COMPTE,
+)
 from qt_ui.theme import (
-    BG_PRIMARY, BORDER_SUBTLE, STYLE_BTN_PRIMARY, STYLE_BTN_SUCCESS, STYLE_SECTION, STYLE_STATUS,
+    BG_PRIMARY, BORDER_SUBTLE, STYLE_BTN_PRIMARY, STYLE_BTN_SUCCESS, STYLE_BTN_DANGER, STYLE_INPUT,
+    STYLE_SECTION, STYLE_STATUS,
     STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR, STYLE_STATUS_WARNING, STYLE_INPUT_FOCUS, STYLE_FORM_LABEL,
     STYLE_TAB_INNER, STYLE_SCROLLAREA, TEXT_SECONDARY, TEXT_MUTED, plotly_layout,
 )
+from utils.libelles import LIBELLES_TYPE_OPERATION, afficher_type_compte
+from utils.validators import operation_requiert_actif, operation_requiert_quantite_prix
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +41,304 @@ def _finite_sum(series: pd.Series) -> float | None:
     if vals.empty:
         return None
     return float(vals.sum())
+
+
+_BOURSE_ACCOUNT_TYPES = {
+    "PEA", "PEA_PME", "CTO", "CRYPTO", "ASSURANCE_VIE", "PER", "PEE",
+}
+
+
+class TransactionEditDialog(QDialog):
+    """Dialogue léger de modification d'une transaction existante."""
+
+    def __init__(self, conn, person_id: int, tx_row: dict, parent=None):
+        super().__init__(parent)
+        self._conn = conn
+        self._person_id = int(person_id)
+        self._tx_row = dict(tx_row or {})
+        self._payload: dict | None = None
+        self._asset_currency_update: tuple[int, str] | None = None
+        self._assets_by_id: dict[int, dict] = {}
+        self._accounts_by_id: dict[int, dict] = {}
+
+        tx_id = self._tx_row.get("id")
+        self.setWindowTitle(f"Modifier l'opération #{tx_id}")
+        self.setModal(True)
+        self.resize(760, 420)
+        self.setStyleSheet(f"background: {BG_PRIMARY};")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self._date_edit = QDateEdit()
+        self._date_edit.setCalendarPopup(True)
+        self._date_edit.setDisplayFormat("dd/MM/yyyy")
+        self._date_edit.setStyleSheet(STYLE_INPUT)
+        form.addRow("Date", self._date_edit)
+
+        self._account_combo = QComboBox()
+        self._account_combo.setStyleSheet(STYLE_INPUT)
+        self._account_combo.currentIndexChanged.connect(self._on_account_changed)
+        form.addRow("Compte", self._account_combo)
+
+        self._type_combo = QComboBox()
+        self._type_combo.setStyleSheet(STYLE_INPUT)
+        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
+        form.addRow("Type d'opération", self._type_combo)
+
+        self._asset_combo = QComboBox()
+        self._asset_combo.setStyleSheet(STYLE_INPUT)
+        self._asset_combo.currentIndexChanged.connect(self._on_asset_changed)
+        form.addRow("Ticker", self._asset_combo)
+
+        self._currency_combo = QComboBox()
+        self._currency_combo.setStyleSheet(STYLE_INPUT)
+        self._currency_combo.setEditable(True)
+        self._currency_combo.addItems(["EUR", "USD", "GBP", "CHF", "CAD", "JPY", "AUD"])
+        form.addRow("Devise actif", self._currency_combo)
+
+        self._qty_spin = QDoubleSpinBox()
+        self._qty_spin.setRange(0, 1_000_000_000)
+        self._qty_spin.setDecimals(6)
+        self._qty_spin.setSingleStep(1)
+        self._qty_spin.setStyleSheet(STYLE_INPUT)
+        form.addRow("Quantité", self._qty_spin)
+
+        self._price_spin = QDoubleSpinBox()
+        self._price_spin.setRange(0, 1_000_000_000)
+        self._price_spin.setDecimals(6)
+        self._price_spin.setSingleStep(1)
+        self._price_spin.setStyleSheet(STYLE_INPUT)
+        form.addRow("Prix unitaire", self._price_spin)
+
+        self._amount_spin = QDoubleSpinBox()
+        self._amount_spin.setRange(0, 1_000_000_000_000)
+        self._amount_spin.setDecimals(2)
+        self._amount_spin.setSingleStep(10)
+        self._amount_spin.setStyleSheet(STYLE_INPUT)
+        form.addRow("Montant total", self._amount_spin)
+
+        self._fees_spin = QDoubleSpinBox()
+        self._fees_spin.setRange(0, 1_000_000_000)
+        self._fees_spin.setDecimals(2)
+        self._fees_spin.setSingleStep(1)
+        self._fees_spin.setStyleSheet(STYLE_INPUT)
+        form.addRow("Frais", self._fees_spin)
+
+        self._category_edit = QLineEdit()
+        self._category_edit.setStyleSheet(STYLE_INPUT)
+        form.addRow("Catégorie", self._category_edit)
+
+        self._note_edit = QLineEdit()
+        self._note_edit.setStyleSheet(STYLE_INPUT)
+        form.addRow("Note", self._note_edit)
+
+        root.addLayout(form)
+
+        self._error_label = QLabel("")
+        self._error_label.setStyleSheet(STYLE_STATUS_ERROR)
+        self._error_label.setWordWrap(True)
+        root.addWidget(self._error_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self._btn_save = buttons.addButton("Enregistrer", QDialogButtonBox.ButtonRole.AcceptRole)
+        self._btn_save.setStyleSheet(STYLE_BTN_SUCCESS)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self._on_accept)
+        root.addWidget(buttons)
+
+        self._load_accounts()
+        self._load_assets()
+        self._prefill_fields()
+
+    @staticmethod
+    def _as_float(value, default: float = 0.0) -> float:
+        try:
+            if value is None or pd.isna(value):
+                return float(default)
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _load_accounts(self) -> None:
+        from services import repositories as repo
+
+        df = repo.list_accounts(self._conn, person_id=self._person_id)
+        self._account_combo.blockSignals(True)
+        self._account_combo.clear()
+        self._accounts_by_id.clear()
+        if df is not None and not df.empty:
+            for _, row in df.iterrows():
+                aid = int(row["id"])
+                atype = str(row.get("account_type") or "").upper()
+                if atype not in _BOURSE_ACCOUNT_TYPES:
+                    continue
+                self._accounts_by_id[aid] = {
+                    "id": aid,
+                    "account_type": atype,
+                    "name": str(row.get("name") or ""),
+                }
+                label = f"{row.get('name', '')} ({afficher_type_compte(atype)})"
+                self._account_combo.addItem(label, aid)
+        self._account_combo.blockSignals(False)
+
+    def _load_assets(self) -> None:
+        from services import repositories as repo
+
+        df = repo.list_assets(self._conn)
+        self._asset_combo.blockSignals(True)
+        self._asset_combo.clear()
+        self._asset_combo.addItem("Aucun actif", None)
+        self._assets_by_id.clear()
+        if df is not None and not df.empty:
+            for _, row in df.iterrows():
+                aid = int(row["id"])
+                self._assets_by_id[aid] = {
+                    "id": aid,
+                    "symbol": str(row.get("symbol") or ""),
+                    "name": str(row.get("name") or ""),
+                    "currency": str(row.get("currency") or "EUR").upper(),
+                }
+                label = f"{row.get('symbol', '')} — {row.get('name', '')}"
+                self._asset_combo.addItem(label, aid)
+        self._asset_combo.blockSignals(False)
+
+    def _prefill_fields(self) -> None:
+        date_str = str(self._tx_row.get("date") or "")
+        qdate = QDate.fromString(date_str, "yyyy-MM-dd")
+        if not qdate.isValid():
+            qdate = QDate.currentDate()
+        self._date_edit.setDate(qdate)
+
+        current_account_id = self._tx_row.get("account_id")
+        idx_account = self._account_combo.findData(int(current_account_id)) if current_account_id is not None else -1
+        if idx_account >= 0:
+            self._account_combo.setCurrentIndex(idx_account)
+        elif self._account_combo.count() > 0:
+            self._account_combo.setCurrentIndex(0)
+
+        self._rebuild_type_combo()
+        tx_type = str(self._tx_row.get("type") or "").upper()
+        idx_type = self._type_combo.findData(tx_type)
+        if idx_type >= 0:
+            self._type_combo.setCurrentIndex(idx_type)
+
+        current_asset_id = self._tx_row.get("asset_id")
+        if current_asset_id is not None and not pd.isna(current_asset_id):
+            idx_asset = self._asset_combo.findData(int(current_asset_id))
+            if idx_asset >= 0:
+                self._asset_combo.setCurrentIndex(idx_asset)
+            else:
+                self._asset_combo.setCurrentIndex(0)
+        else:
+            self._asset_combo.setCurrentIndex(0)
+
+        self._qty_spin.setValue(self._as_float(self._tx_row.get("quantity")))
+        self._price_spin.setValue(self._as_float(self._tx_row.get("price")))
+        self._amount_spin.setValue(self._as_float(self._tx_row.get("amount")))
+        self._fees_spin.setValue(self._as_float(self._tx_row.get("fees")))
+        self._category_edit.setText(str(self._tx_row.get("category") or ""))
+        self._note_edit.setText(str(self._tx_row.get("note") or ""))
+        self._on_asset_changed()
+        self._on_type_changed()
+
+    def _selected_account_type(self) -> str:
+        account_id = self._account_combo.currentData()
+        if account_id is None:
+            return "CTO"
+        row = self._accounts_by_id.get(int(account_id))
+        return str((row or {}).get("account_type") or "CTO").upper()
+
+    def _rebuild_type_combo(self) -> None:
+        atype = self._selected_account_type()
+        allowed = TYPES_PAR_COMPTE.get(atype, TYPES_PAR_COMPTE.get("CTO", []))
+        current = self._type_combo.currentData()
+        self._type_combo.blockSignals(True)
+        self._type_combo.clear()
+        for code in allowed:
+            self._type_combo.addItem(LIBELLES_TYPE_OPERATION.get(code, code), code)
+        self._type_combo.blockSignals(False)
+        if current is not None:
+            idx = self._type_combo.findData(current)
+            if idx >= 0:
+                self._type_combo.setCurrentIndex(idx)
+
+    def _on_account_changed(self, _idx: int) -> None:
+        self._rebuild_type_combo()
+        self._on_type_changed()
+
+    def _on_type_changed(self) -> None:
+        type_code = str(self._type_combo.currentData() or "")
+        need_asset = operation_requiert_actif(type_code)
+        need_qty_price = operation_requiert_quantite_prix(type_code)
+        self._asset_combo.setEnabled(need_asset)
+        self._currency_combo.setEnabled(need_asset and self._asset_combo.currentData() is not None)
+        self._qty_spin.setEnabled(need_qty_price)
+        self._price_spin.setEnabled(need_qty_price)
+
+    def _on_asset_changed(self, *_args) -> None:
+        asset_id = self._asset_combo.currentData()
+        has_asset = asset_id is not None
+        self._currency_combo.setEnabled(has_asset and self._asset_combo.isEnabled())
+        if not has_asset:
+            self._currency_combo.setCurrentText("EUR")
+            return
+        row = self._assets_by_id.get(int(asset_id), {})
+        ccy = str(row.get("currency") or "EUR").upper()
+        if self._currency_combo.findText(ccy) < 0:
+            self._currency_combo.addItem(ccy)
+        self._currency_combo.setCurrentText(ccy)
+
+    def _on_accept(self) -> None:
+        self._error_label.setText("")
+        account_id = self._account_combo.currentData()
+        if account_id is None:
+            self._error_label.setText("Sélectionnez un compte.")
+            return
+
+        type_code = str(self._type_combo.currentData() or "").strip().upper()
+        asset_id = self._asset_combo.currentData()
+        asset_id = int(asset_id) if asset_id is not None else None
+
+        if operation_requiert_actif(type_code) and asset_id is None:
+            self._error_label.setText("Cette opération nécessite un actif.")
+            return
+
+        quantity = self._qty_spin.value()
+        price = self._price_spin.value()
+        if not operation_requiert_quantite_prix(type_code):
+            quantity = 0.0
+            price = 0.0
+
+        payload = {
+            "date": self._date_edit.date().toString("yyyy-MM-dd"),
+            "person_id": self._person_id,
+            "account_id": int(account_id),
+            "type": type_code,
+            "asset_id": asset_id if operation_requiert_actif(type_code) else None,
+            "quantity": quantity if quantity > 0 else None,
+            "price": price if price > 0 else None,
+            "fees": float(self._fees_spin.value()),
+            "amount": float(self._amount_spin.value()),
+            "category": self._category_edit.text().strip() or None,
+            "note": self._note_edit.text().strip() or None,
+        }
+        self._payload = payload
+
+        if payload["asset_id"] is not None:
+            currency = str(self._currency_combo.currentText() or "EUR").strip().upper() or "EUR"
+            self._asset_currency_update = (int(payload["asset_id"]), currency)
+        else:
+            self._asset_currency_update = None
+        self.accept()
+
+    def get_result(self) -> tuple[dict | None, tuple[int, str] | None]:
+        return self._payload, self._asset_currency_update
 
 
 class PriceRefreshThread(QThread):
@@ -85,6 +389,8 @@ class PriceRefreshThread(QThread):
 
 
 class CompteBoursePanel(QWidget):
+    account_deleted = pyqtSignal(int, int)  # person_id, account_id
+
     def __init__(self, conn, person_id: int, account_id: int, account_type: str, parent=None):
         super().__init__(parent)
         self._conn = conn
@@ -101,11 +407,20 @@ class CompteBoursePanel(QWidget):
         self._last_prix_manuels_load_ts = 0.0
         self._last_saisie_assets_load_ts = 0.0
         self._last_tab_idx = 0
+        self._history_raw_df: pd.DataFrame = pd.DataFrame()
 
         self.setStyleSheet(f"background: {BG_PRIMARY};")
         main_v = QVBoxLayout(self)
         main_v.setContentsMargins(12, 12, 12, 12)
         main_v.setSpacing(12)
+
+        top_actions = QHBoxLayout()
+        top_actions.addStretch()
+        self._btn_delete_account = QPushButton("🗑️  Supprimer le compte")
+        self._btn_delete_account.setStyleSheet(STYLE_BTN_DANGER)
+        self._btn_delete_account.clicked.connect(self._on_delete_account)
+        top_actions.addWidget(self._btn_delete_account)
+        main_v.addLayout(top_actions)
 
         # Onglets internes : Tableau de bord / Saisie / Historique
         tabs = AnimatedTabWidget()
@@ -171,6 +486,25 @@ class CompteBoursePanel(QWidget):
         hist.setStyleSheet(f"background: {BG_PRIMARY};")
         hist_v = QVBoxLayout(hist)
         hist_v.setContentsMargins(8, 8, 8, 8)
+        hist_actions = QHBoxLayout()
+        self._btn_hist_edit = QPushButton("✏️  Modifier")
+        self._btn_hist_edit.setStyleSheet(STYLE_BTN_PRIMARY)
+        self._btn_hist_edit.setEnabled(False)
+        self._btn_hist_edit.clicked.connect(self._on_edit_transaction)
+        hist_actions.addWidget(self._btn_hist_edit)
+
+        self._btn_hist_delete = QPushButton("🗑️  Supprimer")
+        self._btn_hist_delete.setStyleSheet(STYLE_BTN_DANGER)
+        self._btn_hist_delete.setEnabled(False)
+        self._btn_hist_delete.clicked.connect(self._on_delete_transaction)
+        hist_actions.addWidget(self._btn_hist_delete)
+
+        self._hist_status = QLabel("")
+        self._hist_status.setStyleSheet(STYLE_STATUS)
+        hist_actions.addWidget(self._hist_status, 1)
+        hist_actions.addStretch()
+        hist_v.addLayout(hist_actions)
+
         self._hist_table = DataTableWidget()
         self._hist_table.setMinimumHeight(400)
         self._hist_table.set_filter_config([
@@ -179,6 +513,9 @@ class CompteBoursePanel(QWidget):
             {"col": "date",         "kind": "date_range",   "label": "Date"},
             {"col": "amount",       "kind": "number_range", "label": "Montant"},
         ])
+        self._hist_table.hide_column("id")
+        self._hist_table.row_selected.connect(self._on_history_row_selected)
+        self._hist_table.row_double_clicked.connect(self._on_edit_transaction)
         hist_v.addWidget(self._hist_table)
         tabs.addTab(hist, "📋  Historique")
 
@@ -278,6 +615,67 @@ class CompteBoursePanel(QWidget):
         self._invalidate_local_cache(dashboard=True, prix_manuels=True)
         self._load_dashboard(force=True)
 
+    def _on_delete_account(self) -> None:
+        try:
+            from services import repositories as repo
+
+            acc = repo.get_account(self._conn, self._account_id) or {}
+            account_name = str(acc.get("name") or f"Compte {self._account_id}")
+
+            confirm = QMessageBox(self)
+            confirm.setIcon(QMessageBox.Icon.Warning)
+            confirm.setWindowTitle("Confirmer la suppression")
+            confirm.setText("Voulez-vous vraiment supprimer ce compte ?")
+            confirm.setInformativeText(
+                "Cette action supprimera aussi toutes les transactions associées et est irréversible."
+            )
+            confirm.setStandardButtons(
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes
+            )
+            btn_delete = confirm.button(QMessageBox.StandardButton.Yes)
+            if btn_delete is not None:
+                btn_delete.setText("Supprimer")
+            btn_cancel = confirm.button(QMessageBox.StandardButton.Cancel)
+            if btn_cancel is not None:
+                btn_cancel.setText("Annuler")
+            confirm.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if confirm.exec() != QMessageBox.StandardButton.Yes:
+                return
+
+            self._btn_delete_account.setEnabled(False)
+            delete_res = repo.delete_account(
+                self._conn,
+                self._account_id,
+                person_id=self._person_id,
+            )
+
+            from services import snapshots as wk_snap
+            wk_snap.rebuild_snapshots_person_from_last(
+                self._conn,
+                person_id=self._person_id,
+                safety_weeks=4,
+                fallback_lookback_days=90,
+            )
+
+            tx_deleted = int(delete_res.get("transactions_deleted", 0))
+            QMessageBox.information(
+                self,
+                "Compte supprimé",
+                (
+                    f"Le compte « {account_name} » a été supprimé.\n"
+                    f"Transactions supprimées : {tx_deleted}."
+                ),
+            )
+            self.account_deleted.emit(int(self._person_id), int(self._account_id))
+        except Exception as e:
+            logger.error("CompteBoursePanel._on_delete_account error: %s", e, exc_info=True)
+            self._btn_delete_account.setEnabled(True)
+            QMessageBox.critical(
+                self,
+                "Suppression impossible",
+                f"Impossible de supprimer ce compte :\n{e}",
+            )
+
     def _load_dashboard(self, *, force: bool = False) -> None:
         if not force and self._is_cache_fresh(self._last_dashboard_load_ts, self._dashboard_cache_ttl_sec):
             return
@@ -374,6 +772,130 @@ class CompteBoursePanel(QWidget):
             except Exception as e:
                 logger.error("Erreur mise à jour asset_type: %s", e, exc_info=True)
 
+    def _set_hist_status(self, text: str, tone: str = "neutral") -> None:
+        self._hist_status.setText(text)
+        if tone == "success":
+            self._hist_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        elif tone == "error":
+            self._hist_status.setStyleSheet(STYLE_STATUS_ERROR)
+        elif tone == "warning":
+            self._hist_status.setStyleSheet(STYLE_STATUS_WARNING)
+        else:
+            self._hist_status.setStyleSheet(STYLE_STATUS)
+
+    def _on_history_row_selected(self, row: int) -> None:
+        enabled = int(row) >= 0
+        self._btn_hist_edit.setEnabled(enabled)
+        self._btn_hist_delete.setEnabled(enabled)
+
+    def _get_selected_history_tx(self) -> dict | None:
+        selected = self._hist_table.get_selected_row()
+        if not selected:
+            return None
+        tx_id_raw = selected.get("id")
+        if tx_id_raw is None or (isinstance(tx_id_raw, float) and pd.isna(tx_id_raw)):
+            return None
+        try:
+            tx_id = int(tx_id_raw)
+        except Exception:
+            return None
+
+        if self._history_raw_df is not None and not self._history_raw_df.empty and "id" in self._history_raw_df.columns:
+            match = self._history_raw_df[self._history_raw_df["id"] == tx_id]
+            if not match.empty:
+                return match.iloc[0].to_dict()
+
+        from services import repositories as repo
+        return repo.get_transaction(self._conn, tx_id)
+
+    def _on_edit_transaction(self, *_args) -> None:
+        tx = self._get_selected_history_tx()
+        if not tx:
+            self._set_hist_status("Sélectionnez une opération à modifier.", tone="warning")
+            return
+
+        dlg = TransactionEditDialog(self._conn, self._person_id, tx, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        payload, asset_currency_update = dlg.get_result()
+        if payload is None:
+            return
+
+        tx_id = int(tx["id"])
+        try:
+            from services import repositories as repo
+            repo.update_transaction(self._conn, tx_id, payload)
+            if asset_currency_update is not None:
+                asset_id, ccy = asset_currency_update
+                repo.update_asset_currency(self._conn, int(asset_id), str(ccy).upper())
+
+            self._invalidate_local_cache(
+                dashboard=True,
+                history=True,
+                prix_manuels=True,
+                saisie_assets=True,
+            )
+            self._load_history(force=True)
+            self._load_dashboard(force=True)
+            self._load_saisie_assets(force=True)
+            if self._tabs.currentIndex() == 3:
+                self._load_prix_manuels(force=True)
+            self._set_hist_status(f"✅ Opération #{tx_id} modifiée.", tone="success")
+        except Exception as e:
+            logger.error("CompteBoursePanel._on_edit_transaction error: %s", e, exc_info=True)
+            self._set_hist_status(f"❌ Erreur modification : {e}", tone="error")
+
+    def _on_delete_transaction(self) -> None:
+        tx = self._get_selected_history_tx()
+        if not tx:
+            self._set_hist_status("Sélectionnez une opération à supprimer.", tone="warning")
+            return
+
+        tx_id = int(tx["id"])
+        tx_type = str(tx.get("type") or "")
+        tx_date = str(tx.get("date") or "")
+        amount = tx.get("amount")
+        try:
+            amount_txt = f"{float(amount):,.2f} €".replace(",", " ") if amount is not None and not pd.isna(amount) else "—"
+        except Exception:
+            amount_txt = "—"
+
+        answer = QMessageBox.question(
+            self,
+            "Confirmer la suppression",
+            (
+                "Supprimer cette opération ?\n\n"
+                f"ID: {tx_id}\n"
+                f"Date: {tx_date}\n"
+                f"Type: {tx_type}\n"
+                f"Montant: {amount_txt}\n\n"
+                "Cette action est irréversible."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            from services import repositories as repo
+            repo.delete_transaction(self._conn, tx_id)
+            self._invalidate_local_cache(
+                dashboard=True,
+                history=True,
+                prix_manuels=True,
+                saisie_assets=True,
+            )
+            self._load_history(force=True)
+            self._load_dashboard(force=True)
+            self._load_saisie_assets(force=True)
+            if self._tabs.currentIndex() == 3:
+                self._load_prix_manuels(force=True)
+            self._set_hist_status(f"✅ Opération #{tx_id} supprimée.", tone="success")
+        except Exception as e:
+            logger.error("CompteBoursePanel._on_delete_transaction error: %s", e, exc_info=True)
+            self._set_hist_status(f"❌ Erreur suppression : {e}", tone="error")
+
     def _load_history(self, *, force: bool = False) -> None:
         if not force and self._is_cache_fresh(self._last_history_load_ts, self._history_cache_ttl_sec):
             return
@@ -382,8 +904,12 @@ class CompteBoursePanel(QWidget):
             from utils.libelles import afficher_type_operation
 
             tx = repo.list_transactions(self._conn, account_id=self._account_id, limit=5000)
+            self._history_raw_df = pd.DataFrame() if tx is None else tx.copy()
+            self._btn_hist_edit.setEnabled(False)
+            self._btn_hist_delete.setEnabled(False)
             if tx is None or tx.empty:
                 self._hist_table.set_dataframe(pd.DataFrame([{"Info": "Aucune opération."}]))
+                self._set_hist_status("")
                 return
             if "type" in tx.columns:
                 tx = tx.copy()
@@ -391,6 +917,7 @@ class CompteBoursePanel(QWidget):
             cols = ["date", "type", "asset_symbol", "amount", "fees", "category", "note", "id"]
             cols = [c for c in cols if c in tx.columns]
             self._hist_table.set_dataframe(tx[cols])
+            self._set_hist_status("")
             self._last_history_load_ts = time.monotonic()
         except Exception as e:
             logger.error("CompteBoursePanel._load_history error: %s", e, exc_info=True)

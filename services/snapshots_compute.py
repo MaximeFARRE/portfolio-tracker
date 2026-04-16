@@ -8,8 +8,10 @@ from services import entreprises_repository as ent_repo
 from services import immobilier_repository as immo_repo
 from services import market_history
 from services import positions
+from services import private_equity as pe_service
 from services import private_equity_repository as pe_repo
 from services import repositories as repo
+from services.asset_panel_mapping import INVESTMENT_ACCOUNT_TYPES, is_asset_type_in_panel
 from services.credits import get_crd_a_date, list_credits_by_person
 from services.snapshots_helpers import _now_paris_iso
 
@@ -27,6 +29,46 @@ _SENS_FLUX_MAP: dict[str, int] = {
     "RETRAIT": -1, "SORTIE": -1, "DEBIT": -1, "ACHAT": -1,
     "DEPENSE": -1, "FRAIS": -1, "IMPOT": -1, "REMBOURSEMENT_CREDIT": -1,
 }
+
+
+def _asset_type_by_id(conn, asset_ids: list[int]) -> dict[int, str]:
+    if not asset_ids:
+        return {}
+    ids = sorted({int(aid) for aid in asset_ids if aid is not None})
+    if not ids:
+        return {}
+    qmarks = ",".join(["?"] * len(ids))
+    rows = conn.execute(
+        f"SELECT id, asset_type FROM assets WHERE id IN ({qmarks})",
+        tuple(ids),
+    ).fetchall()
+    out: dict[int, str] = {}
+    for row in rows:
+        try:
+            rid = int(row["id"])
+            at = str(row["asset_type"] or "autre")
+        except Exception:
+            rid = int(row[0])
+            at = str(row[1] or "autre")
+        out[rid] = at
+    return out
+
+
+def _filter_positions_by_panel(conn, pos_df: pd.DataFrame, panel: str) -> pd.DataFrame:
+    if pos_df is None or pos_df.empty:
+        return pd.DataFrame(columns=pos_df.columns if pos_df is not None else [])
+    if "asset_id" not in pos_df.columns:
+        return pos_df.copy()
+
+    out = pos_df.copy()
+    aid_num = pd.to_numeric(out["asset_id"], errors="coerce")
+    asset_ids = aid_num.dropna().astype(int).tolist()
+    at_map = _asset_type_by_id(conn, asset_ids)
+    out["asset_type"] = aid_num.apply(
+        lambda aid: at_map.get(int(aid), "autre") if pd.notna(aid) else "autre"
+    )
+    keep = out["asset_type"].apply(lambda at: is_asset_type_in_panel(at, panel))
+    return out[keep].copy()
 
 
 def _sum_cash_native(df: pd.DataFrame) -> float:
@@ -49,7 +91,9 @@ def _bank_cash_asof_eur(
     if accounts is None or accounts.empty:
         return 0.0
 
-    banks = accounts[accounts["account_type"].astype(str).str.upper() == "BANQUE"].copy()
+    # Les livrets (LIVRET) sont traités comme des comptes bancaires simples dans les snapshots.
+    # Ils n'ont pas de structure "container" — is_bank_container retourne toujours False pour eux.
+    banks = accounts[accounts["account_type"].astype(str).str.upper().isin(["BANQUE", "LIVRET"])].copy()
     total_eur = 0.0
     week_ts = pd.to_datetime(week_date, errors="coerce")
 
@@ -119,12 +163,13 @@ def _bourse_cash_and_holdings_eur_asof(
     if accounts is None or accounts.empty:
         return 0.0, 0.0
 
-    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(INVESTMENT_ACCOUNT_TYPES)].copy()
     if bourse_acc.empty:
         return 0.0, 0.0
 
     acc_ids = [int(x) for x in bourse_acc["id"].tolist()]
     pos = positions.compute_positions_asof(conn, person_id, week_date, account_ids=acc_ids)
+    pos = _filter_positions_by_panel(conn, pos, "bourse")
     week_ts = pd.to_datetime(week_date, errors="coerce")
 
     def _get_tx_asof(account_id: int) -> pd.DataFrame:
@@ -190,19 +235,23 @@ def _bourse_cash_and_holdings_eur_asof(
             pos2 = pd.DataFrame()
         if not pos2.empty:
             grouped = pos2.groupby(["symbol", "asset_ccy"], as_index=False)["quantity"].sum()
-            price_cache: dict[str, float | None] = {}
+            price_cache: dict[str, tuple[float, str | None] | None] = {}
             for _, r in grouped.iterrows():
                 sym = str(r["symbol"])
                 qty = float(r["quantity"])
-                asset_ccy = str(r["asset_ccy"] or "EUR").upper()
+                asset_ccy_raw = str(r["asset_ccy"] or "").strip().upper()
 
                 if sym not in price_cache:
-                    price_cache[sym] = market_history.get_price_asof(conn, sym, week_date)
-                px = price_cache[sym]
-                if px is None:
+                    price_cache[sym] = market_history.get_price_and_currency_asof(conn, sym, week_date)
+                result = price_cache[sym]
+                if result is None:
                     if _tracker is not None:
                         _tracker["price_missing"] = _tracker.get("price_missing", 0) + 1
                     continue
+
+                px, price_ccy = result
+                # Priorité : devise de l'actif (assets.currency) → devise du tableau de prix → EUR
+                asset_ccy = asset_ccy_raw or price_ccy or "EUR"
 
                 value_native = qty * float(px)
                 converted_holding = _convert_to_eur(value_native, asset_ccy)
@@ -249,8 +298,12 @@ def _pe_cash_asof_eur(conn, person_id: int, week_date: str) -> float:
 def _pe_value_asof_eur(conn, person_id: int, week_date: str) -> float:
     projects = pe_repo.list_pe_projects(conn, person_id=person_id)
     tx = pe_repo.list_pe_transactions(conn, person_id=person_id)
+    pe_projects_value = 0.0
+    account_assets_value = pe_service.get_account_based_pe_value_asof(
+        conn, person_id=person_id, asof_date=week_date
+    )
     if projects is None or projects.empty or tx is None or tx.empty:
-        return 0.0
+        return float(round(account_assets_value, 2))
 
     d = tx.copy()
     d["date_dt"] = pd.to_datetime(d["date"], errors="coerce")
@@ -279,7 +332,8 @@ def _pe_value_asof_eur(conn, person_id: int, week_date: str) -> float:
             invests = dpr[dpr["tx_type"].astype(str).str.upper() == "INVEST"]
             total += float(pd.to_numeric(invests["amount"], errors="coerce").fillna(0.0).sum())
 
-    return float(round(total, 2))
+    pe_projects_value = float(round(total, 2))
+    return float(round(pe_projects_value + account_assets_value, 2))
 
 
 def _enterprise_value_asof_eur(conn, person_id: int, week_date: str) -> float:

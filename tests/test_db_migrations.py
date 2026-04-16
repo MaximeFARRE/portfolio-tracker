@@ -1,6 +1,7 @@
 import sqlite3
 
 from services.db import (
+    MIG_VER_ADD_ASSET_IMPORT_ALIASES,
     MIG_VER_ADD_CREDITS_PAYER_ACCOUNT,
     MIG_VER_ADD_IMMO_COLUMNS,
     MIG_VER_ADD_TR_PHONE,
@@ -62,6 +63,7 @@ def test_apply_code_migrations_adds_missing_structural_elements():
     assert MIG_VER_ADD_IMMO_COLUMNS in applied
     assert MIG_VER_ADD_CREDITS_PAYER_ACCOUNT in applied
     assert MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX in applied
+    assert MIG_VER_ADD_ASSET_IMPORT_ALIASES in applied
 
     assert "tr_phone" in _colnames(conn, "people")
     assert "payer_account_id" in _colnames(conn, "credits")
@@ -72,8 +74,10 @@ def test_apply_code_migrations_adds_missing_structural_elements():
     assert "immobilier_value" in _colnames(conn, "patrimoine_snapshots_weekly")
     assert "immobilier_value" in _colnames(conn, "patrimoine_snapshots_family_weekly")
     assert _table_exists(conn, "import_batches")
+    assert _table_exists(conn, "asset_import_aliases")
     assert _index_exists(conn, "idx_import_batches_person")
     assert _index_exists(conn, "idx_tx_person_account_date")
+    assert _index_exists(conn, "uq_asset_import_aliases_key")
 
     # Idempotence: un second passage ne doit rien réappliquer.
     assert apply_code_migrations(conn) == []
@@ -87,6 +91,7 @@ def test_apply_code_migrations_adds_missing_structural_elements():
     assert MIG_VER_ADD_IMMO_COLUMNS in versions
     assert MIG_VER_ADD_CREDITS_PAYER_ACCOUNT in versions
     assert MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX in versions
+    assert MIG_VER_ADD_ASSET_IMPORT_ALIASES in versions
 
     conn.close()
 
@@ -130,6 +135,8 @@ def test_run_migrations_applies_sql_and_code_versions(conn):
     assert MIG_VER_ADD_IMMO_COLUMNS in versions
     assert MIG_VER_ADD_CREDITS_PAYER_ACCOUNT in versions
     assert MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX in versions
+    assert MIG_VER_ADD_ASSET_IMPORT_ALIASES in versions
+    assert 5 in versions
 
     # Idempotence complète
     assert run_migrations(conn) == []

@@ -72,3 +72,13 @@ def add_pe_transaction(conn, project_id: int, date: str, tx_type: str, amount: f
         (project_id, date, tx_type, float(amount), quantity, unit_price, (note or None)),
     )
     conn.commit()
+
+def delete_pe_transaction(conn, tx_id: int) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM pe_transactions WHERE id = ?",
+        (int(tx_id),),
+    )
+    if int(cur.rowcount or 0) <= 0:
+        raise ValueError(f"Transaction PE introuvable (id={int(tx_id)}).")
+    conn.commit()

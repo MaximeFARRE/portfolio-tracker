@@ -11,7 +11,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QScrollArea, QDateEdit,
+    QFrame, QScrollArea, QDateEdit, QComboBox, QDoubleSpinBox,
+    QSpinBox, QCheckBox,
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QDate
 
@@ -23,9 +24,11 @@ from qt_ui.theme import (
     STYLE_BTN_PRIMARY, STYLE_TITLE_XL, STYLE_SECTION,
     STYLE_STATUS, STYLE_STATUS_SUCCESS, STYLE_STATUS_WARNING, STYLE_STATUS_ERROR,
     COLOR_SUCCESS, COLOR_ERROR, COLOR_WARNING,
+    STYLE_INPUT_FOCUS, STYLE_INPUT,
     plotly_layout, plotly_time_series_layout,
 )
 from services.common_utils import safe_float
+from services.asset_panel_mapping import INVESTMENT_ACCOUNT_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -159,8 +162,9 @@ class RefreshPricesThread(QThread):
                     self.finished.emit("Aucun compte bourse.")
                     return
 
-                bourse_types = {"PEA", "CTO", "CRYPTO"}
-                df_b = df_acc[df_acc["account_type"].astype(str).str.upper().isin(bourse_types)]
+                df_b = df_acc[
+                    df_acc["account_type"].astype(str).str.upper().isin(INVESTMENT_ACCOUNT_TYPES)
+                ]
                 n_ok, n_fail = 0, 0
                 assets_to_refresh: dict[int, str] = {}
                 asset_target_ccy: dict[int, str] = {}
@@ -271,6 +275,15 @@ class BourseGlobalPanel(QWidget):
         )
         self._btn_rebuild.clicked.connect(self._on_rebuild)
         self._rebuild_status = QLabel()
+
+        self._btn_edit_asset = QPushButton("✏️  Modifier un actif")
+        self._btn_edit_asset.setStyleSheet(STYLE_BTN_PRIMARY)
+        self._btn_edit_asset.setFixedWidth(175)
+        self._btn_edit_asset.setToolTip(
+            "Modifier le nom, le symbole ou la devise d'un actif.\n"
+            "Permet d'éditer aussi les actifs inactifs (hors portefeuille)."
+        )
+        self._btn_edit_asset.clicked.connect(self._on_edit_any_asset)
         self._rebuild_status.setStyleSheet(STYLE_STATUS)
         self._rebuild_status.setAlignment(Qt.AlignmentFlag.AlignRight)
 
@@ -278,6 +291,7 @@ class BourseGlobalPanel(QWidget):
         btn_col.addWidget(self._refresh_status, alignment=Qt.AlignmentFlag.AlignRight)
         btn_col.addWidget(self._btn_rebuild, alignment=Qt.AlignmentFlag.AlignRight)
         btn_col.addWidget(self._rebuild_status, alignment=Qt.AlignmentFlag.AlignRight)
+        btn_col.addWidget(self._btn_edit_asset, alignment=Qt.AlignmentFlag.AlignRight)
         header_row.addLayout(btn_col)
 
         layout.addLayout(header_row)
@@ -299,13 +313,16 @@ class BourseGlobalPanel(QWidget):
         # ── KPI Row 2 — revenus & positions ──────────────────────────────────
         kpi_row2 = QHBoxLayout()
         kpi_row2.setSpacing(10)
-        self._kpi_nb  = KpiCard("Positions ouvertes", "—", emoji="🎯", tone="neutral")
-        self._kpi_div = KpiCard("Dividendes perçus",  "—", emoji="💵", tone="success")
-        self._kpi_int = KpiCard("Intérêts perçus",    "—", emoji="🏦", tone="success")
-        self._kpis_bot = [self._kpi_nb, self._kpi_div, self._kpi_int]
+        self._kpi_nb     = KpiCard("Positions ouvertes", "—", emoji="🎯", tone="neutral")
+        self._kpi_div    = KpiCard("Dividendes perçus",  "—", emoji="💵", tone="success")
+        self._kpi_int    = KpiCard("Intérêts perçus",    "—", emoji="🏦", tone="success")
+        self._kpi_fx_pnl = KpiCard("Effet change",       "—", emoji="💱", tone="neutral")
+        self._kpi_fx_pnl.setToolTip(
+            "Impact de la variation des devises sur la valorisation en euros des actifs non libelles en EUR"
+        )
+        self._kpis_bot = [self._kpi_nb, self._kpi_div, self._kpi_int, self._kpi_fx_pnl]
         for card in self._kpis_bot:
             kpi_row2.addWidget(card, stretch=1)
-        kpi_row2.addStretch(1)
         layout.addLayout(kpi_row2)
 
         layout.addWidget(_sep())
@@ -327,14 +344,14 @@ class BourseGlobalPanel(QWidget):
         vbox_hist.addWidget(self._chart_history)
         charts_row.addLayout(vbox_hist, stretch=3)
 
-        vbox_inc = QVBoxLayout()
-        vbox_inc.setSpacing(4)
-        lbl_inc = QLabel("Revenus passifs (Dividendes & Intérêts)")
-        lbl_inc.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
-        self._chart_income = PlotlyView(min_height=280)
-        vbox_inc.addWidget(lbl_inc)
-        vbox_inc.addWidget(self._chart_income)
-        charts_row.addLayout(vbox_inc, stretch=2)
+        vbox_alloc_top = QVBoxLayout()
+        vbox_alloc_top.setSpacing(4)
+        lbl_alloc = QLabel("Répartition par actif")
+        lbl_alloc.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        self._chart_alloc = PlotlyView(min_height=320)
+        vbox_alloc_top.addWidget(lbl_alloc)
+        vbox_alloc_top.addWidget(self._chart_alloc)
+        charts_row.addLayout(vbox_alloc_top, stretch=2)
 
         layout.addLayout(charts_row)
         layout.addWidget(_sep())
@@ -394,16 +411,22 @@ class BourseGlobalPanel(QWidget):
             {"col": "Compte",     "kind": "combo", "label": "Compte"},
             {"col": "Type",       "kind": "combo", "label": "PEA/CTO"},
         ])
+        self._table_pos.row_double_clicked.connect(self._on_pos_table_double_clicked)
         table_area.addWidget(self._table_pos, stretch=3)
 
-        vbox_alloc = QVBoxLayout()
-        vbox_alloc.setSpacing(4)
-        lbl_alloc = QLabel("Répartition par actif")
-        lbl_alloc.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
-        self._chart_alloc = PlotlyView(min_height=260)
-        vbox_alloc.addWidget(lbl_alloc)
-        vbox_alloc.addWidget(self._chart_alloc)
-        table_area.addLayout(vbox_alloc, stretch=2)
+        vbox_right = QVBoxLayout()
+        vbox_right.setSpacing(4)
+        lbl_inc = QLabel("Revenus passifs (Dividendes & Intérêts)")
+        lbl_inc.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        self._chart_income = PlotlyView(min_height=280)
+        lbl_alloc_type = QLabel("Répartition par type d'actif")
+        lbl_alloc_type.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        self._chart_alloc_type = PlotlyView(min_height=190)
+        vbox_right.addWidget(lbl_inc)
+        vbox_right.addWidget(self._chart_income)
+        vbox_right.addWidget(lbl_alloc_type)
+        vbox_right.addWidget(self._chart_alloc_type)
+        table_area.addLayout(vbox_right, stretch=3)
 
         layout.addLayout(table_area)
         layout.addWidget(_sep())
@@ -418,6 +441,7 @@ class BourseGlobalPanel(QWidget):
         self._table_diag.set_filter_config([
             {"col": "Statut", "kind": "combo", "label": "Statut"},
         ])
+        self._table_diag.row_double_clicked.connect(self._on_diag_table_double_clicked)
         layout.addWidget(self._table_diag)
 
         # ── Analytics Avancés (accordéons, tout fermé par défaut) ──────────
@@ -433,6 +457,10 @@ class BourseGlobalPanel(QWidget):
 
         # État de chargement lazy : une seule fois par section
         self._analytics_loaded: dict[str, bool] = {}
+        self._frontier_controls_ready = False
+        self._frontier_presets: list[dict] = []
+        self._frontier_result_container: QWidget | None = None
+        self._frontier_result_layout: QVBoxLayout | None = None
 
         self._section_risk = self._build_analytics_section(
             layout, "📈 Rendement & Risque", "risk_return"
@@ -463,6 +491,96 @@ class BourseGlobalPanel(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._overlay.resize(self.size())
+
+    # ── Édition d'actif ───────────────────────────────────────────────────────
+
+    def _open_edit_asset_dialog(self, symbol: str) -> None:
+        """Ouvre EditAssetDialog pour le symbole donné, puis rafraîchit la vue."""
+        from services import repositories as repo
+        from qt_ui.panels.edit_asset_dialog import EditAssetDialog
+
+        row = repo.get_asset_by_symbol(self._conn, symbol)
+        if row is None:
+            return
+        try:
+            asset_id = int(row["id"] if hasattr(row, "keys") else row[0])
+        except (KeyError, IndexError, TypeError, ValueError):
+            return
+
+        dlg = EditAssetDialog(self._conn, asset_id, parent=self)
+        if dlg.exec() == EditAssetDialog.DialogCode.Accepted:
+            self._invalidate_view_cache(reset_analytics=True)
+            self._load_data(force=True)
+
+    def _on_pos_table_double_clicked(self, row_idx: int) -> None:
+        """Double-clic sur le tableau des positions → édition de l'actif."""
+        df = self._table_pos.get_dataframe()
+        if df.empty or row_idx >= len(df):
+            return
+        row = df.iloc[row_idx]
+        # La colonne "symbol" est renommée "Symbole" dans le df affiché
+        symbol = str(row.get("Symbole", row.get("symbol", ""))).strip()
+        if symbol:
+            self._open_edit_asset_dialog(symbol)
+
+    def _on_diag_table_double_clicked(self, row_idx: int) -> None:
+        """Double-clic sur la table de diagnostic → édition de l'actif."""
+        df = self._table_diag.get_dataframe()
+        if df.empty or row_idx >= len(df):
+            return
+        row = df.iloc[row_idx]
+        symbol = str(row.get("Ticker", "")).strip()
+        if symbol:
+            self._open_edit_asset_dialog(symbol)
+
+    def _on_edit_any_asset(self) -> None:
+        """Bouton 'Modifier un actif' → picker sur tous les actifs (actifs + inactifs)."""
+        from services import repositories as repo
+        from qt_ui.panels.edit_asset_dialog import EditAssetDialog
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QComboBox, QLabel, QPushButton, QDialogButtonBox
+
+        df_assets = repo.list_assets(self._conn)
+        if df_assets is None or df_assets.empty:
+            return
+
+        picker = QDialog(self)
+        picker.setWindowTitle("Choisir un actif à modifier")
+        picker.setModal(True)
+        picker.resize(400, 130)
+        picker.setStyleSheet(f"background: {BG_PRIMARY};")
+
+        vbox = QVBoxLayout(picker)
+        vbox.setContentsMargins(14, 14, 14, 14)
+        vbox.setSpacing(10)
+
+        lbl = QLabel("Actif :")
+        lbl.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        combo = QComboBox()
+        combo.setStyleSheet(STYLE_INPUT)
+        for _, r in df_assets.iterrows():
+            label = f"{r['symbol']}  —  {r['name']}"
+            combo.addItem(label, int(r["id"]))
+        vbox.addWidget(lbl)
+        vbox.addWidget(combo)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(picker.accept)
+        buttons.rejected.connect(picker.reject)
+        vbox.addWidget(buttons)
+
+        if picker.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        asset_id = combo.currentData()
+        if asset_id is None:
+            return
+
+        dlg = EditAssetDialog(self._conn, asset_id, parent=self)
+        if dlg.exec() == EditAssetDialog.DialogCode.Accepted:
+            self._invalidate_view_cache(reset_analytics=True)
+            self._load_data(force=True)
 
     def refresh(self) -> None:
         self._load_data()
@@ -573,6 +691,7 @@ class BourseGlobalPanel(QWidget):
         self._chart_history.set_loading(True)
         self._chart_income.set_loading(True)
         self._chart_alloc.set_loading(True)
+        self._chart_alloc_type.set_loading(True)
 
         self._overlay.start("Analyse du portefeuille global…", blur=True)
         loaded_ok = False
@@ -581,7 +700,8 @@ class BourseGlobalPanel(QWidget):
             from services.bourse_analytics import (
                 get_live_bourse_positions,
                 get_bourse_performance_metrics, compute_invested_series,
-                get_tickers_diagnostic_df, get_bourse_state_asof
+                get_tickers_diagnostic_df, get_bourse_state_asof,
+                compute_fx_pnl_summary,
             )
 
             # ── Comptes bourse ──────────────────────────────────────────────
@@ -589,14 +709,16 @@ class BourseGlobalPanel(QWidget):
             if df_acc is None or df_acc.empty:
                 return
 
-            bourse_types = {"PEA", "CTO", "CRYPTO"}
-            df_b = df_acc[df_acc["account_type"].astype(str).str.upper().isin(bourse_types)]
+            df_b = df_acc[
+                df_acc["account_type"].astype(str).str.upper().isin(INVESTMENT_ACCOUNT_TYPES)
+            ]
             if df_b.empty:
                 self._table_pos.set_dataframe(pd.DataFrame([{"Info": "Aucun compte bourse."}]))
                 return
 
             metrics = {}
             missing_reasons: list[str] = []
+            fx_pnl_summary: dict = {}
             if self._selected_date:
                 # ── MODE HISTORIQUE ──
                 state = get_bourse_state_asof(self._conn, self._person_id, self._selected_date)
@@ -631,6 +753,7 @@ class BourseGlobalPanel(QWidget):
                     return
                 total_val = _finite_sum(df_all["value"])       if "value"      in df_all.columns else None
                 total_pnl = _finite_sum(df_all["pnl_latent"])  if "pnl_latent" in df_all.columns else None
+                fx_pnl_summary = compute_fx_pnl_summary(df_all)
                 nb_pos    = len(df_all[df_all["quantity"] > 0]) if "quantity"  in df_all.columns else len(df_all)
                 nb_acc    = len(df_b)
                 if "valuation_status" in df_all.columns:
@@ -762,6 +885,32 @@ class BourseGlobalPanel(QWidget):
                 details=pnl_details or None,
             )
 
+            # ── KPI Effet change (FX) ─────────────────────────────────────────
+            total_fx_pnl = fx_pnl_summary.get("total_fx_pnl")
+            fx_by_ccy: dict = fx_pnl_summary.get("by_currency", {})
+            missing_fx_breakdown = int(fx_pnl_summary.get("missing_breakdown_count", 0) or 0)
+            if total_fx_pnl is None or (not fx_pnl_summary):
+                self._kpi_fx_pnl.set_content(
+                    "Effet change", "—",
+                    subtitle="Non disponible en mode historique",
+                    emoji="💱", tone="neutral",
+                )
+            else:
+                fx_sign = "+" if float(total_fx_pnl) >= 0 else ""
+                fx_value = f"{fx_sign}{_fmt_eur(total_fx_pnl)}"
+                fx_details = [
+                    (f"Impact {ccy}", f"{'+' if v >= 0 else ''}{_fmt_eur(v)}")
+                    for ccy, v in sorted(fx_by_ccy.items())
+                ]
+                self._kpi_fx_pnl.set_content(
+                    "Effet change",
+                    fx_value,
+                    subtitle="Calcul partiel" if missing_fx_breakdown > 0 else "Impact devise",
+                    emoji="💱",
+                    tone="neutral" if float(total_fx_pnl) == 0 else ("success" if float(total_fx_pnl) > 0 else "alert"),
+                    details=fx_details or None,
+                )
+
             # ── Table des positions (U5) ──────────────────────────────────────
             # On adapte les colonnes selon le mode
             if self._selected_date:
@@ -890,10 +1039,25 @@ class BourseGlobalPanel(QWidget):
 
             # ── Pie chart répartition (U6) ────────────────────────────────────
             if "value" in df_all.columns and "symbol" in df_all.columns:
-                df_pie = df_all[df_all["value"] > 0][["symbol", "value"]].copy()
+                if "name" in df_all.columns:
+                    asset_labels = (
+                        df_all["name"]
+                        .fillna("")
+                        .astype(str)
+                        .str.strip()
+                        .mask(lambda s: s == "", df_all["symbol"])
+                    )
+                else:
+                    asset_labels = df_all["symbol"]
+
+                df_pie = (
+                    df_all.assign(asset_label=asset_labels)
+                    .loc[df_all["value"] > 0, ["asset_label", "value"]]
+                    .copy()
+                )
                 if not df_pie.empty:
                     fig_pie = px.pie(
-                        df_pie, names="symbol", values="value", hole=0.42,
+                        df_pie, names="asset_label", values="value", hole=0.38,
                         template="plotly_dark",
                         color_discrete_sequence=px.colors.qualitative.Set3,
                     )
@@ -904,7 +1068,7 @@ class BourseGlobalPanel(QWidget):
                         pull=[0.04] + [0.0] * (len(df_pie) - 1),
                     )
                     fig_pie.update_layout(
-                        **plotly_layout(margin=dict(l=24, r=24, t=24, b=24)),
+                        **plotly_layout(margin=dict(l=12, r=12, t=24, b=24)),
                         showlegend=False,
                     )
                     self._chart_alloc.set_figure(fig_pie)
@@ -912,6 +1076,43 @@ class BourseGlobalPanel(QWidget):
                     self._chart_alloc.clear_figure()
             else:
                 self._chart_alloc.clear_figure()
+
+            # ── Pie chart répartition par type d'actif ───────────────────────
+            if "value" in df_all.columns and "asset_type" in df_all.columns:
+                df_type = (
+                    df_all.loc[df_all["value"] > 0, ["asset_type", "value"]]
+                    .copy()
+                )
+                if not df_type.empty:
+                    df_type["asset_type"] = (
+                        df_type["asset_type"]
+                        .fillna("Non renseigné")
+                        .astype(str)
+                        .str.strip()
+                        .replace("", "Non renseigné")
+                    )
+                    fig_type = px.pie(
+                        df_type, names="asset_type", values="value", hole=0.46,
+                        template="plotly_dark",
+                        color_discrete_sequence=px.colors.qualitative.Safe,
+                    )
+                    fig_type.update_traces(
+                        textinfo="percent",
+                        hovertemplate="<b>%{label}</b><br>%{value:,.0f} €<br>%{percent}<extra></extra>",
+                    )
+                    fig_type.update_layout(
+                        **plotly_layout(margin=dict(l=10, r=10, t=24, b=10)),
+                        showlegend=True,
+                        legend=dict(
+                            orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="left", x=0, font=dict(size=10),
+                        ),
+                    )
+                    self._chart_alloc_type.set_figure(fig_type)
+                else:
+                    self._chart_alloc_type.clear_figure()
+            else:
+                self._chart_alloc_type.clear_figure()
 
             # ── Diagnostic Tickers ───────────────────────────────────────────
             df_diag = get_tickers_diagnostic_df(self._conn, self._person_id)
@@ -939,6 +1140,7 @@ class BourseGlobalPanel(QWidget):
             self._chart_history.set_loading(False)
             self._chart_income.set_loading(False)
             self._chart_alloc.set_loading(False)
+            self._chart_alloc_type.set_loading(False)
 
             self._overlay.stop()
             if loaded_ok:
@@ -1026,6 +1228,340 @@ class BourseGlobalPanel(QWidget):
         row.addStretch()
         return row
 
+    @staticmethod
+    def _clear_layout(layout: QVBoxLayout | QHBoxLayout) -> None:
+        """Nettoie récursivement un layout."""
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                BourseGlobalPanel._clear_layout(child_layout)  # type: ignore[arg-type]
+
+    def _ensure_frontier_controls(self, parent_layout: QVBoxLayout) -> None:
+        """Construit les contrôles Frontier (preset + avancé) une seule fois."""
+        if self._frontier_controls_ready:
+            return
+
+        from services.bourse_advanced_analytics import get_efficient_frontier_presets_payload
+
+        presets_payload = get_efficient_frontier_presets_payload()
+        self._frontier_presets = presets_payload.get("presets", []) or []
+
+        controls_box = QFrame()
+        controls_box.setStyleSheet(
+            f"background: {BG_CARD}; border: 1px solid {BORDER_SUBTLE}; border-radius: 8px; padding: 8px;"
+        )
+        controls_layout = QVBoxLayout(controls_box)
+        controls_layout.setContentsMargins(10, 8, 10, 8)
+        controls_layout.setSpacing(8)
+
+        row_mode = QHBoxLayout()
+        row_mode.setSpacing(8)
+        lbl_mode = QLabel("Mode de diversification")
+        lbl_mode.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        row_mode.addWidget(lbl_mode)
+
+        self._frontier_preset_combo = QComboBox()
+        self._frontier_preset_combo.setStyleSheet(STYLE_INPUT_FOCUS)
+        self._frontier_preset_combo.setMinimumWidth(220)
+        for preset in self._frontier_presets:
+            self._frontier_preset_combo.addItem(str(preset.get("label", "")), preset.get("key"))
+        row_mode.addWidget(self._frontier_preset_combo)
+
+        self._btn_frontier_recompute = QPushButton("↻ Recalculer")
+        self._btn_frontier_recompute.setStyleSheet(STYLE_BTN_PRIMARY)
+        self._btn_frontier_recompute.clicked.connect(self._on_frontier_recompute_clicked)
+        row_mode.addWidget(self._btn_frontier_recompute)
+        row_mode.addStretch()
+        controls_layout.addLayout(row_mode)
+
+        self._lbl_frontier_preset_help = QLabel("")
+        self._lbl_frontier_preset_help.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self._lbl_frontier_preset_help.setWordWrap(True)
+        controls_layout.addWidget(self._lbl_frontier_preset_help)
+
+        self._btn_frontier_advanced = QPushButton("Paramètres avancés ▸")
+        self._btn_frontier_advanced.setCheckable(True)
+        self._btn_frontier_advanced.setStyleSheet(STYLE_BTN_PRIMARY)
+        self._btn_frontier_advanced.toggled.connect(self._on_frontier_advanced_toggled)
+        controls_layout.addWidget(self._btn_frontier_advanced)
+
+        self._frontier_advanced_box = QFrame()
+        self._frontier_advanced_box.setVisible(False)
+        self._frontier_advanced_box.setStyleSheet(
+            f"background: transparent; border: 1px dashed {BORDER_SUBTLE}; border-radius: 6px; padding: 8px;"
+        )
+        adv_layout = QVBoxLayout(self._frontier_advanced_box)
+        adv_layout.setContentsMargins(8, 8, 8, 8)
+        adv_layout.setSpacing(6)
+
+        row_a = QHBoxLayout()
+        row_a.setSpacing(8)
+        lbl_max_w = QLabel("Poids max / actif (%)")
+        lbl_max_w.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self._spin_frontier_max_weight = QDoubleSpinBox()
+        self._spin_frontier_max_weight.setRange(1.0, 100.0)
+        self._spin_frontier_max_weight.setDecimals(1)
+        self._spin_frontier_max_weight.setSuffix(" %")
+        self._spin_frontier_max_weight.setSingleStep(1.0)
+        self._spin_frontier_max_weight.setStyleSheet(STYLE_INPUT)
+        self._spin_frontier_max_weight.setFixedWidth(120)
+        row_a.addWidget(lbl_max_w)
+        row_a.addWidget(self._spin_frontier_max_weight)
+
+        lbl_min_assets = QLabel("Actifs min")
+        lbl_min_assets.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self._spin_frontier_min_assets = QSpinBox()
+        self._spin_frontier_min_assets.setRange(2, 30)
+        self._spin_frontier_min_assets.setStyleSheet(STYLE_INPUT)
+        self._spin_frontier_min_assets.setFixedWidth(80)
+        row_a.addWidget(lbl_min_assets)
+        row_a.addWidget(self._spin_frontier_min_assets)
+        row_a.addStretch()
+        adv_layout.addLayout(row_a)
+
+        row_b = QHBoxLayout()
+        row_b.setSpacing(8)
+        lbl_min_line = QLabel("Poids min ligne active (%)")
+        lbl_min_line.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self._spin_frontier_min_line = QDoubleSpinBox()
+        self._spin_frontier_min_line.setRange(0.0, 20.0)
+        self._spin_frontier_min_line.setDecimals(1)
+        self._spin_frontier_min_line.setSuffix(" %")
+        self._spin_frontier_min_line.setSingleStep(0.5)
+        self._spin_frontier_min_line.setStyleSheet(STYLE_INPUT)
+        self._spin_frontier_min_line.setFixedWidth(120)
+        row_b.addWidget(lbl_min_line)
+        row_b.addWidget(self._spin_frontier_min_line)
+
+        lbl_max_assets = QLabel("Actifs max (0 = sans limite)")
+        lbl_max_assets.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self._spin_frontier_max_assets = QSpinBox()
+        self._spin_frontier_max_assets.setRange(0, 30)
+        self._spin_frontier_max_assets.setStyleSheet(STYLE_INPUT)
+        self._spin_frontier_max_assets.setFixedWidth(80)
+        row_b.addWidget(lbl_max_assets)
+        row_b.addWidget(self._spin_frontier_max_assets)
+        row_b.addStretch()
+        adv_layout.addLayout(row_b)
+
+        row_c = QHBoxLayout()
+        row_c.setSpacing(8)
+        self._chk_frontier_allow_residual = QCheckBox("Autoriser des lignes résiduelles très faibles")
+        self._chk_frontier_allow_residual.setChecked(True)
+        self._chk_frontier_allow_residual.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
+        row_c.addWidget(self._chk_frontier_allow_residual)
+        row_c.addStretch()
+        adv_layout.addLayout(row_c)
+
+        controls_layout.addWidget(self._frontier_advanced_box)
+
+        help_label = QLabel(
+            "ℹ️ Sans contraintes, l'optimisation peut produire des portefeuilles très concentrés. "
+            "Utilisez les modes de diversification pour obtenir des allocations plus investissables."
+        )
+        help_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
+        help_label.setWordWrap(True)
+        controls_layout.addWidget(help_label)
+
+        parent_layout.addWidget(controls_box)
+
+        self._frontier_result_container = QFrame()
+        self._frontier_result_layout = QVBoxLayout(self._frontier_result_container)
+        self._frontier_result_layout.setContentsMargins(0, 0, 0, 0)
+        self._frontier_result_layout.setSpacing(10)
+        parent_layout.addWidget(self._frontier_result_container)
+
+        self._frontier_preset_combo.currentIndexChanged.connect(self._on_frontier_preset_changed)
+        if self._frontier_presets:
+            self._frontier_preset_combo.blockSignals(True)
+            self._frontier_preset_combo.setCurrentIndex(0)
+            self._frontier_preset_combo.blockSignals(False)
+            self._apply_frontier_preset_values(str(self._frontier_preset_combo.currentData()))
+        self._frontier_controls_ready = True
+
+    def _on_frontier_advanced_toggled(self, opened: bool) -> None:
+        self._frontier_advanced_box.setVisible(opened)
+        self._btn_frontier_advanced.setText("Paramètres avancés ▾" if opened else "Paramètres avancés ▸")
+
+    def _on_frontier_preset_changed(self, *_args) -> None:
+        preset_key = str(self._frontier_preset_combo.currentData() or "free")
+        self._apply_frontier_preset_values(preset_key)
+        self._refresh_efficient_frontier_results()
+
+    def _on_frontier_recompute_clicked(self, *_args) -> None:
+        self._refresh_efficient_frontier_results()
+
+    def _apply_frontier_preset_values(self, preset_key: str) -> None:
+        preset = next((p for p in self._frontier_presets if str(p.get("key")) == preset_key), None)
+        if not preset:
+            return
+        constraints = preset.get("constraints", {}) or {}
+        self._lbl_frontier_preset_help.setText(str(preset.get("description", "")))
+
+        self._spin_frontier_max_weight.setValue(
+            float(constraints.get("max_weight_per_asset", 1.0)) * 100.0
+        )
+        self._spin_frontier_min_assets.setValue(int(constraints.get("min_assets", 2)))
+        self._spin_frontier_min_line.setValue(
+            float(constraints.get("min_active_weight", 0.0)) * 100.0
+        )
+        max_assets = constraints.get("max_assets")
+        self._spin_frontier_max_assets.setValue(int(max_assets) if max_assets else 0)
+        self._chk_frontier_allow_residual.setChecked(bool(constraints.get("allow_tiny_residuals", True)))
+
+    def _collect_frontier_settings(self) -> dict:
+        max_assets = int(self._spin_frontier_max_assets.value())
+        return {
+            "preset": str(self._frontier_preset_combo.currentData() or "free"),
+            "advanced": {
+                "max_weight_per_asset": float(self._spin_frontier_max_weight.value()) / 100.0,
+                "min_assets": int(self._spin_frontier_min_assets.value()),
+                "min_active_weight": float(self._spin_frontier_min_line.value()) / 100.0,
+                "max_assets": max_assets if max_assets > 0 else None,
+                "allow_tiny_residuals": bool(self._chk_frontier_allow_residual.isChecked()),
+                "allow_short": False,
+                "n_points": 30,
+            },
+        }
+
+    def _refresh_efficient_frontier_results(self) -> None:
+        if self._frontier_result_layout is None:
+            return
+        self._clear_layout(self._frontier_result_layout)
+
+        from services.bourse_advanced_analytics import get_efficient_frontier_payload
+
+        settings = self._collect_frontier_settings()
+        payload = get_efficient_frontier_payload(
+            self._conn,
+            self._person_id,
+            settings=settings,
+        )
+        if "error" in payload:
+            self._frontier_result_layout.addWidget(self._analytics_error_label(payload["error"]))
+            return
+
+        frontier = payload.get("frontier_points", [])
+        current = payload.get("current_portfolio", {})
+        min_var = payload.get("min_variance", {})
+        max_sharpe = payload.get("max_sharpe", {})
+        max_sharpe_div = max_sharpe.get("diversification", {}) or {}
+
+        self._frontier_result_layout.addLayout(self._analytics_kpi_row([
+            (
+                "Portefeuille actuel",
+                f"Vol {float(current.get('vol', 0.0)):.1f}% / Ret {float(current.get('ret', 0.0)):.1f}%",
+            ),
+            (
+                "Variance minimale",
+                f"Vol {float(min_var.get('vol', 0.0)):.1f}% / Ret {float(min_var.get('ret', 0.0)):.1f}%",
+            ),
+            (
+                "Portefeuille optimisé (Sharpe)",
+                f"Vol {float(max_sharpe.get('vol', 0.0)):.1f}% / Ret {float(max_sharpe.get('ret', 0.0)):.1f}% / S {float(max_sharpe.get('sharpe', 0.0)):.2f}",
+            ),
+        ]))
+
+        self._frontier_result_layout.addLayout(self._analytics_kpi_row([
+            ("Actifs retenus", str(int(max_sharpe_div.get("n_assets", 0)))),
+            ("Plus grosse ligne", f"{float(max_sharpe_div.get('largest_position_pct', 0.0)):.1f}%"),
+            ("Top 3 cumulé", f"{float(max_sharpe_div.get('top3_weight_pct', 0.0)):.1f}%"),
+            ("HHI", f"{float(max_sharpe_div.get('hhi', 0.0)):.4f}"),
+            ("Score diversification", f"{float(max_sharpe_div.get('diversification_score', 0.0)):.1f}/100"),
+        ]))
+
+        chart_frontier = PlotlyView(min_height=380)
+        fig = go.Figure()
+
+        if frontier:
+            frontier_vol = [p["vol"] for p in frontier]
+            frontier_ret = [p["ret"] for p in frontier]
+            fig.add_trace(go.Scatter(
+                x=frontier_vol, y=frontier_ret,
+                mode="lines", name="Frontière efficiente",
+                line=dict(color="#60a5fa", width=2),
+                hovertemplate="Vol: %{x:.1f}%<br>Ret: %{y:.1f}%<extra>Frontière</extra>",
+            ))
+
+        fig.add_trace(go.Scatter(
+            x=[float(current.get("vol", 0.0))], y=[float(current.get("ret", 0.0))],
+            mode="markers", name="Portefeuille actuel",
+            marker=dict(color="#f59e0b", size=14, symbol="star", line=dict(color="white", width=2)),
+            hovertemplate=(
+                f"<b>Actuel</b><br>Vol: {float(current.get('vol', 0.0)):.1f}%"
+                f"<br>Ret: {float(current.get('ret', 0.0)):.1f}%<extra></extra>"
+            ),
+        ))
+        fig.add_trace(go.Scatter(
+            x=[float(min_var.get("vol", 0.0))], y=[float(min_var.get("ret", 0.0))],
+            mode="markers", name="Variance minimale",
+            marker=dict(color="#22c55e", size=12, symbol="diamond", line=dict(color="white", width=2)),
+            hovertemplate=(
+                f"<b>Min Variance</b><br>Vol: {float(min_var.get('vol', 0.0)):.1f}%"
+                f"<br>Ret: {float(min_var.get('ret', 0.0)):.1f}%<extra></extra>"
+            ),
+        ))
+        fig.add_trace(go.Scatter(
+            x=[float(max_sharpe.get("vol", 0.0))], y=[float(max_sharpe.get("ret", 0.0))],
+            mode="markers", name="Sharpe maximal",
+            marker=dict(color="#ef4444", size=12, symbol="triangle-up", line=dict(color="white", width=2)),
+            hovertemplate=(
+                f"<b>Max Sharpe</b><br>Vol: {float(max_sharpe.get('vol', 0.0)):.1f}%"
+                f"<br>Ret: {float(max_sharpe.get('ret', 0.0)):.1f}%<extra></extra>"
+            ),
+        ))
+
+        fig.update_layout(
+            **plotly_layout(margin=dict(l=50, r=20, t=30, b=50)),
+            xaxis=dict(title="Volatilité annualisée (%)", showgrid=True, gridcolor="#1e2538"),
+            yaxis=dict(title="Rendement annualisé (%)", showgrid=True, gridcolor="#1e2538"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        chart_frontier.set_figure(fig)
+        self._frontier_result_layout.addWidget(chart_frontier)
+
+        weights_text_parts = []
+        for label, data in [("Min Var", min_var), ("Max Sharpe", max_sharpe)]:
+            weights = data.get("weights", {}) or {}
+            top_weights = sorted(weights.items(), key=lambda x: -float(x[1]))[:6]
+            parts = ", ".join([f"{t}: {float(w):.0f}%" for t, w in top_weights])
+            weights_text_parts.append(f"{label} → {parts}" if parts else f"{label} → N/A")
+        weights_info = QLabel("🏆 " + " | ".join(weights_text_parts))
+        weights_info.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
+        weights_info.setWordWrap(True)
+        self._frontier_result_layout.addWidget(weights_info)
+
+        constraints = payload.get("constraints_applied", {}) or {}
+        constraints_info = QLabel(
+            "Contraintes appliquées : "
+            f"max {float(constraints.get('max_weight_per_asset_pct', 100.0)):.1f}% par actif, "
+            f"min {int(constraints.get('min_assets', 2))} actifs, "
+            f"min ligne {float(constraints.get('min_active_weight_pct', 0.0)):.1f}%, "
+            f"max actifs {int(constraints.get('max_assets', len(payload.get('tickers', []))))}."
+        )
+        constraints_info.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
+        constraints_info.setWordWrap(True)
+        self._frontier_result_layout.addWidget(constraints_info)
+
+        warnings = payload.get("warnings", []) or []
+        if warnings:
+            warn_label = QLabel("⚠️ " + " ".join(str(w) for w in warnings))
+            warn_label.setStyleSheet(f"color: {COLOR_WARNING}; font-size: 10px;")
+            warn_label.setWordWrap(True)
+            self._frontier_result_layout.addWidget(warn_label)
+
+        info = QLabel(
+            "ℹ️ Un portefeuille mathématiquement optimal peut être peu diversifié. "
+            "Ces contraintes rendent la solution plus investissable et pédagogique."
+        )
+        info.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
+        info.setWordWrap(True)
+        self._frontier_result_layout.addWidget(info)
+
     # ── 1. Rendement & Risque ─────────────────────────────────────────────
 
     def _load_risk_return_section(self) -> None:
@@ -1075,7 +1611,10 @@ class BourseGlobalPanel(QWidget):
         ]))
 
         # Info méthodologique
-        info = QLabel("ℹ️ Sharpe calculé avec Rf=3%. Volatilité = σ weekly × √52. Beta vs URTH (MSCI World).")
+        info = QLabel(
+            "ℹ️ Rendements calculés en neutralisant les flux ACHAT/VENTE hebdomadaires. "
+            "Sharpe avec Rf=3%. Volatilité = σ weekly × √52. Beta vs URTH (MSCI World)."
+        )
         info.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px; padding-top: 6px;")
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -1242,97 +1781,10 @@ class BourseGlobalPanel(QWidget):
     # ── 5. Frontière Efficiente ────────────────────────────────────────────
 
     def _load_efficient_frontier_section(self) -> None:
-        """Charge le graphe de la frontière efficiente."""
-        from services.bourse_advanced_analytics import get_efficient_frontier_payload
-
-        payload = get_efficient_frontier_payload(self._conn, self._person_id)
+        """Charge la frontière efficiente (preset + paramètres avancés)."""
         layout = self._get_section_content_layout(self._section_frontier)
-
-        if "error" in payload:
-            layout.addWidget(self._analytics_error_label(payload["error"]))
-            return
-
-        frontier = payload["frontier_points"]
-        current = payload["current_portfolio"]
-        min_var = payload["min_variance"]
-        max_sharpe = payload["max_sharpe"]
-
-        # KPIs
-        layout.addLayout(self._analytics_kpi_row([
-            ("Portefeuille actuel", f"Vol {current['vol']:.1f}% / Ret {current['ret']:.1f}%"),
-            ("Variance minimale", f"Vol {min_var['vol']:.1f}% / Ret {min_var['ret']:.1f}%"),
-            ("Sharpe maximal", f"Vol {max_sharpe['vol']:.1f}% / Ret {max_sharpe['ret']:.1f}%"),
-        ]))
-
-        # Scatter plot
-        chart_frontier = PlotlyView(min_height=380)
-        fig = go.Figure()
-
-        # Frontière
-        if frontier:
-            frontier_vol = [p["vol"] for p in frontier]
-            frontier_ret = [p["ret"] for p in frontier]
-            fig.add_trace(go.Scatter(
-                x=frontier_vol, y=frontier_ret,
-                mode="lines", name="Frontière efficiente",
-                line=dict(color="#60a5fa", width=2),
-                hovertemplate="Vol: %{x:.1f}%<br>Ret: %{y:.1f}%<extra>Frontière</extra>",
-            ))
-
-        # Portefeuille actuel
-        fig.add_trace(go.Scatter(
-            x=[current["vol"]], y=[current["ret"]],
-            mode="markers", name="Portefeuille actuel",
-            marker=dict(color="#f59e0b", size=14, symbol="star",
-                        line=dict(color="white", width=2)),
-            hovertemplate=f"<b>Actuel</b><br>Vol: {current['vol']:.1f}%<br>Ret: {current['ret']:.1f}%<extra></extra>",
-        ))
-
-        # Variance minimale
-        fig.add_trace(go.Scatter(
-            x=[min_var["vol"]], y=[min_var["ret"]],
-            mode="markers", name="Variance minimale",
-            marker=dict(color="#22c55e", size=12, symbol="diamond",
-                        line=dict(color="white", width=2)),
-            hovertemplate=f"<b>Min Variance</b><br>Vol: {min_var['vol']:.1f}%<br>Ret: {min_var['ret']:.1f}%<extra></extra>",
-        ))
-
-        # Sharpe max
-        fig.add_trace(go.Scatter(
-            x=[max_sharpe["vol"]], y=[max_sharpe["ret"]],
-            mode="markers", name="Sharpe maximal",
-            marker=dict(color="#ef4444", size=12, symbol="triangle-up",
-                        line=dict(color="white", width=2)),
-            hovertemplate=f"<b>Max Sharpe</b><br>Vol: {max_sharpe['vol']:.1f}%<br>Ret: {max_sharpe['ret']:.1f}%<extra></extra>",
-        ))
-
-        fig.update_layout(
-            **plotly_layout(margin=dict(l=50, r=20, t=30, b=50)),
-            xaxis=dict(title="Volatilité annualisée (%)", showgrid=True, gridcolor="#1e2538"),
-            yaxis=dict(title="Rendement annualisé (%)", showgrid=True, gridcolor="#1e2538"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        )
-        chart_frontier.set_figure(fig)
-        layout.addWidget(chart_frontier)
-
-        # Poids optimaux
-        weights_text_parts = []
-        for label, data in [("Min Var", min_var), ("Max Sharpe", max_sharpe)]:
-            top_weights = sorted(data["weights"].items(), key=lambda x: -x[1])[:5]
-            parts = ", ".join([f"{t}: {w:.0f}%" for t, w in top_weights])
-            weights_text_parts.append(f"{label} → {parts}")
-        weights_info = QLabel("🏆 " + " | ".join(weights_text_parts))
-        weights_info.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
-        weights_info.setWordWrap(True)
-        layout.addWidget(weights_info)
-
-        info = QLabel(
-            "ℹ️ Optimisation SLSQP (scipy). Contraintes : long-only, somme poids = 100%. "
-            "Basé sur rendements et covariance weekly annualisés."
-        )
-        info.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
-        info.setWordWrap(True)
-        layout.addWidget(info)
+        self._ensure_frontier_controls(layout)
+        self._refresh_efficient_frontier_results()
 
     # ── 6. Comparaison Benchmark ──────────────────────────────────────────
 

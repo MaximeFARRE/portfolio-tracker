@@ -1,4 +1,4 @@
-﻿"""
+"""
 Façade de compatibilité pour les snapshots hebdomadaires personne.
 
 API publique inchangée : les fonctions historiques restent importables depuis
@@ -33,6 +33,8 @@ from services.snapshots_rebuild import (
     rebuild_snapshots_person_from_last,
     rebuild_snapshots_person_backdated_aware,
     has_new_transactions_since_person_watermark,
+    get_first_transaction_date,
+    rebuild_snapshots_person_full_history,
     _ensure_rebuild_watermarks,
     _get_person_watermark,
     _set_person_watermark,
@@ -56,6 +58,8 @@ __all__ = [
     "rebuild_snapshots_person_backdated_aware",
     "rebuild_snapshots_person_from_last",
     "rebuild_snapshots_person_missing_only",
+    "rebuild_snapshots_person_full_history",
+    "get_first_transaction_date",
     "has_new_transactions_since_person_watermark",
     "upsert_weekly_snapshot",
     "_bank_cash_asof_eur",
