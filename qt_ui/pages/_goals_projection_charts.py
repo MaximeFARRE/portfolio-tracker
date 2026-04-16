@@ -12,6 +12,15 @@ import plotly.graph_objects as go
 from qt_ui.theme import plotly_layout
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or pd.isna(value):
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
 def build_projection_chart(
     active_df: pd.DataFrame,
     active_scenario_name: str,
@@ -38,7 +47,7 @@ def build_projection_chart(
         name=f"Scénario actif ({active_scenario_name})",
     ))
 
-    fire_target = float(active_df.iloc[-1].get("fire_target", 0.0)) if not active_df.empty else 0.0
+    fire_target = _safe_float(active_df.iloc[-1].get("fire_target"), 0.0) if not active_df.empty else 0.0
     fig.add_trace(go.Scatter(
         x=x_active,
         y=[fire_target] * len(active_df),

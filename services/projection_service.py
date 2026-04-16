@@ -38,7 +38,7 @@ DIVERGENCES RÉSIDUELLES (identifiées, non encore réduites) :
 """
 
 import pandas as pd
-from typing import Literal, Any, Dict, Optional, Union
+from typing import Literal, Any, Dict, Optional, Union, Callable
 
 # --- Imports Legacy (V1) ---
 from services.projections import (
@@ -261,6 +261,7 @@ class ProjectionService:
         horizon: str = "10y",
         benchmark_symbol: Optional[str] = None,
         ignore_limiting_assets: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """
         Point d'entree facade pour le backtest theorique du portefeuille actuel.
@@ -277,4 +278,5 @@ class ProjectionService:
             horizon=horizon,
             benchmark_symbol=(benchmark_symbol or "URTH"),
             ignore_limiting_assets=bool(ignore_limiting_assets),
+            progress_callback=progress_callback,
         )

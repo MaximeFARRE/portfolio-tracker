@@ -11,11 +11,13 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any
+from datetime import date, timedelta
+from typing import Any, Callable
 
 import pandas as pd
 
 from services import bourse_analytics
+from services import market_history
 from services.bourse_advanced_analytics import DEFAULT_BENCHMARK, RISK_FREE_RATE
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,8 @@ IMPROVED_MAX_WEIGHT = 0.15
 IMPROVED_MAX_ASSETS_BY_MIN = int(1.0 / IMPROVED_MIN_WEIGHT)
 IMPROVED_MIN_ASSETS_FOR_MAX = int(math.ceil(1.0 / IMPROVED_MAX_WEIGHT))
 IMPROVED_MAX_TURNOVER = 0.25
+HISTORY_PREFETCH_MAX_YEARS = 20
+HISTORY_PREFETCH_BUFFER_WEEKS = 8
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,7 @@ def build_current_portfolio_backtest(
     benchmark_symbol: str = DEFAULT_BENCHMARK,
     risk_free_rate: float = RISK_FREE_RATE,
     ignore_limiting_assets: bool = False,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """
     Construit un backtest theorique du portefeuille actuel vs benchmark.
@@ -117,6 +122,14 @@ def build_current_portfolio_backtest(
         )
 
     all_symbols = weights_df["symbol"].tolist() + [benchmark]
+    if progress_callback is not None:
+        _sync_prices_for_backtest_horizon(
+            conn=conn,
+            person_id=person_id,
+            symbols=all_symbols,
+            horizon_years=horizon_years,
+            progress_callback=progress_callback,
+        )
     prices_df = _load_weekly_prices(conn, all_symbols)
 
     retained_weights, ignored_history = _filter_assets_with_history(weights_df, prices_df)
@@ -340,6 +353,238 @@ def _normalize_horizon(raw_horizon: str | None) -> tuple[str, int | None]:
     return h, SUPPORTED_HORIZONS[h]
 
 
+def _sync_prices_for_backtest_horizon(
+    conn,
+    person_id: int,
+    symbols: list[str],
+    horizon_years: int | None,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+) -> None:
+    unique_symbols = sorted({str(s).strip().upper() for s in symbols if str(s).strip()})
+    if not unique_symbols:
+        return
+
+    start_date, end_date, target_weeks = _resolve_prefetch_window(
+        conn=conn,
+        person_id=person_id,
+        symbols=unique_symbols,
+        horizon_years=horizon_years,
+    )
+    if target_weeks < MIN_POINTS:
+        return
+
+    missing_by_symbol: dict[str, int] = {}
+    total_missing = 0
+    for symbol in unique_symbols:
+        missing = _estimate_missing_weeks(
+            conn=conn,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            target_weeks=target_weeks,
+        )
+        missing_by_symbol[symbol] = missing
+        total_missing += missing
+
+    if total_missing <= 0:
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "history_sync",
+                "progress_pct": 100.0,
+                "weeks_remaining": 0,
+                "days_remaining": 0,
+                "years_remaining": 0.0,
+                "message": "Historique déjà chargé pour l'horizon demandé.",
+            },
+        )
+        return
+
+    remaining = int(total_missing)
+    _emit_progress(
+        progress_callback,
+        {
+            "phase": "history_sync",
+            "progress_pct": 0.0,
+            "weeks_remaining": remaining,
+            "days_remaining": remaining * 7,
+            "years_remaining": round((remaining * 7) / 365.25, 2),
+            "message": (
+                "Chargement de l'historique marché en cours… "
+                f"{remaining} semaines restantes "
+                f"(~{remaining * 7} jours / {(remaining * 7) / 365.25:.1f} ans)."
+            ),
+        },
+    )
+
+    n_symbols = len(unique_symbols)
+    for idx, symbol in enumerate(unique_symbols, start=1):
+        before_missing = int(missing_by_symbol.get(symbol) or 0)
+        if before_missing > 0:
+            try:
+                market_history.sync_asset_prices_weekly(conn, [symbol], start_date, end_date)
+            except Exception as exc:
+                logger.warning(
+                    "_sync_prices_for_backtest_horizon: sync failed for %s (%s)",
+                    symbol,
+                    exc,
+                )
+
+        after_missing = _estimate_missing_weeks(
+            conn=conn,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            target_weeks=target_weeks,
+        )
+        gained = max(before_missing - after_missing, 0)
+        remaining = max(remaining - gained, 0)
+        progress_pct = 100.0 * (total_missing - remaining) / float(total_missing)
+
+        _emit_progress(
+            progress_callback,
+            {
+                "phase": "history_sync",
+                "symbol": symbol,
+                "symbols_done": idx,
+                "symbols_total": n_symbols,
+                "progress_pct": round(progress_pct, 2),
+                "weeks_remaining": int(remaining),
+                "days_remaining": int(remaining * 7),
+                "years_remaining": round((remaining * 7) / 365.25, 2),
+                "message": (
+                    f"Chargement {idx}/{n_symbols} ({symbol}) — "
+                    f"{remaining} semaines restantes "
+                    f"(~{remaining * 7} jours / {(remaining * 7) / 365.25:.1f} ans)."
+                ),
+            },
+        )
+
+    _emit_progress(
+        progress_callback,
+        {
+            "phase": "history_sync",
+            "progress_pct": 100.0,
+            "weeks_remaining": 0,
+            "days_remaining": 0,
+            "years_remaining": 0.0,
+            "message": "Chargement historique terminé.",
+        },
+    )
+
+
+def _resolve_prefetch_window(
+    conn,
+    person_id: int,
+    symbols: list[str],
+    horizon_years: int | None,
+) -> tuple[str, str, int]:
+    end_day = market_history.week_start(date.today())
+    end_ts = pd.Timestamp(end_day)
+
+    if horizon_years is None:
+        tx_start = _get_person_oldest_asset_tx_date(conn, person_id, symbols)
+        if tx_start is not None:
+            start_ts = pd.Timestamp(market_history.week_start(tx_start))
+        else:
+            start_ts = end_ts - pd.DateOffset(years=HISTORY_PREFETCH_MAX_YEARS)
+    else:
+        start_ts = end_ts - pd.DateOffset(years=int(horizon_years))
+
+    start_ts = start_ts - pd.Timedelta(weeks=HISTORY_PREFETCH_BUFFER_WEEKS)
+    if start_ts > end_ts - pd.Timedelta(days=7):
+        start_ts = end_ts - pd.Timedelta(days=7)
+
+    start_day = market_history.week_start(start_ts.date())
+    target_weeks = _count_weeks_inclusive(start_day, end_day)
+    return start_day.isoformat(), end_day.isoformat(), int(target_weeks)
+
+
+def _get_person_oldest_asset_tx_date(
+    conn,
+    person_id: int,
+    symbols: list[str],
+) -> date | None:
+    if not symbols:
+        return None
+    placeholders = ",".join(["?"] * len(symbols))
+    query = (
+        "SELECT MIN(date) AS d "
+        "FROM transactions "
+        "WHERE person_id = ? "
+        "AND asset_symbol IS NOT NULL "
+        f"AND UPPER(asset_symbol) IN ({placeholders})"
+    )
+    params = (int(person_id), *symbols)
+    row = conn.execute(query, params).fetchone()
+    if row is None:
+        return None
+
+    raw = None
+    try:
+        raw = row["d"]
+    except Exception:
+        try:
+            raw = row[0]
+        except Exception:
+            raw = None
+    if not raw:
+        return None
+
+    ts = pd.to_datetime(raw, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.date()
+
+
+def _count_weeks_inclusive(start_day: date, end_day: date) -> int:
+    if end_day < start_day:
+        return 0
+    delta_days = (end_day - start_day).days
+    return int(delta_days // 7) + 1
+
+
+def _estimate_missing_weeks(
+    conn,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    target_weeks: int,
+) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT week_date) AS n
+        FROM asset_prices_weekly
+        WHERE symbol = ?
+          AND week_date >= ?
+          AND week_date <= ?
+        """,
+        (str(symbol), str(start_date), str(end_date)),
+    ).fetchone()
+    existing = 0
+    if row is not None:
+        try:
+            existing = int(row["n"] or 0)
+        except Exception:
+            try:
+                existing = int(row[0] or 0)
+            except Exception:
+                existing = 0
+    return max(int(target_weeks) - int(existing), 0)
+
+
+def _emit_progress(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    payload: dict[str, Any],
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(payload)
+    except Exception:
+        logger.debug("_emit_progress: callback error ignored", exc_info=True)
+
+
 def _load_current_weights(conn, person_id: int) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     positions = bourse_analytics.get_live_bourse_positions(conn, person_id)
     ignored: list[dict[str, Any]] = []
@@ -561,15 +806,40 @@ def _drop_limiting_assets_for_horizon(
         if not limiting_assets:
             break
 
-        before = set(symbols)
-        working = working[~working["symbol"].isin(limiting_assets)].copy().reset_index(drop=True)
-        removed_symbols = [s for s in limiting_assets if s in before]
-        if not removed_symbols:
+        if len(working) <= 1:
             break
 
-        for symbol in removed_symbols:
-            if symbol not in ignored:
-                ignored.append(symbol)
+        common_end = pd.to_datetime(common_frame.index.max(), errors="coerce")
+        target_start = (
+            common_end - pd.DateOffset(years=int(horizon_years))
+            if pd.notna(common_end)
+            else None
+        )
+
+        removable_candidates: list[str] = []
+        for symbol in limiting_assets:
+            start_ts = _get_symbol_history_start(history_bounds, symbol)
+            if target_start is None or pd.isna(start_ts) or start_ts > target_start:
+                removable_candidates.append(symbol)
+
+        if not removable_candidates:
+            break
+
+        symbol_to_remove = _pick_limiting_symbol_to_remove(
+            candidates=removable_candidates,
+            working=working,
+            history_bounds=history_bounds,
+        )
+        if not symbol_to_remove:
+            break
+
+        before_count = len(working)
+        working = working[working["symbol"] != symbol_to_remove].copy().reset_index(drop=True)
+        if len(working) >= before_count:
+            break
+
+        if symbol_to_remove not in ignored:
+            ignored.append(symbol_to_remove)
 
         if working.empty:
             break
@@ -579,6 +849,39 @@ def _drop_limiting_assets_for_horizon(
         if total > 0:
             working["weight"] = working["weight"] / total
     return working, ignored
+
+
+def _get_symbol_history_start(
+    history_bounds: dict[str, dict[str, Any]],
+    symbol: str,
+) -> pd.Timestamp | None:
+    bounds = history_bounds.get(str(symbol)) or {}
+    ts = pd.to_datetime(bounds.get("start"), errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts
+
+
+def _pick_limiting_symbol_to_remove(
+    candidates: list[str],
+    working: pd.DataFrame,
+    history_bounds: dict[str, dict[str, Any]],
+) -> str | None:
+    if not candidates:
+        return None
+
+    ranked: list[tuple[float, float, str]] = []
+    for symbol in candidates:
+        start_ts = _get_symbol_history_start(history_bounds, symbol)
+        start_key = float(start_ts.value) if start_ts is not None else float("inf")
+        weight_row = working.loc[working["symbol"] == symbol, "weight"]
+        weight = float(weight_row.iloc[0]) if not weight_row.empty else 0.0
+        ranked.append((start_key, -weight, str(symbol)))
+
+    if not ranked:
+        return None
+    ranked.sort(reverse=True)
+    return ranked[0][2]
 
 
 def _build_portfolio_level(

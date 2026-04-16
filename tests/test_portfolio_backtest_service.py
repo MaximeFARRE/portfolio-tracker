@@ -167,6 +167,39 @@ def test_build_current_portfolio_backtest_can_ignore_limiting_assets(conn):
     )
 
 
+def test_build_current_portfolio_backtest_ignore_limiting_never_drops_all_assets(conn):
+    short_dates = pd.date_range("2024-01-01", periods=60, freq="W-MON")
+    long_dates = pd.date_range("2010-01-04", periods=780, freq="W-MON")
+
+    _insert_weekly_prices(conn, "AAA", short_dates, start_price=100.0, step=0.2)
+    _insert_weekly_prices(conn, "BBB", short_dates, start_price=80.0, step=0.15)
+    _insert_weekly_prices(conn, "URTH", long_dates, start_price=70.0, step=0.25)
+
+    live_positions = pd.DataFrame(
+        [
+            {"symbol": "AAA", "value": 6000.0},
+            {"symbol": "BBB", "value": 4000.0},
+        ]
+    )
+
+    with patch("services.bourse_analytics.get_live_bourse_positions", return_value=live_positions):
+        payload = build_current_portfolio_backtest(
+            conn,
+            person_id=1,
+            horizon="10y",
+            benchmark_symbol="URTH",
+            ignore_limiting_assets=True,
+        )
+
+    assert "error" not in payload
+    retained_symbols = {row["symbol"] for row in payload.get("assets_retained") or []}
+    assert len(retained_symbols) == 1
+    assert retained_symbols.issubset({"AAA", "BBB"})
+    assert payload.get("ignore_limiting_assets") is True
+    assert payload.get("ignore_limiting_assets_applied") is True
+    assert len(payload.get("ignored_limiting_assets") or []) == 1
+
+
 def test_build_current_portfolio_backtest_improved_portfolio_constraints(conn):
     dates = pd.date_range("2016-01-04", periods=170, freq="W-MON")
     symbols = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "URTH"]
@@ -260,4 +293,5 @@ def test_projection_service_backtest_facade_calls_dedicated_service():
         horizon="5y",
         benchmark_symbol="URTH",
         ignore_limiting_assets=True,
+        progress_callback=None,
     )

@@ -11,13 +11,14 @@ from typing import Optional
 
 import pandas as pd
 import plotly.graph_objects as go
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -66,6 +67,7 @@ _BENCHMARK_SYMBOL = "URTH"
 class _BacktestThread(QThread):
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
+    progress = pyqtSignal(object)
 
     def __init__(
         self,
@@ -85,6 +87,9 @@ class _BacktestThread(QThread):
             from services.db import get_conn
             from services.projection_service import ProjectionService
 
+            def _on_progress(payload: dict) -> None:
+                self.progress.emit(payload)
+
             with get_conn() as conn:
                 payload = ProjectionService.build_current_portfolio_backtest(
                     conn=conn,
@@ -92,6 +97,7 @@ class _BacktestThread(QThread):
                     horizon=self._horizon,
                     benchmark_symbol=self._benchmark_symbol,
                     ignore_limiting_assets=self._ignore_limiting_assets,
+                    progress_callback=_on_progress,
                 )
             self.finished.emit(payload)
         except Exception as exc:
@@ -185,6 +191,21 @@ class BacktestPortefeuillePanel(QWidget):
         self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
 
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(8)
+        self._load_progress_label = QLabel("")
+        self._load_progress_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
+        self._load_progress_label.setWordWrap(True)
+        progress_row.addWidget(self._load_progress_label, 1)
+
+        self._load_progress_bar = QProgressBar()
+        self._load_progress_bar.setRange(0, 100)
+        self._load_progress_bar.setValue(0)
+        self._load_progress_bar.setFixedWidth(220)
+        progress_row.addWidget(self._load_progress_bar, 0, Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(progress_row)
+        self._set_history_progress_visible(False)
+
         chart_title = QLabel("Evolution portefeuille vs benchmark (base 100)")
         chart_title.setStyleSheet(STYLE_SECTION)
         layout.addWidget(chart_title)
@@ -230,6 +251,11 @@ class BacktestPortefeuillePanel(QWidget):
         self._history_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
         info_layout.addWidget(self._history_label)
 
+        self._excluded_limiters_label = QLabel("")
+        self._excluded_limiters_label.setWordWrap(True)
+        self._excluded_limiters_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        info_layout.addWidget(self._excluded_limiters_label)
+
         self._ignored_label = QLabel("")
         self._ignored_label.setWordWrap(True)
         self._ignored_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
@@ -258,6 +284,14 @@ class BacktestPortefeuillePanel(QWidget):
             }
         )
         diag_layout.addWidget(self._diag_assets_table)
+
+        perf_title = QLabel("Performance individuelle des actifs (période sélectionnée)")
+        perf_title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px; font-weight: bold;")
+        diag_layout.addWidget(perf_title)
+
+        self._diag_perf_table = DataTableWidget(searchable=False)
+        self._diag_perf_table.setMinimumHeight(185)
+        diag_layout.addWidget(self._diag_perf_table)
 
         impact_title = QLabel("Impact si retiré (poids renormalisés)")
         impact_title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px; font-weight: bold;")
@@ -369,6 +403,7 @@ class BacktestPortefeuillePanel(QWidget):
             benchmark_symbol=_BENCHMARK_SYMBOL,
             ignore_limiting_assets=ignore_limiters,
         )
+        self._thread.progress.connect(self._on_backtest_progress)
         self._thread.finished.connect(self._on_backtest_finished)
         self._thread.error.connect(self._on_backtest_error)
         self._thread.start()
@@ -379,6 +414,7 @@ class BacktestPortefeuillePanel(QWidget):
         self._set_kpis_loading(False)
         self._set_diag_loading(False)
         self._set_improved_loading(False)
+        self._set_history_progress_visible(False)
 
         if not isinstance(payload, dict):
             self._set_empty_state("Reponse backtest invalide.")
@@ -395,9 +431,38 @@ class BacktestPortefeuillePanel(QWidget):
         self._set_kpis_loading(False)
         self._set_diag_loading(False)
         self._set_improved_loading(False)
+        self._set_history_progress_visible(False)
         self._status_label.setStyleSheet(STYLE_STATUS_ERROR)
         self._status_label.setText(f"Erreur backtest : {message}")
         self._chart.clear_figure()
+
+    def _on_backtest_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        if str(payload.get("phase") or "") != "history_sync":
+            return
+
+        message = str(payload.get("message") or "").strip()
+        if not message:
+            weeks = payload.get("weeks_remaining")
+            days = payload.get("days_remaining")
+            years = payload.get("years_remaining")
+            message = (
+                "Chargement historique… "
+                f"{weeks if isinstance(weeks, int) else '?'} semaines restantes "
+                f"({days if isinstance(days, int) else '?'} jours, "
+                f"{years if isinstance(years, (int, float)) else '?'} ans)."
+            )
+
+        pct = payload.get("progress_pct")
+        pct_value = float(pct) if isinstance(pct, (int, float)) else None
+        self._set_history_progress_visible(True)
+        self._load_progress_label.setText(message)
+        if pct_value is None:
+            self._load_progress_bar.setRange(0, 0)
+        else:
+            self._load_progress_bar.setRange(0, 100)
+            self._load_progress_bar.setValue(max(0, min(100, int(round(pct_value)))))
 
     def _render_payload(self, payload: dict, from_cache: bool) -> None:
         if payload.get("error"):
@@ -585,14 +650,25 @@ class BacktestPortefeuillePanel(QWidget):
                 " Option \"ignorer les actifs limitants\" appliquée: "
                 f"{_format_symbols_list(ignored_limiting_assets)} retiré(s) du calcul."
             )
+            self._excluded_limiters_label.setText(
+                "Actifs limitants exclus: "
+                f"{_format_symbols_list(ignored_limiting_assets)}."
+            )
         elif ignore_mode and not ignored_limiting_assets:
             history_text += " Option \"ignorer les actifs limitants\" activée, sans exclusion possible."
+            self._excluded_limiters_label.setText("Actifs limitants exclus: aucun.")
+        else:
+            self._excluded_limiters_label.setText("")
 
         self._history_label.setText(history_text)
 
         ignored_assets = payload.get("assets_ignored") or []
         if ignored_assets:
-            symbols = [str(x.get("symbol") or "?") for x in ignored_assets[:6]]
+            symbols = []
+            for item in ignored_assets[:6]:
+                symbol = str(item.get("symbol") or "?")
+                reason = _ignored_reason_label(item.get("reason"))
+                symbols.append(f"{symbol} ({reason})" if reason else symbol)
             suffix = "…" if len(ignored_assets) > 6 else ""
             self._ignored_label.setText(
                 f"Actifs ignorés ({len(ignored_assets)}): {', '.join(symbols)}{suffix}"
@@ -611,6 +687,10 @@ class BacktestPortefeuillePanel(QWidget):
                 "Volatilité actif (%)", "Corr. portefeuille", "Corr. benchmark",
                 "Diversification", "Commentaire",
             ]))
+            self._diag_perf_table.set_dataframe(pd.DataFrame(columns=[
+                "Actif", "Perf cumulée (%)", "Rendement annualisé (%)",
+                "Volatilité (%)", "Max drawdown (%)", "Sharpe",
+            ]))
             self._diag_without_table.set_dataframe(pd.DataFrame(columns=[
                 "Actif", "Delta rendement (%/an)", "Delta volatilité (%)",
                 "Delta max drawdown (%)", "Delta Sharpe", "Lecture",
@@ -623,6 +703,7 @@ class BacktestPortefeuillePanel(QWidget):
         )
 
         rows_assets = []
+        rows_perf = []
         rows_without = []
         for item in diagnostics:
             symbol = str(item.get("symbol") or "?")
@@ -643,6 +724,18 @@ class BacktestPortefeuillePanel(QWidget):
                 }
             )
 
+            asset_metrics = item.get("asset_metrics") or {}
+            rows_perf.append(
+                {
+                    "Actif": display_name,
+                    "Perf cumulée (%)": _to_num(asset_metrics.get("cumulative_performance_pct")),
+                    "Rendement annualisé (%)": _to_num(asset_metrics.get("annualized_return_pct")),
+                    "Volatilité (%)": _to_num(asset_metrics.get("annualized_volatility_pct")),
+                    "Max drawdown (%)": _to_num(asset_metrics.get("max_drawdown_pct")),
+                    "Sharpe": _to_num(asset_metrics.get("sharpe")),
+                }
+            )
+
             without = item.get("without_asset") or {}
             deltas = without.get("deltas") or {}
             rows_without.append(
@@ -657,6 +750,7 @@ class BacktestPortefeuillePanel(QWidget):
             )
 
         self._diag_assets_table.set_dataframe(pd.DataFrame(rows_assets))
+        self._diag_perf_table.set_dataframe(pd.DataFrame(rows_perf))
         self._diag_without_table.set_dataframe(pd.DataFrame(rows_without))
 
     def _render_improved_portfolio(self, payload: dict) -> None:
@@ -734,7 +828,11 @@ class BacktestPortefeuillePanel(QWidget):
     def _set_loading_state(self, message: str) -> None:
         self._status_label.setStyleSheet(STYLE_STATUS_WARNING)
         self._status_label.setText(message)
+        self._excluded_limiters_label.setText("")
         self._set_controls_enabled(False)
+        self._set_history_progress_visible(True)
+        self._load_progress_label.setText("Préparation du chargement historique…")
+        self._load_progress_bar.setRange(0, 0)
         self._chart.set_loading(True)
         self._set_kpis_loading(True)
         self._set_diag_loading(True)
@@ -744,11 +842,13 @@ class BacktestPortefeuillePanel(QWidget):
         self._set_controls_enabled(True)
         self._status_label.setStyleSheet(STYLE_STATUS)
         self._status_label.setText(message)
+        self._set_history_progress_visible(False)
         self._chart.set_loading(False)
         self._chart.clear_figure()
         self._set_kpi_values_none()
         self._summary_label.setText("—")
         self._history_label.setText("—")
+        self._excluded_limiters_label.setText("")
         self._ignored_label.setText("")
         self._set_diag_loading(False)
         self._render_asset_diagnostics({})
@@ -759,6 +859,14 @@ class BacktestPortefeuillePanel(QWidget):
         self._combo_horizon.setEnabled(enabled)
         self._btn_refresh.setEnabled(enabled)
         self._ignore_limiters_checkbox.setEnabled(enabled)
+
+    def _set_history_progress_visible(self, visible: bool) -> None:
+        self._load_progress_label.setVisible(bool(visible))
+        self._load_progress_bar.setVisible(bool(visible))
+        if not visible:
+            self._load_progress_label.setText("")
+            self._load_progress_bar.setRange(0, 100)
+            self._load_progress_bar.setValue(0)
 
     def _set_kpis_loading(self, loading: bool) -> None:
         for card in (
@@ -774,6 +882,7 @@ class BacktestPortefeuillePanel(QWidget):
 
     def _set_diag_loading(self, loading: bool) -> None:
         self._diag_assets_table.set_loading(loading)
+        self._diag_perf_table.set_loading(loading)
         self._diag_without_table.set_loading(loading)
 
     def _set_improved_loading(self, loading: bool) -> None:
@@ -822,6 +931,19 @@ def _format_symbols_list(symbols, max_items: int = 4) -> str:
         return ", ".join(cleaned)
     shown = ", ".join(cleaned[:max_items])
     return f"{shown}, +{len(cleaned) - max_items}"
+
+
+def _ignored_reason_label(reason: object) -> str:
+    raw = str(reason or "").strip()
+    if not raw:
+        return ""
+    mapping = {
+        "invalid_live_position_value": "valeur de position invalide",
+        "missing_price_history": "historique de prix manquant",
+        "insufficient_price_history": "historique insuffisant",
+        "ignored_limiting_asset_for_horizon": "actif limitant exclu",
+    }
+    return mapping.get(raw, raw)
 
 
 def _to_num(value):
