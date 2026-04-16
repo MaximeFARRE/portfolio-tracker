@@ -90,6 +90,8 @@ _OPS_MULTI_SUPPORT = [
 TYPES_PAR_COMPTE = {
     # ── Comptes bancaires ──────────────────────────────────────────────────
     "BANQUE":        ["DEPOT", "RETRAIT", "DEPENSE", "FRAIS", "IMPOT", "INTERETS"],
+    # ── Livrets réglementés (pas de dépense ni de frais — uniquement flux livret)
+    "LIVRET":        ["DEPOT", "RETRAIT", "INTERETS"],
     # ── Comptes bourse et enveloppes fiscales ──────────────────────────────
     "PEA":           _OPS_MULTI_SUPPORT,
     "PEA_PME":       _OPS_MULTI_SUPPORT,          # Proche PEA, coté + non coté

@@ -142,6 +142,18 @@ def get_asset_by_symbol(conn: sqlite3.Connection, symbol: str):
     return conn.execute("SELECT * FROM assets WHERE symbol = ?;", (symbol,)).fetchone()
 
 
+def get_asset_by_id(conn: sqlite3.Connection, asset_id: int) -> Optional[dict]:
+    """Retourne un actif sous forme de dict, ou None si introuvable."""
+    cols = ["id", "symbol", "name", "asset_type", "currency"]
+    row = conn.execute("SELECT * FROM assets WHERE id = ?;", (int(asset_id),)).fetchone()
+    if row is None:
+        return None
+    try:
+        return dict(row)
+    except (TypeError, KeyError):
+        return dict(zip(cols, row))
+
+
 def list_assets(conn: sqlite3.Connection) -> pd.DataFrame:
     cols = ["id", "symbol", "name", "asset_type", "currency"]
     rows = conn.execute("SELECT * FROM assets ORDER BY symbol;").fetchall()
@@ -163,6 +175,48 @@ def update_asset_currency(conn: sqlite3.Connection, asset_id: int, currency: str
 
 def update_asset_type(conn: sqlite3.Connection, asset_id: int, asset_type: str) -> None:
     conn.execute("UPDATE assets SET asset_type = ? WHERE id = ?;", (asset_type, asset_id))
+    conn.commit()
+
+
+def update_asset(conn: sqlite3.Connection, asset_id: int, name: str, symbol: str, currency: str) -> None:
+    """
+    Met à jour le nom, le symbole et la devise d'un actif.
+
+    Si le symbole change :
+      - vérifie l'unicité (lève ValueError si conflit)
+      - migre les lignes asset_prices_weekly vers le nouveau symbole
+      dans la même transaction pour conserver l'historique des prix.
+    """
+    name = name.strip()
+    symbol = symbol.strip().upper()
+    currency = currency.strip().upper()
+
+    if not name:
+        raise ValueError("Le nom de l'actif ne peut pas être vide.")
+    if not symbol:
+        raise ValueError("Le symbole ne peut pas être vide.")
+
+    row = conn.execute("SELECT symbol FROM assets WHERE id = ?;", (asset_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"Actif introuvable (id={asset_id}).")
+
+    old_symbol = row["symbol"] if hasattr(row, "keys") else row[0]
+
+    if symbol != old_symbol:
+        conflict = conn.execute(
+            "SELECT id FROM assets WHERE symbol = ? AND id != ?;", (symbol, asset_id)
+        ).fetchone()
+        if conflict is not None:
+            raise ValueError(f"Le symbole '{symbol}' est déjà utilisé par un autre actif.")
+        conn.execute(
+            "UPDATE asset_prices_weekly SET symbol = ? WHERE symbol = ?;",
+            (symbol, old_symbol),
+        )
+
+    conn.execute(
+        "UPDATE assets SET name = ?, symbol = ?, currency = ? WHERE id = ?;",
+        (name, symbol, currency, asset_id),
+    )
     conn.commit()
 
 

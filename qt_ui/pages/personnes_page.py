@@ -44,7 +44,7 @@ _COMBO_STYLE = f"""
 def _make_account_panel(conn, person_id: int, account_id: int, account_type: str, parent=None):
     """Instancie le bon panel selon le type de compte."""
     atype = account_type.upper()
-    if atype == "BANQUE":
+    if atype in ("BANQUE", "LIVRET"):
         from qt_ui.panels.compte_banque_panel import CompteBanquePanel
         return CompteBanquePanel(conn, person_id, account_id, parent=parent)
     elif atype in ("PEA", "PEA_PME", "CTO", "CRYPTO",
@@ -55,19 +55,14 @@ def _make_account_panel(conn, person_id: int, account_id: int, account_type: str
         from qt_ui.panels.compte_credit_panel import CompteCreditPanel
         return CompteCreditPanel(conn, person_id, account_id, parent=parent)
     else:
-        # Fallback générique (PE, IMMOBILIER, etc.)
-        from qt_ui.panels.saisie_panel import SaisiePanel
-        w = QWidget(parent)
-        w.setStyleSheet(f"background: {BG_PRIMARY};")
-        v = QVBoxLayout(w)
-        v.setContentsMargins(12, 12, 12, 12)
-        lbl = QLabel(f"Compte de type {account_type}")
-        lbl.setStyleSheet(f"color: {TEXT_SECONDARY};")
-        v.addWidget(lbl)
-        saisie = SaisiePanel(conn, person_id, account_id, account_type)
-        v.addWidget(saisie)
-        v.addStretch()
-        return w
+        from qt_ui.panels.compte_generic_panel import CompteGenericPanel
+        return CompteGenericPanel(
+            conn,
+            person_id,
+            account_id,
+            account_type,
+            parent=parent,
+        )
 
 
 class PersonnesPage(QWidget):

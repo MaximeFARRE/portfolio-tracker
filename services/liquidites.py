@@ -28,6 +28,19 @@ _SENS_MAP = {
 }
 
 
+def _livret_balance_from_tx(tx_df: pd.DataFrame) -> float:
+    """Solde d'un livret : seuls DEPOT (+), RETRAIT (-) et INTERETS (+) sont valides."""
+    if tx_df is None or tx_df.empty:
+        return 0.0
+    df = tx_df.copy()
+    df["amount"] = pd.to_numeric(df.get("amount", 0.0), errors="coerce").fillna(0.0)
+    type_upper = df.get("type", "").astype(str).str.strip().str.upper()
+    depot    = float(df.loc[type_upper == "DEPOT",    "amount"].sum())
+    retrait  = float(df.loc[type_upper == "RETRAIT",  "amount"].sum())
+    interets = float(df.loc[type_upper == "INTERETS", "amount"].sum())
+    return round(depot - retrait + interets, 2)
+
+
 def _bank_balance_from_tx(tx_df: pd.DataFrame) -> float:
     if tx_df is None or tx_df.empty:
         return 0.0
@@ -106,7 +119,7 @@ def _compute_liquidites_like_overview(conn, person_id: int):
         acc_id = int(acc["id"])
         acc_ccy = str(acc.get("currency", "EUR") or "EUR").upper()
         tx = repo.list_transactions(conn, person_id=person_id, account_id=acc_id, limit=100000)
-        total_native = _bank_balance_from_tx(tx)
+        total_native = _livret_balance_from_tx(tx)
         eur = _convert_cached(total_native, acc_ccy, "EUR")
         if eur is None:
             logger.warning(

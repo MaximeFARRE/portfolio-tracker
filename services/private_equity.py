@@ -80,9 +80,10 @@ def build_pe_positions(projects: pd.DataFrame, tx: pd.DataFrame) -> pd.DataFrame
     out["holding_days"] = (end - out["entry_date"]).dt.days
 
     # PNL/MOIC
-    out["pnl"] = (out["cash_out"] + out["value_used"]) - (out["invested"] + out["fees"])
+    # Les frais sont suivis séparément (KPI) et sont déjà inclus dans invested.
+    out["pnl"] = (out["cash_out"] + out["value_used"]) - out["invested"]
 
-    den = (out["invested"] + out["fees"])
+    den = out["invested"]
     out["moic"] = None
     mask = den > 0
     out.loc[mask, "moic"] = (out.loc[mask, "cash_out"] + out.loc[mask, "value_used"]) / den[mask]
@@ -105,8 +106,9 @@ def compute_pe_kpis(positions: pd.DataFrame) -> dict:
     invested = float(positions["invested"].sum())
     cash_out = float(positions["cash_out"].sum())
     value = float(positions["value_used"].sum())
-    pnl = float((cash_out + value) - (invested + fees))
-    den = invested + fees
+    # Les frais sont indicatifs uniquement (KPI), déjà inclus dans invested.
+    pnl = float((cash_out + value) - invested)
+    den = invested
     moic = (cash_out + value) / den if den > 0 else None
 
     n_total = int(len(positions))
@@ -371,6 +373,85 @@ def _account_asset_type_by_id(conn, asset_ids: list[int]) -> dict[int, str]:
     return out
 
 
+def _get_latest_manual_price_asof(conn, asset_id: int, asof_date: str) -> tuple[float, str | None] | None:
+    row = conn.execute(
+        """
+        SELECT price, currency
+        FROM prices
+        WHERE asset_id = ?
+          AND date <= ?
+        ORDER BY date DESC
+        LIMIT 1
+        """,
+        (int(asset_id), str(asof_date)),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        price = float(row["price"])
+        ccy = row["currency"]
+    except Exception:
+        price = float(row[0])
+        ccy = row[1] if len(row) > 1 else None
+    if price <= 0:
+        return None
+    return price, (str(ccy).upper() if ccy else None)
+
+
+def _get_latest_buy_price_asof(
+    conn,
+    person_id: int,
+    asset_id: int,
+    asof_date: str,
+    account_ids: list[int],
+) -> tuple[float, str | None] | None:
+    if not account_ids:
+        return None
+    qmarks = ",".join(["?"] * len(account_ids))
+    row = conn.execute(
+        f"""
+        SELECT
+            t.price AS tx_price,
+            t.amount AS tx_amount,
+            t.quantity AS tx_qty,
+            a.currency AS asset_ccy
+        FROM transactions t
+        LEFT JOIN assets a ON a.id = t.asset_id
+        WHERE t.person_id = ?
+          AND t.asset_id = ?
+          AND t.type = 'ACHAT'
+          AND t.date <= ?
+          AND t.account_id IN ({qmarks})
+        ORDER BY t.date DESC, t.id DESC
+        LIMIT 1
+        """,
+        (int(person_id), int(asset_id), str(asof_date), *[int(x) for x in account_ids]),
+    ).fetchone()
+    if not row:
+        return None
+
+    try:
+        px = row["tx_price"]
+        amount = row["tx_amount"]
+        qty = row["tx_qty"]
+        ccy = row["asset_ccy"]
+    except Exception:
+        px = row[0] if len(row) > 0 else None
+        amount = row[1] if len(row) > 1 else None
+        qty = row[2] if len(row) > 2 else None
+        ccy = row[3] if len(row) > 3 else None
+
+    px_num = pd.to_numeric(pd.Series([px]), errors="coerce").iloc[0]
+    if pd.notna(px_num) and float(px_num) > 0:
+        return float(px_num), (str(ccy).upper() if ccy else None)
+
+    amt_num = pd.to_numeric(pd.Series([amount]), errors="coerce").iloc[0]
+    qty_num = pd.to_numeric(pd.Series([qty]), errors="coerce").iloc[0]
+    if pd.notna(amt_num) and pd.notna(qty_num) and float(qty_num) > 0:
+        return float(amt_num) / float(qty_num), (str(ccy).upper() if ccy else None)
+    return None
+
+
 def get_account_based_pe_assets_asof(conn, person_id: int, asof_date: str) -> pd.DataFrame:
     """
     Actifs détenus via les comptes d'investissement mappés au panel PE:
@@ -380,25 +461,26 @@ def get_account_based_pe_assets_asof(conn, person_id: int, asof_date: str) -> pd
     if accounts is None or accounts.empty:
         return pd.DataFrame(columns=[
             "asset_id", "symbol", "asset_type", "quantity", "asset_ccy",
-            "last_price", "value_eur", "valuation_status",
+            "last_price", "value_eur", "cost_eur", "pnl_eur", "valuation_status",
         ])
     inv_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(INVESTMENT_ACCOUNT_TYPES)].copy()
     if inv_acc.empty:
         return pd.DataFrame(columns=[
             "asset_id", "symbol", "asset_type", "quantity", "asset_ccy",
-            "last_price", "value_eur", "valuation_status",
+            "last_price", "value_eur", "cost_eur", "pnl_eur", "valuation_status",
         ])
+    inv_account_ids = [int(x) for x in inv_acc["id"].tolist()]
 
     pos = positions.compute_positions_asof(
         conn,
         person_id=person_id,
         asof_date=asof_date,
-        account_ids=[int(x) for x in inv_acc["id"].tolist()],
+        account_ids=inv_account_ids,
     )
     if pos is None or pos.empty:
         return pd.DataFrame(columns=[
             "asset_id", "symbol", "asset_type", "quantity", "asset_ccy",
-            "last_price", "value_eur", "valuation_status",
+            "last_price", "value_eur", "cost_eur", "pnl_eur", "valuation_status",
         ])
 
     aid_num = pd.to_numeric(pos["asset_id"], errors="coerce")
@@ -412,7 +494,7 @@ def get_account_based_pe_assets_asof(conn, person_id: int, asof_date: str) -> pd
     if p.empty:
         return pd.DataFrame(columns=[
             "asset_id", "symbol", "asset_type", "quantity", "asset_ccy",
-            "last_price", "value_eur", "valuation_status",
+            "last_price", "value_eur", "cost_eur", "pnl_eur", "valuation_status",
         ])
 
     p["quantity"] = pd.to_numeric(p["quantity"], errors="coerce").fillna(0.0)
@@ -421,7 +503,8 @@ def get_account_based_pe_assets_asof(conn, person_id: int, asof_date: str) -> pd
     p["asset_ccy"] = p.get("asset_ccy", "EUR").astype(str).str.upper()
 
     rows: list[dict] = []
-    price_cache: dict[str, tuple[float, str | None] | None] = {}
+    price_cache: dict[tuple[int, str], tuple[float, str | None, str] | None] = {}
+    buy_price_cache: dict[int, tuple[float, str | None] | None] = {}
     fx_cache: dict[str, float | None] = {}
     for _, r in p.iterrows():
         sym = str(r.get("symbol") or "").strip()
@@ -430,45 +513,100 @@ def get_account_based_pe_assets_asof(conn, person_id: int, asof_date: str) -> pd
         qty = float(r["quantity"])
         atype = str(r.get("asset_type") or "autre")
         ccy = str(r.get("asset_ccy") or "EUR").upper()
-        if sym not in price_cache:
-            price_cache[sym] = market_history.get_price_and_currency_asof(conn, sym, asof_date)
-        px_data = price_cache[sym]
+        aid = int(r["asset_id"])
+        cache_key = (aid, sym)
+        if cache_key not in price_cache:
+            manual = _get_latest_manual_price_asof(conn, aid, asof_date)
+            if manual is not None:
+                price_cache[cache_key] = (float(manual[0]), manual[1], "ok")
+            else:
+                weekly = market_history.get_price_and_currency_asof(conn, sym, asof_date)
+                if weekly is not None:
+                    price_cache[cache_key] = (float(weekly[0]), weekly[1], "ok")
+                else:
+                    buy_px = _get_latest_buy_price_asof(
+                        conn,
+                        person_id=person_id,
+                        asset_id=aid,
+                        asof_date=asof_date,
+                        account_ids=inv_account_ids,
+                    )
+                    if buy_px is not None:
+                        price_cache[cache_key] = (float(buy_px[0]), buy_px[1], "fallback_buy_price")
+                    else:
+                        price_cache[cache_key] = None
+
+        px_data = price_cache[cache_key]
         if px_data is None:
             rows.append({
-                "asset_id": int(r["asset_id"]),
+                "asset_id": aid,
                 "symbol": sym,
                 "asset_type": atype,
                 "quantity": qty,
                 "asset_ccy": ccy,
                 "last_price": None,
                 "value_eur": None,
+                "cost_eur": None,
+                "pnl_eur": None,
                 "valuation_status": "missing_price",
             })
             continue
-        px, px_ccy = px_data
+        px, px_ccy, status = px_data
         used_ccy = ccy or str(px_ccy or "EUR").upper()
         value_native = qty * float(px)
+
+        if aid not in buy_price_cache:
+            buy_price_cache[aid] = _get_latest_buy_price_asof(
+                conn,
+                person_id=person_id,
+                asset_id=aid,
+                asof_date=asof_date,
+                account_ids=inv_account_ids,
+            )
+        buy_info = buy_price_cache.get(aid)
+        buy_px_native = float(buy_info[0]) if (buy_info and buy_info[0] is not None) else None
+        buy_ccy = str(buy_info[1] or used_ccy).upper() if buy_info else used_ccy
+
         if used_ccy == "EUR":
             value_eur = value_native
-            status = "ok"
+            if buy_px_native is None:
+                cost_eur = None
+            elif buy_ccy == "EUR":
+                cost_eur = qty * buy_px_native
+            else:
+                buy_rate = market_history.convert_weekly(conn, 1.0, buy_ccy, "EUR", asof_date)
+                cost_eur = (qty * buy_px_native * float(buy_rate)) if buy_rate is not None else None
         else:
             if used_ccy not in fx_cache:
                 fx_cache[used_ccy] = market_history.convert_weekly(conn, 1.0, used_ccy, "EUR", asof_date)
             rate = fx_cache.get(used_ccy)
             if rate is None:
                 value_eur = None
+                cost_eur = None
                 status = "missing_fx"
             else:
                 value_eur = value_native * float(rate)
-                status = "ok"
+                if buy_px_native is None:
+                    cost_eur = None
+                elif buy_ccy == "EUR":
+                    cost_eur = qty * buy_px_native
+                elif buy_ccy == used_ccy:
+                    cost_eur = qty * buy_px_native * float(rate)
+                else:
+                    buy_rate = market_history.convert_weekly(conn, 1.0, buy_ccy, "EUR", asof_date)
+                    cost_eur = (qty * buy_px_native * float(buy_rate)) if buy_rate is not None else None
+
+        pnl_eur = (float(value_eur) - float(cost_eur)) if (value_eur is not None and cost_eur is not None) else None
         rows.append({
-            "asset_id": int(r["asset_id"]),
+            "asset_id": aid,
             "symbol": sym,
             "asset_type": atype,
             "quantity": qty,
             "asset_ccy": used_ccy,
             "last_price": float(px),
             "value_eur": None if value_eur is None else float(value_eur),
+            "cost_eur": None if cost_eur is None else float(cost_eur),
+            "pnl_eur": None if pnl_eur is None else float(pnl_eur),
             "valuation_status": status,
         })
     out = pd.DataFrame(rows)

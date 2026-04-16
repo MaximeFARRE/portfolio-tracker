@@ -95,6 +95,42 @@ def _filter_tx_buy_sell_to_bourse_assets(conn, tx_df: pd.DataFrame) -> pd.DataFr
     df = df[df["asset_type"].apply(lambda at: is_asset_type_in_panel(at, "bourse"))].copy()
     return df
 
+
+def _apply_missing_price_fallback_to_pru_for_pe_assets(pos_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fallback d'affichage pour actifs PE/non-cotés sur tableau de bord compte:
+    - si prix manquant, utiliser le PRU courant comme dernier prix connu.
+    - évite un vide total en attendant un prix manuel explicite.
+    """
+    if pos_df is None or pos_df.empty:
+        return pd.DataFrame(columns=pos_df.columns if pos_df is not None else [])
+    needed = {"asset_type", "last_price", "pru", "quantity"}
+    if not needed.issubset(set(pos_df.columns)):
+        return pos_df
+
+    out = pos_df.copy()
+    last = pd.to_numeric(out["last_price"], errors="coerce")
+    pru = pd.to_numeric(out["pru"], errors="coerce")
+    qty = pd.to_numeric(out["quantity"], errors="coerce")
+
+    is_pe_asset = out["asset_type"].apply(lambda at: is_asset_type_in_panel(at, "private_equity"))
+    missing_price = (last.isna() | (last <= 0))
+    can_fallback = missing_price & is_pe_asset & pru.notna() & (pru > 0) & qty.notna() & (qty > 0)
+    if not can_fallback.any():
+        return out
+
+    out.loc[can_fallback, "last_price"] = pru.loc[can_fallback]
+    if "value" in out.columns:
+        out.loc[can_fallback, "value"] = qty.loc[can_fallback] * pru.loc[can_fallback]
+    if "pnl_latent" in out.columns:
+        out.loc[can_fallback, "pnl_latent"] = 0.0
+    if "valuation_status" in out.columns:
+        out.loc[can_fallback, "valuation_status"] = "fallback_buy_price"
+    if "fx_breakdown_status" in out.columns:
+        out.loc[can_fallback, "fx_breakdown_status"] = "fallback_buy_price"
+    return out
+
+
 def _broker_cash_asof_native(tx: pd.DataFrame) -> float:
     """
     Cash "native" d'un compte bourse calculé à partir des transactions jusqu'à asof.
@@ -1004,7 +1040,7 @@ def get_live_bourse_positions(conn, person_id: int) -> pd.DataFrame:
 
 def get_live_bourse_positions_for_account(conn, account_id: int) -> pd.DataFrame:
     """
-    Retourne les positions bourse live d'un seul compte.
+    Retourne les positions live d'un seul compte d'investissement.
 
     Encapsule l'appel à portfolio.compute_positions_v2_fx pour un
     account_id donné, sans que l'UI ait à manipuler transactions,
@@ -1045,8 +1081,7 @@ def get_live_bourse_positions_for_account(conn, account_id: int) -> pd.DataFrame
     prices = repo.get_latest_prices(conn, asset_ids)
 
     pos = portfolio.compute_positions_v2_fx(conn, tx_acc, prices, acc_ccy)
-    if pos is not None and not pos.empty and "asset_type" in pos.columns:
-        pos = pos[pos["asset_type"].apply(lambda at: is_asset_type_in_panel(at, "bourse"))].copy()
+    pos = _apply_missing_price_fallback_to_pru_for_pe_assets(pos)
 
     if pos.empty:
         logger.debug(

@@ -275,6 +275,15 @@ class BourseGlobalPanel(QWidget):
         )
         self._btn_rebuild.clicked.connect(self._on_rebuild)
         self._rebuild_status = QLabel()
+
+        self._btn_edit_asset = QPushButton("✏️  Modifier un actif")
+        self._btn_edit_asset.setStyleSheet(STYLE_BTN_PRIMARY)
+        self._btn_edit_asset.setFixedWidth(175)
+        self._btn_edit_asset.setToolTip(
+            "Modifier le nom, le symbole ou la devise d'un actif.\n"
+            "Permet d'éditer aussi les actifs inactifs (hors portefeuille)."
+        )
+        self._btn_edit_asset.clicked.connect(self._on_edit_any_asset)
         self._rebuild_status.setStyleSheet(STYLE_STATUS)
         self._rebuild_status.setAlignment(Qt.AlignmentFlag.AlignRight)
 
@@ -282,6 +291,7 @@ class BourseGlobalPanel(QWidget):
         btn_col.addWidget(self._refresh_status, alignment=Qt.AlignmentFlag.AlignRight)
         btn_col.addWidget(self._btn_rebuild, alignment=Qt.AlignmentFlag.AlignRight)
         btn_col.addWidget(self._rebuild_status, alignment=Qt.AlignmentFlag.AlignRight)
+        btn_col.addWidget(self._btn_edit_asset, alignment=Qt.AlignmentFlag.AlignRight)
         header_row.addLayout(btn_col)
 
         layout.addLayout(header_row)
@@ -401,6 +411,7 @@ class BourseGlobalPanel(QWidget):
             {"col": "Compte",     "kind": "combo", "label": "Compte"},
             {"col": "Type",       "kind": "combo", "label": "PEA/CTO"},
         ])
+        self._table_pos.row_double_clicked.connect(self._on_pos_table_double_clicked)
         table_area.addWidget(self._table_pos, stretch=3)
 
         vbox_alloc = QVBoxLayout()
@@ -425,6 +436,7 @@ class BourseGlobalPanel(QWidget):
         self._table_diag.set_filter_config([
             {"col": "Statut", "kind": "combo", "label": "Statut"},
         ])
+        self._table_diag.row_double_clicked.connect(self._on_diag_table_double_clicked)
         layout.addWidget(self._table_diag)
 
         # ── Analytics Avancés (accordéons, tout fermé par défaut) ──────────
@@ -474,6 +486,96 @@ class BourseGlobalPanel(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._overlay.resize(self.size())
+
+    # ── Édition d'actif ───────────────────────────────────────────────────────
+
+    def _open_edit_asset_dialog(self, symbol: str) -> None:
+        """Ouvre EditAssetDialog pour le symbole donné, puis rafraîchit la vue."""
+        from services import repositories as repo
+        from qt_ui.panels.edit_asset_dialog import EditAssetDialog
+
+        row = repo.get_asset_by_symbol(self._conn, symbol)
+        if row is None:
+            return
+        try:
+            asset_id = int(row["id"] if hasattr(row, "keys") else row[0])
+        except (KeyError, IndexError, TypeError, ValueError):
+            return
+
+        dlg = EditAssetDialog(self._conn, asset_id, parent=self)
+        if dlg.exec() == EditAssetDialog.DialogCode.Accepted:
+            self._invalidate_view_cache(reset_analytics=True)
+            self._load_data(force=True)
+
+    def _on_pos_table_double_clicked(self, row_idx: int) -> None:
+        """Double-clic sur le tableau des positions → édition de l'actif."""
+        df = self._table_pos.get_dataframe()
+        if df.empty or row_idx >= len(df):
+            return
+        row = df.iloc[row_idx]
+        # La colonne "symbol" est renommée "Symbole" dans le df affiché
+        symbol = str(row.get("Symbole", row.get("symbol", ""))).strip()
+        if symbol:
+            self._open_edit_asset_dialog(symbol)
+
+    def _on_diag_table_double_clicked(self, row_idx: int) -> None:
+        """Double-clic sur la table de diagnostic → édition de l'actif."""
+        df = self._table_diag.get_dataframe()
+        if df.empty or row_idx >= len(df):
+            return
+        row = df.iloc[row_idx]
+        symbol = str(row.get("Ticker", "")).strip()
+        if symbol:
+            self._open_edit_asset_dialog(symbol)
+
+    def _on_edit_any_asset(self) -> None:
+        """Bouton 'Modifier un actif' → picker sur tous les actifs (actifs + inactifs)."""
+        from services import repositories as repo
+        from qt_ui.panels.edit_asset_dialog import EditAssetDialog
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QComboBox, QLabel, QPushButton, QDialogButtonBox
+
+        df_assets = repo.list_assets(self._conn)
+        if df_assets is None or df_assets.empty:
+            return
+
+        picker = QDialog(self)
+        picker.setWindowTitle("Choisir un actif à modifier")
+        picker.setModal(True)
+        picker.resize(400, 130)
+        picker.setStyleSheet(f"background: {BG_PRIMARY};")
+
+        vbox = QVBoxLayout(picker)
+        vbox.setContentsMargins(14, 14, 14, 14)
+        vbox.setSpacing(10)
+
+        lbl = QLabel("Actif :")
+        lbl.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        combo = QComboBox()
+        combo.setStyleSheet(STYLE_INPUT)
+        for _, r in df_assets.iterrows():
+            label = f"{r['symbol']}  —  {r['name']}"
+            combo.addItem(label, int(r["id"]))
+        vbox.addWidget(lbl)
+        vbox.addWidget(combo)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(picker.accept)
+        buttons.rejected.connect(picker.reject)
+        vbox.addWidget(buttons)
+
+        if picker.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        asset_id = combo.currentData()
+        if asset_id is None:
+            return
+
+        dlg = EditAssetDialog(self._conn, asset_id, parent=self)
+        if dlg.exec() == EditAssetDialog.DialogCode.Accepted:
+            self._invalidate_view_cache(reset_analytics=True)
+            self._load_data(force=True)
 
     def refresh(self) -> None:
         self._load_data()

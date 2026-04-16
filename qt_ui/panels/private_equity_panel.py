@@ -10,15 +10,15 @@ import pandas as pd
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QFormLayout, QLineEdit, QDoubleSpinBox, QComboBox, QPushButton,
-    QDateEdit, QScrollArea,
+    QDateEdit, QScrollArea, QMessageBox,
 )
 from qt_ui.components.animated_tab import AnimatedTabWidget
 from PyQt6.QtCore import QDate, Qt
 from qt_ui.widgets import PlotlyView, DataTableWidget, MetricLabel
 from qt_ui.theme import (
-    BG_PRIMARY, STYLE_BTN_PRIMARY_BORDERED, STYLE_BTN_SUCCESS,
+    BG_PRIMARY, STYLE_BTN_PRIMARY_BORDERED, STYLE_BTN_SUCCESS, STYLE_BTN_DANGER,
     STYLE_INPUT_FOCUS, STYLE_FORM_LABEL, STYLE_TITLE, STYLE_SECTION,
-    STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR, STYLE_TAB_INNER,
+    STYLE_STATUS, STYLE_STATUS_SUCCESS, STYLE_STATUS_ERROR, STYLE_STATUS_WARNING, STYLE_TAB_INNER,
     STYLE_SCROLLAREA, BORDER_SUBTLE,
 )
 
@@ -53,6 +53,7 @@ class PrivateEquityPanel(QWidget):
         super().__init__(parent)
         self._conn = conn
         self._person_id = person_id
+        self._pe_tx_raw_df = pd.DataFrame()
         self.setStyleSheet(f"background: {BG_PRIMARY};")
 
         layout = QVBoxLayout(self)
@@ -123,8 +124,21 @@ class PrivateEquityPanel(QWidget):
         lbl_tx = QLabel("Historique des transactions")
         lbl_tx.setStyleSheet(STYLE_SECTION)
         layout.addWidget(lbl_tx)
+        tx_actions = QHBoxLayout()
+        self._btn_delete_tx = QPushButton("🗑️  Supprimer l'opération sélectionnée")
+        self._btn_delete_tx.setStyleSheet(STYLE_BTN_DANGER)
+        self._btn_delete_tx.setEnabled(False)
+        self._btn_delete_tx.clicked.connect(self._delete_selected_pe_transaction)
+        tx_actions.addWidget(self._btn_delete_tx)
+        self._pe_tx_hist_status = QLabel("")
+        self._pe_tx_hist_status.setStyleSheet(STYLE_STATUS)
+        tx_actions.addWidget(self._pe_tx_hist_status)
+        tx_actions.addStretch()
+        layout.addLayout(tx_actions)
         self._table_tx = DataTableWidget()
         self._table_tx.setMinimumHeight(180)
+        self._table_tx.hide_column("id")
+        self._table_tx.row_selected.connect(self._on_pe_tx_row_selected)
         layout.addWidget(self._table_tx)
 
         layout.addStretch()
@@ -209,7 +223,7 @@ class PrivateEquityPanel(QWidget):
         form2.addRow(_form_label("Date :"), self._pe_tx_date)
 
         self._pe_tx_type = QComboBox()
-        self._pe_tx_type.addItems(["INVEST", "VALO", "DISTRIB", "VENTE"])
+        self._pe_tx_type.addItems(["INVEST", "VALO", "DISTRIB", "VENTE", "FEES"])
         self._pe_tx_type.setStyleSheet(STYLE_INPUT_FOCUS)
         self._pe_tx_type.currentTextChanged.connect(self._on_pe_tx_type_changed)
         form2.addRow(_form_label("Type :"), self._pe_tx_type)
@@ -271,6 +285,86 @@ class PrivateEquityPanel(QWidget):
                        self._pe_tx_price_lbl, self._pe_tx_unitprice):
             widget.setVisible(show)
 
+    def _set_tx_status(self, text: str, tone: str = "neutral") -> None:
+        self._pe_tx_hist_status.setText(text)
+        if tone == "success":
+            self._pe_tx_hist_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        elif tone == "error":
+            self._pe_tx_hist_status.setStyleSheet(STYLE_STATUS_ERROR)
+        elif tone == "warning":
+            self._pe_tx_hist_status.setStyleSheet(STYLE_STATUS_WARNING)
+        else:
+            self._pe_tx_hist_status.setStyleSheet(STYLE_STATUS)
+
+    def _on_pe_tx_row_selected(self, row: int) -> None:
+        enabled = int(row) >= 0 and self._get_selected_pe_tx() is not None
+        self._btn_delete_tx.setEnabled(enabled)
+
+    def _get_selected_pe_tx(self) -> dict | None:
+        selected = self._table_tx.get_selected_row()
+        if not selected:
+            return None
+        tx_id_raw = selected.get("id")
+        if tx_id_raw is None or (isinstance(tx_id_raw, float) and pd.isna(tx_id_raw)):
+            return None
+        try:
+            tx_id = int(tx_id_raw)
+        except Exception:
+            return None
+
+        if self._pe_tx_raw_df is not None and not self._pe_tx_raw_df.empty and "id" in self._pe_tx_raw_df.columns:
+            match = self._pe_tx_raw_df[self._pe_tx_raw_df["id"] == tx_id]
+            if not match.empty:
+                return match.iloc[0].to_dict()
+
+        out = dict(selected)
+        out["id"] = tx_id
+        return out
+
+    def _delete_selected_pe_transaction(self) -> None:
+        tx = self._get_selected_pe_tx()
+        if not tx:
+            self._set_tx_status("Sélectionnez une opération à supprimer.", tone="warning")
+            return
+
+        tx_id = int(tx["id"])
+        tx_type = str(tx.get("tx_type") or "")
+        tx_date = str(tx.get("date") or "")
+        project_name = str(tx.get("project_name") or "")
+        amount = tx.get("amount")
+        try:
+            amount_txt = f"{float(amount):,.2f} €".replace(",", " ") if amount is not None and not pd.isna(amount) else "—"
+        except Exception:
+            amount_txt = "—"
+
+        answer = QMessageBox.question(
+            self,
+            "Confirmer la suppression",
+            (
+                "Supprimer cette opération PE ?\n\n"
+                f"ID: {tx_id}\n"
+                f"Projet: {project_name}\n"
+                f"Date: {tx_date}\n"
+                f"Type: {tx_type}\n"
+                f"Montant: {amount_txt}\n\n"
+                "Cette action est irréversible."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            from services import private_equity_repository as pe_repo
+            pe_repo.delete_pe_transaction(self._conn, tx_id=tx_id)
+            self._load_data()
+            self._refresh_project_combo()
+            self._set_tx_status(f"✅ Opération #{tx_id} supprimée.", tone="success")
+        except Exception as e:
+            logger.error("Erreur suppression transaction PE: %s", e, exc_info=True)
+            self._set_tx_status(f"❌ Erreur suppression : {e}", tone="error")
+
     # ── Navigation ─────────────────────────────────────────────────────────
 
     def _on_tab_changed(self, idx: int) -> None:
@@ -292,6 +386,8 @@ class PrivateEquityPanel(QWidget):
         try:
             from services import private_equity_repository as pe_repo
             from services import private_equity as pe
+            self._btn_delete_tx.setEnabled(False)
+            self._pe_tx_raw_df = pd.DataFrame()
 
             asof = pd.Timestamp.today().date().isoformat()
             account_assets = pe.get_account_based_pe_assets_asof(
@@ -301,7 +397,7 @@ class PrivateEquityPanel(QWidget):
                 display_cols = [
                     c for c in [
                         "symbol", "asset_type", "quantity", "last_price",
-                        "asset_ccy", "value_eur", "valuation_status",
+                        "asset_ccy", "value_eur", "cost_eur", "pnl_eur", "valuation_status",
                     ] if c in account_assets.columns
                 ]
                 self._table_account_assets.set_dataframe(account_assets[display_cols] if display_cols else account_assets)
@@ -311,11 +407,25 @@ class PrivateEquityPanel(QWidget):
                     ) or 0.0
                 else:
                     account_assets_value = 0.0
+                if "cost_eur" in account_assets.columns:
+                    account_assets_invested = _finite_float(
+                        pd.to_numeric(account_assets["cost_eur"], errors="coerce").dropna().sum()
+                    )
+                else:
+                    account_assets_invested = None
+                if "pnl_eur" in account_assets.columns:
+                    account_assets_pnl = _finite_float(
+                        pd.to_numeric(account_assets["pnl_eur"], errors="coerce").dropna().sum()
+                    )
+                else:
+                    account_assets_pnl = None
             else:
                 self._table_account_assets.set_dataframe(pd.DataFrame([{
                     "Info": "Aucun actif mappé Private Equity dans les comptes."
                 }]))
                 account_assets_value = 0.0
+                account_assets_invested = None
+                account_assets_pnl = None
 
             projects = pe_repo.list_pe_projects(self._conn, person_id=self._person_id)
             if projects is None or projects.empty:
@@ -327,14 +437,23 @@ class PrivateEquityPanel(QWidget):
                     self._kpi_value.set_content("Valeur PE totale", _fmt_eur(account_assets_value))
                 else:
                     self._kpi_value.set_content("Valeur PE totale", "—")
-                self._kpi_invested.set_content("Investi total", "—")
-                self._kpi_pnl.set_content("PnL latent", "—")
+                self._kpi_invested.set_content(
+                    "Investi total",
+                    _fmt_eur(account_assets_invested) if account_assets_invested is not None else "—",
+                )
+                self._kpi_pnl.set_content(
+                    "PnL latent",
+                    "—" if account_assets_pnl is None else f"{account_assets_pnl:+,.2f} €".replace(",", " "),
+                    delta="" if account_assets_pnl is None else f"{account_assets_pnl:+.2f}",
+                    delta_positive=True if account_assets_pnl is None else account_assets_pnl >= 0,
+                )
                 self._kpi_moic.set_content("MOIC global", "—")
                 return
 
             tx = pe_repo.list_pe_transactions(self._conn, person_id=self._person_id)
 
             if tx is not None and not tx.empty:
+                self._pe_tx_raw_df = tx.copy()
                 # ── Afficher les POSITIONS calculées (avec invested, value, pnl, moic)
                 try:
                     positions = pe.build_pe_positions(projects, tx)
@@ -342,8 +461,8 @@ class PrivateEquityPanel(QWidget):
                     kpis = pe.compute_pe_kpis(positions)
 
                     total_val  = (_finite_float(kpis.get("value")) or 0.0) + account_assets_value
-                    total_inv  = _finite_float(kpis.get("invested"))
-                    pnl        = _finite_float(kpis.get("pnl"))
+                    total_inv  = (_finite_float(kpis.get("invested")) or 0.0) + (account_assets_invested or 0.0)
+                    pnl        = (_finite_float(kpis.get("pnl")) or 0.0) + (account_assets_pnl or 0.0)
                     moic       = kpis.get("moic")
                     cash_out   = _finite_float(kpis.get("cash_out"))
                     fees       = _finite_float(kpis.get("fees"))
@@ -360,9 +479,9 @@ class PrivateEquityPanel(QWidget):
                         "Investi total", _fmt_eur(total_inv)
                     )
                     self._kpi_pnl.set_content(
-                        "PnL latent", "—" if pnl is None else f"{pnl:+,.2f} €".replace(",", " "),
-                        delta="" if pnl is None else f"{pnl:+.2f}",
-                        delta_positive=True if pnl is None else pnl >= 0,
+                        "PnL latent", f"{pnl:+,.2f} €".replace(",", " "),
+                        delta=f"{pnl:+.2f}",
+                        delta_positive=pnl >= 0,
                     )
                     self._kpi_moic.set_content(
                         "MOIC global",
@@ -399,6 +518,7 @@ class PrivateEquityPanel(QWidget):
                 # ── Historique des transactions
                 try:
                     wanted_cols = [
+                        "id",
                         "project_name", "date", "tx_type",
                         "amount", "quantity", "unit_price", "note",
                     ]
@@ -413,17 +533,28 @@ class PrivateEquityPanel(QWidget):
                 self._table_tx.set_dataframe(pd.DataFrame([{
                     "Info": "Aucune transaction. Saisissez-en une dans l'onglet ➕ Saisie."
                 }]))
+                self._pe_tx_raw_df = pd.DataFrame()
                 if account_assets_value > 0:
                     self._kpi_value.set_content("Valeur PE totale", _fmt_eur(account_assets_value))
                 else:
                     self._kpi_value.set_content("Valeur PE totale", "—")
-                self._kpi_invested.set_content("Investi total", "—")
-                self._kpi_pnl.set_content("PnL latent", "—")
+                self._kpi_invested.set_content(
+                    "Investi total",
+                    _fmt_eur(account_assets_invested) if account_assets_invested is not None else "—",
+                )
+                self._kpi_pnl.set_content(
+                    "PnL latent",
+                    "—" if account_assets_pnl is None else f"{account_assets_pnl:+,.2f} €".replace(",", " "),
+                    delta="" if account_assets_pnl is None else f"{account_assets_pnl:+.2f}",
+                    delta_positive=True if account_assets_pnl is None else account_assets_pnl >= 0,
+                )
                 self._kpi_moic.set_content("MOIC global", "—")
 
         except Exception as e:
             logger.error("Erreur chargement données PE: %s", e, exc_info=True)
             self._table_projects.set_dataframe(pd.DataFrame([{"Erreur": str(e)}]))
+            self._table_tx.set_dataframe(pd.DataFrame([{"Erreur": str(e)}]))
+            self._pe_tx_raw_df = pd.DataFrame()
 
     # ── Rafraîchissement du combo projets ─────────────────────────────────
 
