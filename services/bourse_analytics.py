@@ -7,9 +7,129 @@ import pandas as pd
 from services import repositories as repo
 from services import positions
 from services import market_history
+from services.asset_panel_mapping import INVESTMENT_ACCOUNT_TYPES, is_asset_type_in_panel
 from services.common_utils import safe_float
 
 logger = logging.getLogger(__name__)
+
+
+def _investment_accounts_df(accounts: pd.DataFrame) -> pd.DataFrame:
+    if accounts is None or accounts.empty:
+        return pd.DataFrame(columns=[])
+    return accounts[
+        accounts["account_type"].astype(str).str.upper().isin(INVESTMENT_ACCOUNT_TYPES)
+    ].copy()
+
+
+def _asset_type_by_id(conn, asset_ids: list[int]) -> dict[int, str]:
+    if not asset_ids:
+        return {}
+    ids = sorted({int(aid) for aid in asset_ids if aid is not None})
+    if not ids:
+        return {}
+    qmarks = ",".join(["?"] * len(ids))
+    rows = conn.execute(
+        f"SELECT id, asset_type FROM assets WHERE id IN ({qmarks})",
+        tuple(ids),
+    ).fetchall()
+    out: dict[int, str] = {}
+    for row in rows:
+        try:
+            rid = int(row["id"])
+            at = str(row["asset_type"] or "autre")
+        except Exception:
+            rid = int(row[0])
+            at = str(row[1] or "autre")
+        out[rid] = at
+    return out
+
+
+def _filter_positions_to_bourse_assets(conn, df_pos: pd.DataFrame) -> pd.DataFrame:
+    if df_pos is None or df_pos.empty:
+        return pd.DataFrame(columns=df_pos.columns if df_pos is not None else [])
+    out = df_pos.copy()
+    if "asset_id" not in out.columns:
+        return out
+
+    aid_num = pd.to_numeric(out["asset_id"], errors="coerce")
+    asset_ids = aid_num.dropna().astype(int).tolist()
+    at_map = _asset_type_by_id(conn, asset_ids)
+    out["asset_type"] = aid_num.apply(
+        lambda aid: at_map.get(int(aid), "autre") if pd.notna(aid) else "autre"
+    )
+    keep = out["asset_type"].apply(lambda at: is_asset_type_in_panel(at, "bourse"))
+    return out[keep].copy()
+
+
+def _filter_tx_buy_sell_to_bourse_assets(conn, tx_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Garde uniquement les achats/ventes portant sur des actifs mappés au panel bourse.
+    """
+    if tx_df is None or tx_df.empty:
+        return pd.DataFrame(columns=tx_df.columns if tx_df is not None else [])
+    if "asset_id" not in tx_df.columns:
+        # Fallback legacy: si asset_id est absent, on conserve le comportement
+        # historique (ACHAT/VENTE tous actifs confondus) plutôt que renvoyer 0.
+        df = tx_df.copy()
+        df["type"] = df.get("type", "").astype(str).str.upper()
+        return df[df["type"].isin(["ACHAT", "VENTE"])].copy()
+
+    df = tx_df.copy()
+    df["type"] = df.get("type", "").astype(str).str.upper()
+    df = df[df["type"].isin(["ACHAT", "VENTE"])].copy()
+    if df.empty:
+        return df
+
+    aid_num = pd.to_numeric(df["asset_id"], errors="coerce")
+    if aid_num.notna().sum() == 0:
+        # Même fallback: pas de mapping possible sans asset_id exploitable.
+        return df
+
+    df = df[aid_num.notna()].copy()
+    aid_num = pd.to_numeric(df["asset_id"], errors="coerce")
+    asset_ids = aid_num.dropna().astype(int).tolist()
+    at_map = _asset_type_by_id(conn, asset_ids)
+    df["asset_type"] = aid_num.apply(
+        lambda aid: at_map.get(int(aid), "autre") if pd.notna(aid) else "autre"
+    )
+    df = df[df["asset_type"].apply(lambda at: is_asset_type_in_panel(at, "bourse"))].copy()
+    return df
+
+
+def _apply_missing_price_fallback_to_pru_for_pe_assets(pos_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fallback d'affichage pour actifs PE/non-cotés sur tableau de bord compte:
+    - si prix manquant, utiliser le PRU courant comme dernier prix connu.
+    - évite un vide total en attendant un prix manuel explicite.
+    """
+    if pos_df is None or pos_df.empty:
+        return pd.DataFrame(columns=pos_df.columns if pos_df is not None else [])
+    needed = {"asset_type", "last_price", "pru", "quantity"}
+    if not needed.issubset(set(pos_df.columns)):
+        return pos_df
+
+    out = pos_df.copy()
+    last = pd.to_numeric(out["last_price"], errors="coerce")
+    pru = pd.to_numeric(out["pru"], errors="coerce")
+    qty = pd.to_numeric(out["quantity"], errors="coerce")
+
+    is_pe_asset = out["asset_type"].apply(lambda at: is_asset_type_in_panel(at, "private_equity"))
+    missing_price = (last.isna() | (last <= 0))
+    can_fallback = missing_price & is_pe_asset & pru.notna() & (pru > 0) & qty.notna() & (qty > 0)
+    if not can_fallback.any():
+        return out
+
+    out.loc[can_fallback, "last_price"] = pru.loc[can_fallback]
+    if "value" in out.columns:
+        out.loc[can_fallback, "value"] = qty.loc[can_fallback] * pru.loc[can_fallback]
+    if "pnl_latent" in out.columns:
+        out.loc[can_fallback, "pnl_latent"] = 0.0
+    if "valuation_status" in out.columns:
+        out.loc[can_fallback, "valuation_status"] = "fallback_buy_price"
+    if "fx_breakdown_status" in out.columns:
+        out.loc[can_fallback, "fx_breakdown_status"] = "fallback_buy_price"
+    return out
+
 
 def _broker_cash_asof_native(tx: pd.DataFrame) -> float:
     """
@@ -121,13 +241,14 @@ def compute_positions_valued_asof(conn, person_id: int, asof_week_date: str) -> 
     if accounts is None or accounts.empty:
         return pd.DataFrame(columns=["ticker", "account", "ccy", "qty", "px", "value_eur"])
 
-    # comptes bourse: on garde ton périmètre standard
-    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    # Comptes d'investissement multi-supports (PEA/PEA_PME/CTO/CRYPTO/AV/PER/PEE).
+    bourse_acc = _investment_accounts_df(accounts)
     if bourse_acc.empty:
         return pd.DataFrame(columns=["ticker", "account", "ccy", "qty", "px", "value_eur"])
 
     acc_ids = [int(x) for x in bourse_acc["id"].tolist()]
     pos = positions.compute_positions_asof(conn, person_id=person_id, asof_date=asof_week_date, account_ids=acc_ids)
+    pos = _filter_positions_to_bourse_assets(conn, pos)
     if pos is None or pos.empty:
         return pd.DataFrame(columns=["ticker", "account", "ccy", "qty", "px", "value_eur"])
 
@@ -271,13 +392,14 @@ def compute_accounts_breakdown_asof(conn, person_id: int, asof_week_date: str) -
     if accounts is None or accounts.empty:
         return pd.DataFrame(columns=["Compte", "Type", "Devise", "Cash (EUR)", "Holdings (EUR)", "Total (EUR)", "%"])
 
-    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    bourse_acc = _investment_accounts_df(accounts)
     if bourse_acc.empty:
         return pd.DataFrame(columns=["Compte", "Type", "Devise", "Cash (EUR)", "Holdings (EUR)", "Total (EUR)", "%"])
 
     # positions as-of par compte
     acc_ids = [int(x) for x in bourse_acc["id"].tolist()]
     pos = positions.compute_positions_asof(conn, person_id=person_id, asof_date=asof_week_date, account_ids=acc_ids)
+    pos = _filter_positions_to_bourse_assets(conn, pos)
 
     price_cache: dict[str, float] = {}
     fx_cache: dict[str, float | None] = {}
@@ -367,7 +489,7 @@ def compute_accounts_breakdown_asof(conn, person_id: int, asof_week_date: str) -
 def compute_invested_amount_eur_asof(conn, person_id: int, asof_week_date: str) -> float:
     """
     Montant investi net (EUR) :
-    = Somme ACHAT (amount+fees) - Somme VENTE (amount - fees) sur comptes bourse.
+    = Somme ACHAT (amount+fees) - Somme VENTE (amount - fees) sur comptes d'investissement.
     -> simple, robuste, compréhensible.
     """
     import pandas as pd
@@ -376,7 +498,7 @@ def compute_invested_amount_eur_asof(conn, person_id: int, asof_week_date: str) 
     if accounts is None or accounts.empty:
         return 0.0
 
-    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    bourse_acc = _investment_accounts_df(accounts)
     if bourse_acc.empty:
         return 0.0
 
@@ -401,8 +523,9 @@ def compute_invested_amount_eur_asof(conn, person_id: int, asof_week_date: str) 
         df["amount"] = pd.to_numeric(df.get("amount", 0.0), errors="coerce").fillna(0.0)
         df["fees"] = pd.to_numeric(df.get("fees", 0.0), errors="coerce").fillna(0.0)
 
-        buys = df[df["type"] == "ACHAT"]
-        sells = df[df["type"] == "VENTE"]
+        df_bs = _filter_tx_buy_sell_to_bourse_assets(conn, df)
+        buys = df_bs[df_bs["type"] == "ACHAT"]
+        sells = df_bs[df_bs["type"] == "VENTE"]
 
         invested_native = float(buys["amount"].sum() + buys["fees"].sum()) - float(sells["amount"].sum() - sells["fees"].sum())
         converted = market_history.convert_weekly(conn, invested_native, acc_ccy, "EUR", asof_week_date)
@@ -485,7 +608,7 @@ def compute_passive_income_history(conn, person_id: int) -> pd.DataFrame:
     if accounts is None or accounts.empty:
         return pd.DataFrame(columns=["date", "type", "amount_eur", "month", "year"])
         
-    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    bourse_acc = _investment_accounts_df(accounts)
     if bourse_acc.empty:
          return pd.DataFrame(columns=["date", "type", "amount_eur", "month", "year"])
     
@@ -563,7 +686,7 @@ def compute_invested_series(conn, person_id: int) -> pd.DataFrame:
     if accounts is None or accounts.empty:
         return pd.DataFrame(columns=["date", "invested_eur"])
 
-    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    bourse_acc = _investment_accounts_df(accounts)
     if bourse_acc.empty:
         return pd.DataFrame(columns=["date", "invested_eur"])
 
@@ -583,8 +706,9 @@ def compute_invested_series(conn, person_id: int) -> pd.DataFrame:
         df["amount"] = pd.to_numeric(df.get("amount", 0.0), errors="coerce").fillna(0.0)
         df["fees"] = pd.to_numeric(df.get("fees", 0.0), errors="coerce").fillna(0.0)
 
-        buys = df[df["type"] == "ACHAT"].copy()
-        sells = df[df["type"] == "VENTE"].copy()
+        df_bs = _filter_tx_buy_sell_to_bourse_assets(conn, df)
+        buys = df_bs[df_bs["type"] == "ACHAT"].copy()
+        sells = df_bs[df_bs["type"] == "VENTE"].copy()
         buys["net_native"] = buys["amount"] + buys["fees"]
         sells["net_native"] = -(sells["amount"] - sells["fees"])
 
@@ -610,6 +734,69 @@ def compute_invested_series(conn, person_id: int) -> pd.DataFrame:
     all_tx = pd.concat(all_rows, ignore_index=True).sort_values("date")
     all_tx["invested_eur"] = all_tx["net_eur"].cumsum()
     return all_tx[["date", "invested_eur"]].reset_index(drop=True)
+
+
+def compute_fx_pnl_summary(df_positions: pd.DataFrame) -> dict:
+    """
+    Calcule l'effet de change (FX) agrégé en EUR.
+
+    Paramètre:
+        df_positions: DataFrame retourné par get_live_bourse_positions.
+                      Colonnes attendues: asset_ccy + fx_gain_eur (fallback pnl_fx).
+
+    Retourne:
+        {
+            "total_fx_pnl": float,             # Effet FX total en EUR
+            "by_currency": dict[str, float],   # Effet FX agrégé par devise
+            "by_account": dict[str, float],    # Effet FX agrégé par compte (si colonne dispo)
+            "missing_breakdown_count": int,    # Nb positions étrangères sans décomposition exploitable
+            "fx_column": str | None,           # Colonne utilisée (fx_gain_eur ou pnl_fx)
+        }
+    """
+    empty = {
+        "total_fx_pnl": 0.0,
+        "by_currency": {},
+        "by_account": {},
+        "missing_breakdown_count": 0,
+        "fx_column": None,
+    }
+    if df_positions is None or df_positions.empty:
+        return empty
+    if "asset_ccy" not in df_positions.columns:
+        return empty
+
+    foreign = df_positions[df_positions["asset_ccy"] != "EUR"].copy()
+    if foreign.empty:
+        return empty
+
+    fx_col = "fx_gain_eur" if "fx_gain_eur" in foreign.columns else ("pnl_fx" if "pnl_fx" in foreign.columns else None)
+    if fx_col is None:
+        return empty
+
+    pnl_series = pd.to_numeric(foreign[fx_col], errors="coerce")
+    total_fx_pnl = float(pnl_series.dropna().sum())
+    missing_breakdown_count = int(pnl_series.isna().sum())
+
+    by_currency = (
+        foreign.assign(_fx_val=pnl_series)
+        .groupby("asset_ccy")["_fx_val"]
+        .sum()
+    )
+    by_account: dict[str, float] = {}
+    if "compte" in foreign.columns:
+        grouped = (
+            foreign.assign(_fx_val=pnl_series)
+            .groupby("compte")["_fx_val"]
+            .sum()
+        )
+        by_account = {str(k): float(v) for k, v in grouped.items()}
+    return {
+        "total_fx_pnl": total_fx_pnl,
+        "by_currency": {str(k): float(v) for k, v in by_currency.items()},
+        "by_account": by_account,
+        "missing_breakdown_count": missing_breakdown_count,
+        "fx_column": fx_col,
+    }
 
 
 def get_bourse_performance_metrics(conn, person_id: int, current_live_value: float | None = None) -> dict:
@@ -698,13 +885,14 @@ def get_tickers_diagnostic_df(conn, person_id: int) -> pd.DataFrame:
     if accounts is None or accounts.empty:
         return pd.DataFrame()
 
-    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    bourse_acc = _investment_accounts_df(accounts)
     if bourse_acc.empty:
         return pd.DataFrame()
 
     acc_ids = [int(x) for x in bourse_acc["id"].tolist()]
     # Utilise positions.compute_positions_asof avec asof=today pour avoir le live
     pos = positions.compute_positions_asof(conn, person_id=person_id, asof_date=_dt.date.today().isoformat(), account_ids=acc_ids)
+    pos = _filter_positions_to_bourse_assets(conn, pos)
     if pos is None or pos.empty:
         return pd.DataFrame()
 
@@ -767,7 +955,7 @@ def get_tickers_diagnostic_df(conn, person_id: int) -> pd.DataFrame:
 def get_live_bourse_positions(conn, person_id: int) -> pd.DataFrame:
     """
     Point d'entrée unique pour obtenir les positions bourse live consolidées
-    d'une personne, tous comptes confondus (PEA, CTO, CRYPTO).
+    d'une personne, tous comptes d'investissement confondus.
 
     Encapsule :
     - la récupération des comptes bourse
@@ -784,7 +972,9 @@ def get_live_bourse_positions(conn, person_id: int) -> pd.DataFrame:
 
     empty_cols = [
         "asset_id", "symbol", "name", "asset_type", "quantity", "pru",
-        "last_price", "value", "pnl_latent", "asset_ccy", "valuation_status", "compte", "type",
+        "last_price", "value", "pnl_latent",
+        "total_gain_eur", "market_gain_eur", "fx_gain_eur", "pnl_fx",
+        "asset_ccy", "valuation_status", "fx_breakdown_status", "compte", "type",
     ]
 
     accounts = repo.list_accounts(conn, person_id=person_id)
@@ -792,8 +982,7 @@ def get_live_bourse_positions(conn, person_id: int) -> pd.DataFrame:
         logger.info("get_live_bourse_positions: aucun compte pour person_id=%s", person_id)
         return pd.DataFrame(columns=empty_cols)
 
-    bourse_types = {"PEA", "CTO", "CRYPTO"}
-    df_b = accounts[accounts["account_type"].astype(str).str.upper().isin(bourse_types)]
+    df_b = _investment_accounts_df(accounts)
     if df_b.empty:
         logger.info("get_live_bourse_positions: aucun compte bourse pour person_id=%s", person_id)
         return pd.DataFrame(columns=empty_cols)
@@ -816,7 +1005,10 @@ def get_live_bourse_positions(conn, person_id: int) -> pd.DataFrame:
         tx_acc = repo.list_transactions(conn, account_id=account_id, limit=10000)
         prices = repo.get_latest_prices(conn, asset_ids)
 
-        pos = portfolio.compute_positions_v2_fx(conn, tx_acc, prices, acc_ccy)
+        # Vue globale: toutes les valorisations sont consolidées en EUR.
+        pos = portfolio.compute_positions_v2_fx(conn, tx_acc, prices, "EUR")
+        if pos is not None and not pos.empty and "asset_type" in pos.columns:
+            pos = pos[pos["asset_type"].apply(lambda at: is_asset_type_in_panel(at, "bourse"))].copy()
 
         if pos.empty:
             logger.debug(
@@ -848,7 +1040,7 @@ def get_live_bourse_positions(conn, person_id: int) -> pd.DataFrame:
 
 def get_live_bourse_positions_for_account(conn, account_id: int) -> pd.DataFrame:
     """
-    Retourne les positions bourse live d'un seul compte.
+    Retourne les positions live d'un seul compte d'investissement.
 
     Encapsule l'appel à portfolio.compute_positions_v2_fx pour un
     account_id donné, sans que l'UI ait à manipuler transactions,
@@ -862,7 +1054,9 @@ def get_live_bourse_positions_for_account(conn, account_id: int) -> pd.DataFrame
 
     empty_cols = [
         "asset_id", "symbol", "name", "asset_type", "quantity", "pru",
-        "last_price", "value", "pnl_latent", "asset_ccy", "valuation_status",
+        "last_price", "value", "pnl_latent",
+        "total_gain_eur", "market_gain_eur", "fx_gain_eur", "pnl_fx",
+        "asset_ccy", "valuation_status", "fx_breakdown_status",
     ]
 
     # Devise du compte
@@ -887,6 +1081,7 @@ def get_live_bourse_positions_for_account(conn, account_id: int) -> pd.DataFrame
     prices = repo.get_latest_prices(conn, asset_ids)
 
     pos = portfolio.compute_positions_v2_fx(conn, tx_acc, prices, acc_ccy)
+    pos = _apply_missing_price_fallback_to_pru_for_pe_assets(pos)
 
     if pos.empty:
         logger.debug(
@@ -919,11 +1114,12 @@ def get_bourse_state_asof(conn, person_id: int, asof_date: str) -> dict:
     accounts = repo.list_accounts(conn, person_id=person_id)
     if accounts is None or accounts.empty:
         return {"quality_status": "no_accounts", "missing_prices": [], "missing_fx": []}
-    bourse_acc = accounts[accounts["account_type"].astype(str).str.upper().isin(["PEA", "CTO", "CRYPTO"])].copy()
+    bourse_acc = _investment_accounts_df(accounts)
     acc_ids = [int(x) for x in bourse_acc["id"].tolist()]
 
     # 2) Positions à cette date
     pos = positions.compute_positions_asof(conn, person_id=person_id, asof_date=asof_date, account_ids=acc_ids)
+    pos = _filter_positions_to_bourse_assets(conn, pos)
     if pos is None or pos.empty:
         return {
             "total_val": None,

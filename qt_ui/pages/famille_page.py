@@ -146,6 +146,55 @@ class RebuildAllThread(QThread):
             self.error.emit(str(e))
 
 
+class FamilyFullHistoryRebuildThread(QThread):
+    """Reconstruit tous les snapshots famille depuis la premiere transaction."""
+    progress = pyqtSignal(str)          # message lisible pour le label UI
+    finished = pyqtSignal(str)
+    error    = pyqtSignal(str)
+
+    def __init__(self, person_ids: list):
+        super().__init__()
+        self._person_ids = person_ids
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Demande l'arret propre."""
+        self._cancelled = True
+
+    def run(self):
+        try:
+            from services import family_snapshots as fs
+            from services.db import get_conn
+            with get_conn() as local_conn:
+                res = fs.rebuild_family_weekly_full_history(
+                    local_conn,
+                    person_ids=self._person_ids,
+                    cancel_check=lambda: self._cancelled,
+                    progress_callback=self._on_progress,
+                    family_id=1,
+                )
+            self.finished.emit(str(res))
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+    def _on_progress(
+        self,
+        current_week: str,
+        current_year: int,
+        week_index: int,
+        total_weeks: int,
+        person_index: int,
+        total_people: int,
+    ) -> None:
+        pct = int(week_index / total_weeks * 100) if total_weeks > 0 else 0
+        msg = (
+            f"⏳ Reconstruction {current_year}… "
+            f"Personne {person_index + 1}/{total_people} — "
+            f"{week_index}/{total_weeks} semaines ({pct}%)"
+        )
+        self.progress.emit(msg)
+
+
 # ─── Panel : Famille Dashboard ────────────────────────────────────────────────
 
 class FamilleDashboardPanel(QWidget):
@@ -168,6 +217,15 @@ class FamilleDashboardPanel(QWidget):
         self._btn_rebuild.clicked.connect(self._on_rebuild)
         top_row.addWidget(self._btn_rebuild)
 
+        self._btn_rebuild_full = QPushButton("🗓️  Rebuild complet (dès la 1re tx)")
+        self._btn_rebuild_full.setStyleSheet(STYLE_BTN_PRIMARY)
+        self._btn_rebuild_full.setToolTip(
+            "Reconstruit l'historique complet famille depuis la date de la première "
+            "transaction de l'une ou l'autre personne.\nPeut prendre plusieurs minutes."
+        )
+        self._btn_rebuild_full.clicked.connect(self._on_rebuild_full)
+        top_row.addWidget(self._btn_rebuild_full)
+
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 0)  # Mode indéterminé
         self._progress_bar.setStyleSheet(STYLE_PROGRESS)
@@ -179,6 +237,9 @@ class FamilleDashboardPanel(QWidget):
         self._rebuild_status.setStyleSheet(STYLE_STATUS)
         top_row.addWidget(self._rebuild_status, 1)
         self._layout.addLayout(top_row)
+
+        # Thread rebuild complet
+        self._thread_full: FamilyFullHistoryRebuildThread | None = None
 
         # Titre semaine
         self._title_label = QLabel("Chargement...")
@@ -641,6 +702,62 @@ class FamilleDashboardPanel(QWidget):
         self._progress_bar.hide()
         self._rebuild_status.setStyleSheet(STYLE_STATUS_ERROR)
         self._rebuild_status.setText(f"❌ Erreur : {err}")
+
+    # ── Rebuild complet (depuis la première transaction) ──────────────────
+
+    def _on_rebuild_full(self) -> None:
+        """Lance le rebuild complet famille depuis la premiere transaction."""
+        if self._thread_full and self._thread_full.isRunning():
+            self._thread_full.cancel()
+            self._btn_rebuild_full.setText("🗓️  Rebuild complet (dès la 1re tx)")
+            self._btn_rebuild_full.setEnabled(False)
+            self._rebuild_status.setText("⏸ Annulation en cours…")
+            return
+
+        try:
+            from services import family_dashboard as fd
+            people = fd.get_people(self._conn)
+            person_ids = [int(x) for x in people["id"].tolist()]
+        except Exception as exc:
+            logger.error("Erreur récupération personnes rebuild complet : %s", exc)
+            person_ids = []
+
+        if not person_ids:
+            self._rebuild_status.setStyleSheet(STYLE_STATUS_ERROR)
+            self._rebuild_status.setText("❌ Aucune personne trouvée.")
+            return
+
+        self._btn_rebuild.setEnabled(False)
+        self._btn_rebuild_full.setText("⏹ Annuler le rebuild")
+        self._progress_bar.show()
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_WARNING)
+        self._rebuild_status.setText("⏳ Démarrage du rebuild complet famille…")
+
+        self._thread_full = FamilyFullHistoryRebuildThread(person_ids)
+        self._thread_full.progress.connect(self._on_rebuild_full_progress)
+        self._thread_full.finished.connect(self._on_rebuild_full_done)
+        self._thread_full.error.connect(self._on_rebuild_full_error)
+        self._thread_full.start()
+
+    def _on_rebuild_full_progress(self, msg: str) -> None:
+        self._rebuild_status.setText(msg)
+
+    def _on_rebuild_full_done(self, result: str) -> None:
+        self._btn_rebuild.setEnabled(True)
+        self._btn_rebuild_full.setText("🗓️  Rebuild complet (dès la 1re tx)")
+        self._btn_rebuild_full.setEnabled(True)
+        self._progress_bar.hide()
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_SUCCESS)
+        self._rebuild_status.setText("✅ Rebuild complet famille terminé")
+        self.refresh(force=True)
+
+    def _on_rebuild_full_error(self, err: str) -> None:
+        self._btn_rebuild.setEnabled(True)
+        self._btn_rebuild_full.setText("🗓️  Rebuild complet (dès la 1re tx)")
+        self._btn_rebuild_full.setEnabled(True)
+        self._progress_bar.hide()
+        self._rebuild_status.setStyleSheet(STYLE_STATUS_ERROR)
+        self._rebuild_status.setText(f"❌ Erreur rebuild complet : {err}")
 
 
 # ─── Panel : Data Health ──────────────────────────────────────────────────────

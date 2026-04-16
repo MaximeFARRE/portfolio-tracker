@@ -12,6 +12,9 @@ from services import repositories as repo
 
 _logger = logging.getLogger(__name__)
 
+# Symboles de benchmark à toujours synchroniser (indépendamment du portefeuille)
+_BENCHMARK_SYMBOLS = ["URTH"]  # MSCI World ETF
+
 
 def _now_paris_iso() -> str:
     tz = pytz.timezone("Europe/Paris")
@@ -67,8 +70,8 @@ def _collect_person_market_sync_inputs(conn, person_id: int) -> tuple[list[str],
 def _sync_person_market_data_for_weeks(conn, person_id: int, week_start: str, week_end: str) -> None:
     """Synchronise les historiques marché utiles au rebuild entre deux semaines incluses."""
     symbols, pairs = _collect_person_market_sync_inputs(conn, person_id)
-    if symbols:
-        market_history.sync_asset_prices_weekly(conn, symbols, week_start, week_end)
+    all_symbols = sorted(set(symbols) | set(_BENCHMARK_SYMBOLS))
+    market_history.sync_asset_prices_weekly(conn, all_symbols, week_start, week_end)
     if pairs:
         market_history.sync_fx_weekly(conn, pairs, week_start, week_end)
 

@@ -44,7 +44,7 @@ _COMBO_STYLE = f"""
 def _make_account_panel(conn, person_id: int, account_id: int, account_type: str, parent=None):
     """Instancie le bon panel selon le type de compte."""
     atype = account_type.upper()
-    if atype == "BANQUE":
+    if atype in ("BANQUE", "LIVRET"):
         from qt_ui.panels.compte_banque_panel import CompteBanquePanel
         return CompteBanquePanel(conn, person_id, account_id, parent=parent)
     elif atype in ("PEA", "PEA_PME", "CTO", "CRYPTO",
@@ -55,19 +55,14 @@ def _make_account_panel(conn, person_id: int, account_id: int, account_type: str
         from qt_ui.panels.compte_credit_panel import CompteCreditPanel
         return CompteCreditPanel(conn, person_id, account_id, parent=parent)
     else:
-        # Fallback générique (PE, IMMOBILIER, etc.)
-        from qt_ui.panels.saisie_panel import SaisiePanel
-        w = QWidget(parent)
-        w.setStyleSheet(f"background: {BG_PRIMARY};")
-        v = QVBoxLayout(w)
-        v.setContentsMargins(12, 12, 12, 12)
-        lbl = QLabel(f"Compte de type {account_type}")
-        lbl.setStyleSheet(f"color: {TEXT_SECONDARY};")
-        v.addWidget(lbl)
-        saisie = SaisiePanel(conn, person_id, account_id, account_type)
-        v.addWidget(saisie)
-        v.addStretch()
-        return w
+        from qt_ui.panels.compte_generic_panel import CompteGenericPanel
+        return CompteGenericPanel(
+            conn,
+            person_id,
+            account_id,
+            account_type,
+            parent=parent,
+        )
 
 
 class PersonnesPage(QWidget):
@@ -78,6 +73,7 @@ class PersonnesPage(QWidget):
         self._people_df: pd.DataFrame = pd.DataFrame()
         self._account_panels: dict = {}
         self._account_tab_index: dict[int, int] = {}
+        self._last_fixed_tab_index: int = 8
 
         self.setStyleSheet(f"background: {BG_PRIMARY};")
         layout = QVBoxLayout(self)
@@ -267,6 +263,8 @@ class PersonnesPage(QWidget):
     def _on_fixed_tab_changed(self, index: int) -> None:
         if self._current_person_id is None:
             return
+        if 0 <= int(index) < self._fixed_tabs.count():
+            self._last_fixed_tab_index = int(index)
         panels = [
             self._panel_vue, self._panel_dep, self._panel_rev,
             self._panel_credits, self._panel_pe, self._panel_ent,
@@ -314,6 +312,9 @@ class PersonnesPage(QWidget):
                 panel = _make_account_panel(
                     self._conn, self._current_person_id, account_id, account_type
                 )
+                sig = getattr(panel, "account_deleted", None)
+                if sig is not None and hasattr(sig, "connect"):
+                    sig.connect(self._on_account_deleted)
                 tab_index = self._account_tabs.addTab(panel, label)
                 self._account_panels[account_id] = panel
                 self._account_tab_index[account_id] = tab_index
@@ -330,6 +331,20 @@ class PersonnesPage(QWidget):
     def _on_account_created(self) -> None:
         """Appelé quand un compte vient d'être créé."""
         self._rebuild_account_tabs()
+
+    def _on_account_deleted(self, person_id: int, _account_id: int) -> None:
+        """
+        Appelé par un panel compte après suppression effective du compte.
+        """
+        pid = int(person_id)
+        if self._current_person_id is None or int(self._current_person_id) != pid:
+            self.select_person_by_id(pid)
+
+        self._rebuild_account_tabs()
+
+        target_fixed_idx = self._last_fixed_tab_index
+        if not self.select_fixed_tab(target_fixed_idx):
+            self.select_bourse_tab()
 
     # ── Rafraîchissement global ───────────────────────────────────────────────
 

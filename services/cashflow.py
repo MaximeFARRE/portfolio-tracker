@@ -13,6 +13,105 @@ def _to_float(value, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return float(default)
 
+
+def _empty_passive_income_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=["mois", "dividendes", "interets", "revenus_passifs"]
+    )
+
+
+def get_passive_income_monthly_for_scope(
+    conn,
+    scope_type: str,
+    scope_id: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Agrège les revenus passifs bourse (DIVIDENDE, INTERETS) par mois en EUR.
+
+    Colonnes retournées:
+        mois (YYYY-MM-01), dividendes, interets, revenus_passifs
+    """
+    scope = (scope_type or "").strip().lower()
+    if scope not in ("family", "person"):
+        return _empty_passive_income_df()
+    if scope == "person" and scope_id is None:
+        return _empty_passive_income_df()
+
+    from services import repositories as repo
+    from services.bourse_analytics import compute_passive_income_history
+
+    if scope == "person":
+        person_ids = [int(scope_id)]
+    else:
+        try:
+            people = repo.list_people(conn)
+            if people is None or people.empty:
+                return _empty_passive_income_df()
+            person_ids = [int(pid) for pid in people["id"].tolist()]
+        except Exception:
+            return _empty_passive_income_df()
+
+    all_rows: list[pd.DataFrame] = []
+    for person_id in person_ids:
+        try:
+            df = compute_passive_income_history(conn, person_id)
+        except Exception as exc:
+            logger.warning(
+                "get_passive_income_monthly_for_scope: impossible de charger les revenus passifs "
+                "pour person_id=%s: %s",
+                person_id,
+                exc,
+            )
+            continue
+        if df is None or df.empty:
+            continue
+
+        cur = df.copy()
+        if "month" in cur.columns:
+            cur["mois"] = pd.to_datetime(cur["month"], format="%Y-%m", errors="coerce")
+        else:
+            cur["mois"] = pd.to_datetime(cur.get("date"), errors="coerce")
+        cur["mois"] = cur["mois"].dt.to_period("M").dt.to_timestamp()
+        cur = cur.dropna(subset=["mois"]).copy()
+        if cur.empty:
+            continue
+
+        cur["type"] = cur.get("type", "").astype(str).str.upper()
+        cur["amount_eur"] = pd.to_numeric(cur.get("amount_eur"), errors="coerce")
+        cur = cur.dropna(subset=["amount_eur"])
+        cur = cur[cur["type"].isin(["DIVIDENDE", "INTERETS"])].copy()
+        if cur.empty:
+            continue
+        all_rows.append(cur[["mois", "type", "amount_eur"]])
+
+    if not all_rows:
+        return _empty_passive_income_df()
+
+    merged = pd.concat(all_rows, ignore_index=True)
+    piv = (
+        merged.groupby(["mois", "type"], as_index=False)["amount_eur"]
+        .sum()
+        .pivot(index="mois", columns="type", values="amount_eur")
+        .reset_index()
+    )
+    piv.columns.name = None
+    div_series = (
+        pd.to_numeric(piv["DIVIDENDE"], errors="coerce")
+        if "DIVIDENDE" in piv.columns
+        else pd.Series(0.0, index=piv.index)
+    )
+    int_series = (
+        pd.to_numeric(piv["INTERETS"], errors="coerce")
+        if "INTERETS" in piv.columns
+        else pd.Series(0.0, index=piv.index)
+    )
+    piv["dividendes"] = div_series.fillna(0.0)
+    piv["interets"] = int_series.fillna(0.0)
+    piv["revenus_passifs"] = piv["dividendes"] + piv["interets"]
+    piv["mois"] = pd.to_datetime(piv["mois"], errors="coerce").dt.strftime("%Y-%m-01")
+    return piv[["mois", "dividendes", "interets", "revenus_passifs"]].sort_values("mois").reset_index(drop=True)
+
+
 def get_cashflow_for_scope(
     conn,
     scope_type: str,
@@ -20,7 +119,8 @@ def get_cashflow_for_scope(
 ) -> pd.DataFrame:
     """
     Récupère l'historique des revenus et dépenses agrégé par mois pour un scope
-    (person ou family). Source de vérité = tables 'revenus' et 'depenses'.
+    (person ou family).
+    Revenus = table 'revenus' + revenus passifs bourse (DIVIDENDE/INTERETS).
     """
     scope = (scope_type or "").strip().lower()
     if scope not in ("family", "person"):
@@ -59,8 +159,35 @@ def get_cashflow_for_scope(
     except Exception:
         expense_df = pd.DataFrame(columns=["mois", "amount"])
 
+    try:
+        passive_df = get_passive_income_monthly_for_scope(conn, scope, scope_id)
+    except Exception as exc:
+        logger.warning("get_cashflow_for_scope: revenus passifs indisponibles: %s", exc)
+        passive_df = _empty_passive_income_df()
+
+    income_with_passive = pd.merge(
+        income_df.rename(columns={"amount": "income_manual"}),
+        passive_df[["mois", "revenus_passifs"]] if not passive_df.empty else pd.DataFrame(columns=["mois", "revenus_passifs"]),
+        on="mois",
+        how="outer",
+    )
+    income_manual = (
+        pd.to_numeric(income_with_passive["income_manual"], errors="coerce")
+        if "income_manual" in income_with_passive.columns
+        else pd.Series(0.0, index=income_with_passive.index)
+    )
+    revenus_passifs = (
+        pd.to_numeric(income_with_passive["revenus_passifs"], errors="coerce")
+        if "revenus_passifs" in income_with_passive.columns
+        else pd.Series(0.0, index=income_with_passive.index)
+    )
+    income_with_passive["income"] = (
+        income_manual.fillna(0.0)
+        + revenus_passifs.fillna(0.0)
+    )
+
     merged = pd.merge(
-        income_df.rename(columns={"amount": "income"}),
+        income_with_passive[["mois", "income"]],
         expense_df.rename(columns={"amount": "expenses"}),
         on="mois",
         how="outer",

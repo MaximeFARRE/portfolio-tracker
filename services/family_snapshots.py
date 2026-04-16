@@ -327,3 +327,79 @@ def rebuild_family_weekly_backdated_aware(
 
     conn.commit()
     return {"did_run": True, "mode": "FAMILY_BACKDATED_AWARE", "n_weeks": int(n), "people": res_people}
+
+
+def rebuild_family_weekly_full_history(
+    conn,
+    person_ids: list,
+    cancel_check=None,
+    progress_callback=None,
+    family_id: int = 1,
+) -> dict:
+    """Reconstruit tous les snapshots famille depuis la premiere transaction
+    de l'une ou l'autre personne.
+
+    Pour chaque personne, appelle rebuild_snapshots_person_full_history
+    avec propagation du progress_callback.
+    Ensuite, agregation et upsert dans la table famille.
+
+    progress_callback(current_week, current_year, week_index, total_weeks)
+    """
+    if not person_ids:
+        return {"did_run": False, "reason": "no_person_ids", "mode": "FAMILY_FULL_HISTORY"}
+
+    from services import snapshots as wk_snap
+
+    n_people = len(person_ids)
+    res_people = []
+
+    for person_index, pid in enumerate(person_ids):
+        if cancel_check and cancel_check():
+            break
+
+        # Wrapper du callback pour indiquer quelle personne on reconstruire
+        def _person_progress(current_week, current_year, week_index, total_weeks,
+                             _idx=person_index, _total=n_people):
+            if progress_callback is not None:
+                progress_callback(
+                    current_week=current_week,
+                    current_year=current_year,
+                    week_index=week_index,
+                    total_weeks=total_weeks,
+                    person_index=_idx,
+                    total_people=_total,
+                )
+
+        res = wk_snap.rebuild_snapshots_person_full_history(
+            conn,
+            person_id=int(pid),
+            cancel_check=cancel_check,
+            progress_callback=_person_progress,
+        )
+        res_people.append(res)
+
+    # Aggregation famille sur l'integralite des snapshots personnes disponibles
+    df = _aggregate_person_snapshots_by_week(conn, person_ids)
+    if df.empty:
+        return {"did_run": False, "reason": "no_weekly_person_snapshots",
+                "mode": "FAMILY_FULL_HISTORY", "people": res_people}
+
+    n = 0
+    for _, r in df.iterrows():
+        payload = dict(r)
+        payload["notes"] = f"Agrege sur {len(person_ids)} personnes"
+        upsert_family_snapshot(
+            conn, family_id=family_id,
+            week_date=str(r["week_date"]), mode="REBUILD", payload=payload
+        )
+        n += 1
+
+    conn.commit()
+    return {
+        "did_run": True,
+        "mode": "FAMILY_FULL_HISTORY",
+        "family_id": family_id,
+        "n_weeks": int(n),
+        "n_people": len(person_ids),
+        "people": res_people,
+    }

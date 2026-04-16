@@ -474,6 +474,10 @@ class DataTableWidget(QWidget):
 
     # Émis quand une cellule éditable est modifiée : (row_in_model, col_name, new_value)
     cell_changed = pyqtSignal(int, str, object)
+    # Émis quand la sélection de ligne change (row_in_model) ; -1 si aucune sélection.
+    row_selected = pyqtSignal(int)
+    # Émis sur double-clic d'une ligne (row_in_model).
+    row_double_clicked = pyqtSignal(int)
 
     def __init__(self, parent=None, editable: bool = False, searchable: bool = True):
         super().__init__(parent)
@@ -537,6 +541,10 @@ class DataTableWidget(QWidget):
 
         # Propager les modifications de cellule éditable
         self._model.dataChanged.connect(self._on_model_data_changed)
+        self._view.doubleClicked.connect(self._on_row_double_clicked)
+        sel_model = self._view.selectionModel()
+        if sel_model is not None:
+            sel_model.selectionChanged.connect(self._on_selection_changed)
 
         layout.addWidget(self._view)
 
@@ -668,6 +676,29 @@ class DataTableWidget(QWidget):
     def get_dataframe(self) -> pd.DataFrame:
         return self._model.get_dataframe()
 
+    def get_selected_row_index(self) -> int | None:
+        """Retourne l'index de la ligne sélectionnée dans le modèle courant."""
+        selection_model = self._view.selectionModel()
+        if selection_model is None:
+            return None
+        indexes = selection_model.selectedRows()
+        if not indexes:
+            return None
+        row = int(indexes[0].row())
+        if row < 0:
+            return None
+        return row
+
+    def get_selected_row(self) -> dict | None:
+        """Retourne la ligne sélectionnée (dict), ou None si aucune."""
+        row = self.get_selected_row_index()
+        if row is None:
+            return None
+        df = self.get_dataframe()
+        if df.empty or row >= len(df):
+            return None
+        return df.iloc[row].to_dict()
+
     def set_column_colors(self, column_colors: dict) -> None:
         """Définit des fonctions de couleur par colonne."""
         self._model.set_column_colors(column_colors)
@@ -718,6 +749,15 @@ class DataTableWidget(QWidget):
                 col_name = df.columns[col]
                 new_value = df.iloc[row, col]
                 self.cell_changed.emit(row, col_name, new_value)
+
+    def _on_selection_changed(self, *_args) -> None:
+        row = self.get_selected_row_index()
+        self.row_selected.emit(-1 if row is None else int(row))
+
+    def _on_row_double_clicked(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        self.row_double_clicked.emit(int(index.row()))
 
     def _on_filter_changed(self, text: str) -> None:
         """Filtre textuel simple (barre de recherche legacy)."""
