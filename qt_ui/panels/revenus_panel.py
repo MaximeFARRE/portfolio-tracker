@@ -175,9 +175,9 @@ class RevenusPanel(QWidget):
         self._refresh_view()
 
     def _on_undo(self) -> None:
-        from services.revenus_repository import derniere_revenu, supprimer_revenu_par_id
+        from services.revenus_repository import derniere_revenue, supprimer_revenu_par_id
         mois = self._get_mois()
-        last = derniere_revenu(self._conn, self._person_id, mois)
+        last = derniere_revenue(self._conn, self._person_id, mois)
         if last is None:
             self._saisie_result.setStyleSheet(STYLE_STATUS_WARNING)
             self._saisie_result.setText("Rien à annuler pour ce mois.")
