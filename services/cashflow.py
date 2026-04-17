@@ -50,13 +50,15 @@ def get_cashflow_for_scope(
     try:
         rows_inc = conn.execute(income_sql.format(where_clause=where_clause), params).fetchall()
         income_df = pd.DataFrame(rows_inc, columns=["mois", "amount"]) if rows_inc else pd.DataFrame(columns=["mois", "amount"])
-    except Exception:
+    except Exception as exc:
+        logger.exception("get_cashflow_for_scope: échec requête revenus (scope=%s id=%s)", scope, scope_id, exc_info=exc)
         income_df = pd.DataFrame(columns=["mois", "amount"])
 
     try:
         rows_exp = conn.execute(expense_sql.format(where_clause=where_clause), params).fetchall()
         expense_df = pd.DataFrame(rows_exp, columns=["mois", "amount"]) if rows_exp else pd.DataFrame(columns=["mois", "amount"])
-    except Exception:
+    except Exception as exc:
+        logger.exception("get_cashflow_for_scope: échec requête dépenses (scope=%s id=%s)", scope, scope_id, exc_info=exc)
         expense_df = pd.DataFrame(columns=["mois", "amount"])
 
     merged = pd.merge(
