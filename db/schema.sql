@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS transactions (
   amount REAL NOT NULL, -- montant total (positif). Le sens est géré par le type.
   category TEXT,
   note TEXT,
+  is_hidden_from_cashflow INTEGER NOT NULL DEFAULT 0,
+  is_internal_transfer INTEGER NOT NULL DEFAULT 0,
+  deleted_at TEXT,
   import_batch_id INTEGER REFERENCES import_batches(id) ON DELETE SET NULL,
   created_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE,

@@ -96,35 +96,25 @@ class CompteBanquePanel(QWidget):
     def _load_dashboard(self) -> None:
         try:
             from services import repositories as repo
-            from utils.validators import sens_flux
+            from services.calculations import solde_compte, interets_12_mois
 
-            tx = repo.list_transactions(self._conn, account_id=self._account_id, limit=5000)
+            tx = repo.list_transactions(self._conn, account_id=self._account_id, limit=100000)
             if tx is None or tx.empty:
                 self._kpi_solde.set_content("Solde actuel", "0,00 €")
                 self._table_recent.set_dataframe(pd.DataFrame())
                 return
 
-            # Calcul solde
-            solde = 0.0
-            interets_12m = 0.0
-            today = pd.Timestamp.today()
-            start_12m = today - pd.Timedelta(days=365)
-
-            for _, r in tx.iterrows():
-                solde += float(r.get("amount", 0)) * sens_flux(str(r.get("type", "")))
-                d = pd.to_datetime(str(r.get("date", "")), errors="coerce")
-                if d is not None and not pd.isna(d) and d >= start_12m and str(r.get("type", "")) == "INTERETS":
-                    interets_12m += float(r.get("amount", 0))
+            solde = solde_compte(tx)
+            interets_12m = interets_12_mois(tx)
 
             self._kpi_solde.set_content("Solde actuel", f"{solde:,.2f} €".replace(",", " "))
             self._kpi_interets.set_content("Intérêts 12 mois", f"{interets_12m:,.2f} €".replace(",", " "))
 
-            # Recentes
             cols = ["date", "type", "amount", "fees", "category", "note"]
             cols = [c for c in cols if c in tx.columns]
             self._table_recent.set_dataframe(tx[cols].head(50))
-        except Exception as e:
-            logger.error("CompteBanquePanel._load_dashboard error: %s", e, exc_info=True)
+        except Exception as exc:
+            logger.exception("CompteBanquePanel._load_dashboard error", exc_info=exc)
 
     def _load_history(self) -> None:
         try:

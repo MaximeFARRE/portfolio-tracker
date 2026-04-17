@@ -284,6 +284,106 @@ def _ensure_account(conn: sqlite3.Connection, person_id: int, account_name: str)
     return int(row[0] if not hasattr(row, "keys") else row["id"])
 
 
+def _is_probable_internal_transfer(parent_cat: str, cat: str, desc: str) -> bool:
+    parent = (parent_cat or "").strip().lower()
+    category = (cat or "").strip().lower()
+    description = (desc or "").strip().lower()
+
+    if "virement" in category:
+        return True
+    if "virement interne" in description:
+        return True
+    if parent in {"retraits, chèques et virements", "retraits, cheques et virements"}:
+        if "virement" in category or "transfert" in description:
+            return True
+    return False
+
+
+def sync_bankin_monthly_tables(
+    conn: sqlite3.Connection,
+    person_id: int,
+    months: list[str] | None = None,
+) -> dict:
+    """
+    Reconstruit depenses/revenus à partir des transactions Bankin actives:
+    - exclut deleted_at, is_hidden_from_cashflow=1, is_internal_transfer=1
+    - reconstruit uniquement les mois demandés (ou tous les mois Bankin de la personne)
+    """
+    person_id = int(person_id)
+    params: list = [person_id]
+    where_month = ""
+    if months:
+        clean_months = sorted({str(m) for m in months if m})
+        if clean_months:
+            placeholders = ",".join(["?"] * len(clean_months))
+            where_month = f" AND substr(t.date, 1, 7) || '-01' IN ({placeholders})"
+            params.extend(clean_months)
+    rows = conn.execute(
+        f"""
+        SELECT t.date, t.type, t.amount, t.category
+        FROM transactions t
+        WHERE t.person_id = ?
+          AND t.note LIKE 'Bankin:%'
+          AND t.deleted_at IS NULL
+          AND COALESCE(t.is_hidden_from_cashflow, 0) = 0
+          AND COALESCE(t.is_internal_transfer, 0) = 0
+          {where_month}
+        """,
+        tuple(params),
+    ).fetchall()
+
+    dep_totals: dict[tuple[str, str], float] = {}
+    rev_totals: dict[tuple[str, str], float] = {}
+    touched_months = set()
+
+    for r in rows:
+        d = pd.to_datetime(str(r["date"]), errors="coerce")
+        if pd.isna(d):
+            continue
+        month_key = f"{d.year:04d}-{d.month:02d}-01"
+        tx_type = str(r["type"] or "").strip().upper()
+        amount = float(r["amount"] or 0.0)
+        category = str(r["category"] or "").strip() or (
+            "Autres revenus" if tx_type == "DEPOT" else "Dépenses courantes"
+        )
+        touched_months.add(month_key)
+        if tx_type == "DEPENSE":
+            dep_totals[(month_key, category)] = dep_totals.get((month_key, category), 0.0) + amount
+        elif tx_type == "DEPOT":
+            rev_totals[(month_key, category)] = rev_totals.get((month_key, category), 0.0) + amount
+
+    months_to_rebuild = sorted(set(months or []) | touched_months)
+    if months_to_rebuild:
+        placeholders = ",".join(["?"] * len(months_to_rebuild))
+        conn.execute(
+            f"DELETE FROM depenses WHERE person_id = ? AND mois IN ({placeholders})",
+            (person_id, *months_to_rebuild),
+        )
+        conn.execute(
+            f"DELETE FROM revenus WHERE person_id = ? AND mois IN ({placeholders})",
+            (person_id, *months_to_rebuild),
+        )
+
+    for (mois, cat), total in dep_totals.items():
+        conn.execute(
+            "INSERT INTO depenses(person_id, mois, categorie, montant) VALUES (?, ?, ?, ?)",
+            (person_id, mois, cat, float(total)),
+        )
+    for (mois, cat), total in rev_totals.items():
+        conn.execute(
+            "INSERT INTO revenus(person_id, mois, categorie, montant) VALUES (?, ?, ?, ?)",
+            (person_id, mois, cat, float(total)),
+        )
+    conn.commit()
+
+    return {
+        "months_depenses": sorted(set(m for (m, _) in dep_totals.keys())),
+        "months_revenus": sorted(set(m for (m, _) in rev_totals.keys())),
+        "dep_categories": sorted(set(c for (_, c) in dep_totals.keys())),
+        "rev_categories": sorted(set(c for (_, c) in rev_totals.keys())),
+    }
+
+
 def import_bankin_csv(
     conn: sqlite3.Connection,
     *,
@@ -314,9 +414,7 @@ def import_bankin_csv(
         conn.execute("DELETE FROM transactions WHERE person_id = ?", (person_id,))
         conn.commit()
 
-    # Pour alimenter depenses/revenus en "mensuel par catégorie"
-    monthly_dep = {}  # (mois, categorie_finale) -> sum
-    monthly_rev = {}
+    imported_months = set()
 
     existing_fingerprints = set()
     if not purge_existing_transactions:
@@ -344,12 +442,14 @@ def import_bankin_csv(
             continue
 
         mois = f"{d.year:04d}-{d.month:02d}-01"
+        imported_months.add(mois)
 
         amount = float(r["Amount"])
         desc = str(r["Description"]) if not pd.isna(r["Description"]) else ""
         account_name = str(r["Account Name"]) if not pd.isna(r["Account Name"]) else "Compte Bankin"
         cat = str(r["Category Name"]) if not pd.isna(r["Category Name"]) else ""
         parent = str(r["Parent Category Name"]) if not pd.isna(r["Parent Category Name"]) else ""
+        is_internal_transfer = _is_probable_internal_transfer(parent, cat, desc)
 
         categorie_finale = map_bankin_to_final(parent, cat, amount)
 
@@ -359,11 +459,9 @@ def import_bankin_csv(
         if amount < 0:
             tx_type = "DEPENSE"
             tx_amount = abs(amount)
-            monthly_dep[(mois, categorie_finale)] = monthly_dep.get((mois, categorie_finale), 0.0) + tx_amount
         else:
             tx_type = "DEPOT"
             tx_amount = amount
-            monthly_rev[(mois, categorie_finale)] = monthly_rev.get((mois, categorie_finale), 0.0) + tx_amount
 
         note_complete = f"Bankin: {parent} > {cat} | {desc}"
         fingerprint = (d.strftime("%Y-%m-%d"), tx_type, round(tx_amount, 2), note_complete)
@@ -373,10 +471,23 @@ def import_bankin_csv(
 
         conn.execute(
             """
-            INSERT INTO transactions(date, person_id, account_id, type, asset_id, quantity, price, fees, amount, category, note, import_batch_id)
-            VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, ?, ?, ?, ?)
+            INSERT INTO transactions(
+                date, person_id, account_id, type, asset_id, quantity, price, fees, amount,
+                category, note, import_batch_id, is_internal_transfer
+            )
+            VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, ?, ?, ?, ?, ?)
             """,
-            (d.strftime("%Y-%m-%d"), person_id, account_id, tx_type, tx_amount, categorie_finale, note_complete, import_batch_id),
+            (
+                d.strftime("%Y-%m-%d"),
+                person_id,
+                account_id,
+                tx_type,
+                tx_amount,
+                categorie_finale,
+                note_complete,
+                import_batch_id,
+                1 if is_internal_transfer else 0,
+            ),
         )
         existing_fingerprints.add(fingerprint)
         inserted += 1
@@ -384,48 +495,24 @@ def import_bankin_csv(
     conn.commit()
 
     # Option : remplir depenses/revenus (mensuel)
+    sync_stats = {
+        "months_depenses": [],
+        "months_revenus": [],
+        "dep_categories": [],
+        "rev_categories": [],
+    }
     if also_fill_monthly_tables:
-        # Purge les mois importés pour éviter les doublons en cas de re-import
-        dep_months = sorted(set(m for (m, _) in monthly_dep.keys()))
-        rev_months = sorted(set(m for (m, _) in monthly_rev.keys()))
-
-        if dep_months:
-            placeholders = ",".join(["?"] * len(dep_months))
-            conn.execute(
-                f"DELETE FROM depenses WHERE person_id = ? AND mois IN ({placeholders})",
-                (person_id, *dep_months),
-            )
-        if rev_months:
-            placeholders = ",".join(["?"] * len(rev_months))
-            conn.execute(
-                f"DELETE FROM revenus WHERE person_id = ? AND mois IN ({placeholders})",
-                (person_id, *rev_months),
-            )
-
-        for (mois, cat), total in monthly_dep.items():
-            conn.execute(
-                """
-                INSERT INTO depenses(person_id, mois, categorie, montant)
-                VALUES (?, ?, ?, ?)
-                """,
-                (person_id, mois, cat, float(total)),
-            )
-
-        for (mois, cat), total in monthly_rev.items():
-            conn.execute(
-                """
-                INSERT INTO revenus(person_id, mois, categorie, montant)
-                VALUES (?, ?, ?, ?)
-                """,
-                (person_id, mois, cat, float(total)),
-            )
-        conn.commit()
+        sync_stats = sync_bankin_monthly_tables(
+            conn,
+            person_id=person_id,
+            months=sorted(imported_months),
+        )
 
     return {
         "person_id": person_id,
         "transactions_inserted": inserted,
-        "months_depenses": sorted(set(m for (m, _) in monthly_dep.keys())),
-        "months_revenus": sorted(set(m for (m, _) in monthly_rev.keys())),
-        "dep_categories": sorted(set(c for (_, c) in monthly_dep.keys())),
-        "rev_categories": sorted(set(c for (_, c) in monthly_rev.keys())),
+        "months_depenses": sync_stats["months_depenses"],
+        "months_revenus": sync_stats["months_revenus"],
+        "dep_categories": sync_stats["dep_categories"],
+        "rev_categories": sync_stats["rev_categories"],
     }

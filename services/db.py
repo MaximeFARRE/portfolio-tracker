@@ -25,6 +25,7 @@ MIG_VER_ADD_IMMO_COLUMNS = 9003
 MIG_VER_ADD_CREDITS_PAYER_ACCOUNT = 9004
 MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX = 9005
 MIG_VER_ADD_PRESET_VOL_COLUMNS = 9006
+MIG_VER_ADD_TX_ANALYSIS_FLAGS = 9007
 
 # ──────────────────────────────────────────────────────────────
 # Compat libsql ↔ sqlite3 : DictRow + WrappedCursor
@@ -374,6 +375,21 @@ def _migrate_add_preset_vol_columns(conn) -> None:
             )
 
 
+def _migrate_add_transaction_analysis_flags(conn) -> None:
+    if not _table_exists(conn, "transactions"):
+        return
+    if not _column_exists(conn, "transactions", "is_hidden_from_cashflow"):
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN is_hidden_from_cashflow INTEGER NOT NULL DEFAULT 0;"
+        )
+    if not _column_exists(conn, "transactions", "is_internal_transfer"):
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN is_internal_transfer INTEGER NOT NULL DEFAULT 0;"
+        )
+    if not _column_exists(conn, "transactions", "deleted_at"):
+        conn.execute("ALTER TABLE transactions ADD COLUMN deleted_at TEXT;")
+
+
 _CODE_MIGRATIONS: list[tuple[int, str, Callable]] = [
     (MIG_VER_ADD_TR_PHONE, "add people.tr_phone", _migrate_add_tr_phone),
     (MIG_VER_IMPORT_BATCHES, "add import_batches + import_batch_id refs", _migrate_import_batches),
@@ -381,6 +397,7 @@ _CODE_MIGRATIONS: list[tuple[int, str, Callable]] = [
     (MIG_VER_ADD_CREDITS_PAYER_ACCOUNT, "add credits.payer_account_id", _migrate_add_credits_payer_account),
     (MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX, "add idx_tx_person_account_date", _migrate_add_tx_person_account_index),
     (MIG_VER_ADD_PRESET_VOL_COLUMNS, "add vol_* columns on simulation_preset_settings", _migrate_add_preset_vol_columns),
+    (MIG_VER_ADD_TX_ANALYSIS_FLAGS, "add transaction analysis flags", _migrate_add_transaction_analysis_flags),
 ]
 
 
