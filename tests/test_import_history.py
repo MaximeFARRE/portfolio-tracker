@@ -68,6 +68,47 @@ def test_rollback_batch_tr_supprime_transactions(conn):
     assert status == "ROLLED_BACK"
 
 
+def test_rollback_batch_bankin_resync_monthly_tables(conn):
+    person_id = _insert_person(conn)
+    account_id = _insert_account(conn, person_id, "Compte Bankin", "BANQUE")
+    batch_id = create_batch(conn, "BANKIN", person_id=person_id, person_name="Alice")
+
+    conn.execute(
+        "INSERT INTO transactions(date, person_id, account_id, type, amount, category, note, import_batch_id) "
+        "VALUES ('2026-01-15', ?, ?, 'DEPENSE', 100, 'Courses', 'Bankin: Alimentation > Supermarché | Test', ?)",
+        (person_id, account_id, batch_id),
+    )
+    conn.execute(
+        "INSERT INTO depenses(person_id, mois, categorie, montant) "
+        "VALUES (?, '2026-01-01', 'Courses', 100)",
+        (person_id,),
+    )
+    conn.commit()
+    close_batch(conn, batch_id, 1)
+
+    result = rollback_batch(conn, batch_id)
+    assert result["deleted"]["transactions"] == 1
+
+    dep_count = conn.execute(
+        "SELECT COUNT(*) FROM depenses WHERE person_id = ? AND mois = '2026-01-01'",
+        (person_id,),
+    ).fetchone()[0]
+    rev_count = conn.execute(
+        "SELECT COUNT(*) FROM revenus WHERE person_id = ? AND mois = '2026-01-01'",
+        (person_id,),
+    ).fetchone()[0]
+    assert dep_count == 0
+    assert rev_count == 0
+
+
+def test_create_batch_normalizes_import_type_uppercase(conn):
+    person_id = _insert_person(conn, "CaseTest")
+    batch_id = create_batch(conn, "bankin", person_id=person_id, person_name="CaseTest")
+    row = conn.execute("SELECT import_type FROM import_batches WHERE id = ?", (batch_id,)).fetchone()
+    assert row is not None
+    assert str(row[0]) == "BANKIN"
+
+
 # ─── DEPENSES ────────────────────────────────────────────────────────────────
 
 def test_rollback_batch_depenses_supprime_depenses(conn):

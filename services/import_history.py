@@ -46,11 +46,12 @@ def create_batch(
 
     import_type : 'TR' | 'BANKIN' | 'DEPENSES' | 'REVENUS'
     """
+    import_type_norm = str(import_type or "").strip().upper()
     cur = conn.execute(
         """INSERT INTO import_batches
              (import_type, person_id, person_name, account_id, account_name, filename, nb_rows, status)
            VALUES (?, ?, ?, ?, ?, ?, 0, 'ACTIVE')""",
-        (import_type, person_id, person_name, account_id, account_name, filename),
+        (import_type_norm, person_id, person_name, account_id, account_name, filename),
     )
     conn.commit()
     return cur.lastrowid
@@ -233,15 +234,37 @@ def rollback_batch(conn, batch_id: int) -> dict[str, Any]:
     if status == "ROLLED_BACK":
         raise ValueError(f"Le batch {batch_id} a déjà été annulé.")
 
-    import_type = _row_val(row, "import_type", 0)
+    import_type = str(_row_val(row, "import_type", 0) or "").strip().upper()
 
     deleted: dict[str, int] = {}
 
     if import_type in ("TR", "BANKIN"):
+        person_row = conn.execute(
+            "SELECT person_id FROM import_batches WHERE id = ?",
+            (batch_id,),
+        ).fetchone()
+        person_id = _row_val(person_row, "person_id", 0) if person_row is not None else None
+        touched_months = []
+        if import_type == "BANKIN":
+            month_rows = conn.execute(
+                """
+                SELECT DISTINCT substr(date, 1, 7) || '-01' AS mois
+                FROM transactions
+                WHERE import_batch_id = ?
+                """,
+                (batch_id,),
+            ).fetchall()
+            touched_months = [str(_row_val(r, "mois", 0)) for r in month_rows if _row_val(r, "mois", 0)]
+
         cur = conn.execute(
             "DELETE FROM transactions WHERE import_batch_id = ?", (batch_id,)
         )
         deleted["transactions"] = cur.rowcount
+        if import_type == "BANKIN" and person_id is not None and touched_months:
+            # Les imports BANKIN alimentent aussi depenses/revenus. On resynchronise
+            # après rollback pour éviter les agrégats fantômes.
+            from services.imports import sync_bankin_monthly_tables
+            sync_bankin_monthly_tables(conn, int(person_id), months=touched_months)
     elif import_type == "DEPENSES":
         cur = conn.execute(
             "DELETE FROM depenses WHERE import_batch_id = ?", (batch_id,)
@@ -258,6 +281,8 @@ def rollback_batch(conn, batch_id: int) -> dict[str, Any]:
             "la fiche crédit et son amortissement doivent être supprimés "
             "manuellement depuis la page Crédits."
         )
+    else:
+        raise ValueError(f"Type d'import non supporté pour rollback: {import_type!r}")
 
     conn.execute(
         "UPDATE import_batches SET status = 'ROLLED_BACK' WHERE id = ?",
