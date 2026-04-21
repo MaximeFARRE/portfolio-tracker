@@ -1,159 +1,211 @@
+<!-- Header -->
+<div align="center">
+
 # Patrimoine Desktop
 
-## 1. Presentation du projet
-Application desktop PyQt6 de suivi de patrimoine personnel/familial.
+**A PyQt6 desktop application for personal and family wealth tracking.**
 
-Ce que fait l'application aujourd'hui:
-- centraliser comptes, actifs, credits, revenus et depenses,
-- calculer des vues consolidees (patrimoine, allocations, cashflow, epargne),
-- suivre la bourse (positions live, historique weekly, performance),
-- importer des donnees bancaires/bourse,
-- simuler des projections patrimoniales (mode legacy et mode prevision avancee).
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![PyQt6](https://img.shields.io/badge/PyQt6-6.7%2B-41cd52?style=flat-square&logo=qt&logoColor=white)](https://www.riverbankcomputing.com/software/pyqt/)
+[![SQLite](https://img.shields.io/badge/Database-SQLite-003b57?style=flat-square&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-f0db4f?style=flat-square)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-211%20passing-brightgreen?style=flat-square)](tests/)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)](#installation)
 
-Contexte technique actuel:
-- architecture cible: `UI -> services -> DB`,
-- codebase active avec refactors en cours,
-- certaines zones historiques ne sont pas encore alignees avec cette cible.
+</div>
 
-## 2. Fonctionnalites principales actuelles
-Fonctionnalites exposees dans l'UI actuelle:
-- Vue famille: synthese patrimoine, flux, allocations, tendances.
-- Vue personnes: suivi par personne (comptes banque/bourse/credit, immobilier, PE, entreprises, revenus/depenses, epargne, sankey, vue d'ensemble).
-- Import:
-  - CSV (revenus/depenses, Bankin),
-  - Trade Republic (`pytr`) avec mapping vers transactions internes,
-  - suivi d'historique d'import / rollback (selon modules services disponibles).
-- Bourse:
-  - positions live par personne et par compte,
-  - performance et series hebdo,
-  - refresh prix/FX.
-- Credits:
-  - gestion credits, amortissements et KPI associes.
-- Projections:
-  - `goals_projection_page` (moteur V1 `services/projections.py`),
-  - prevision avancee (deterministe, Monte Carlo, stress tests) via `services/prevision.py`.
-- Parametres:
-  - preferences UI/theming et reglages applicatifs existants.
+---
 
-## 3. Architecture simplifiee
-```text
-qt_ui (pages/panels/widgets)
-  -> services (regles metier, calculs, import/export/sync)
-    -> repositories/SQL + db/schema+migrations
-      -> SQLite locale (ou replica Turso/libsql si configure)
+## About
+
+Patrimoine Desktop consolidates all your financial accounts — bank, brokerage, savings, credit, real estate, and private equity — into a single local desktop application. It tracks portfolio performance, models credit amortization, imports bank transactions, and simulates future wealth trajectories using deterministic, Monte Carlo, and stress-test projection engines.
+
+All data is stored locally in a SQLite database. An optional remote replica via [Turso/libsql](https://turso.tech/) is supported for multi-device sync.
+
+---
+
+## Features
+
+| Domain | Capabilities |
+|---|---|
+| **Family dashboard** | Consolidated net worth, allocations, cash flow, savings rate, weekly trends |
+| **Portfolio tracking** | Live prices via yfinance, weekly history, FX-adjusted positions, performance, Sharpe / VaR / beta analytics |
+| **Efficient frontier** | Portfolio optimization with diversification constraints (scipy) |
+| **Credit management** | Amortization schedules, real cost KPIs, remaining capital tracking |
+| **Data import** | CSV (expenses, revenues, Bankin), Trade Republic via `pytr`, import history and rollback |
+| **Projections** | Goal-based projections, Monte Carlo simulation, stress scenarios, FIRE milestones |
+| **Sankey & cash flow** | Visual cash flow breakdown by category |
+| **PDF export** | Printable wealth summary report |
+| **Multi-currency** | FX-adjusted positions and weekly historical FX rates |
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| UI | [PyQt6](https://www.riverbankcomputing.com/software/pyqt/), [Plotly](https://plotly.com/python/) (charts via WebEngine), Matplotlib |
+| Data | [pandas](https://pandas.pydata.org/), [NumPy](https://numpy.org/), [SciPy](https://scipy.org/) |
+| Market data | [yfinance](https://github.com/ranaroussi/yfinance), OpenFIGI (ISIN resolution), Frankfurter API (FX) |
+| Database | SQLite (local) · [libsql/Turso](https://turso.tech/) (optional remote replica) |
+| Import | [pytr](https://github.com/pytr-org/pytr) (Trade Republic), CSV pipelines |
+| Export | [fpdf2](https://py-pdf.github.io/fpdf2/) |
+| Tests | [pytest](https://docs.pytest.org/) |
+
+---
+
+## Installation
+
+**Requirements:** Python 3.11+
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/MaximeFARRE/Suivie-patrimoine.git
+cd Suivie-patrimoine
+
+# 2. Create a virtual environment
+python -m venv .venv
+
+# Windows
+.\.venv\Scripts\Activate.ps1
+# macOS / Linux
+source .venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
 ```
 
-Responsabilites (etat reel):
-- UI: orchestration ecran + rendu.
-- Services: calculs metier, agregations, fallback, consolidation.
-- DB: persistance et migrations.
+### Optional features
 
-Ecarts connus:
-- certains ecrans UI executent encore du SQL direct,
-- coexistence de deux domaines de projection (`projections` legacy et `prevision` nouveau).
+**Trade Republic import** (requires a TR account and 2FA setup):
+```bash
+pip install pytr curl_cffi websockets
+```
 
-## 4. Stack utilisee
-- Langage: Python 3.x
-- UI desktop: PyQt6
-- Data/calcul: pandas, numpy
-- Visualisation: matplotlib/plotly (selon panel)
-- DB locale: SQLite
-- Option sync distante: libsql/Turso (variables d'environnement)
-- Marche/quotes: yfinance
-- Import TR: `pytr`
-- Tests: pytest
+**Turso remote database** (optional — SQLite works out of the box):
+```bash
+pip install libsql libsql-client
+```
+Then copy `.env.example` to `.env` and set your credentials.
 
-Note: le fichier `requirements.txt` est large et contient des dependances qui ne sont pas toutes necessaires au runtime desktop pur; un nettoyage est encore a faire.
+---
 
-## 5. Comment lancer l'application
-Prerequis:
-- Python 3.11+ recommande,
-- environnement virtuel conseille.
+## Usage
 
-PowerShell (Windows):
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+```bash
 python main.py
 ```
 
-Mode DB:
-- par defaut: SQLite locale (`patrimoine.db`),
-- si `TURSO_DATABASE_URL` et `TURSO_AUTH_TOKEN` sont definies: mode libsql replica.
+The app opens with a family dashboard. Use the left sidebar to navigate between views.
 
-Logs et backups:
-- logs: `~/.patrimoine/logs/`
-- backups auto de DB a la fermeture: `~/.patrimoine/backups/`
+**Data storage:**
+- Default: local SQLite database (`~/.patrimoine/patrimoine.db`)
+- Logs: `~/.patrimoine/logs/`
+- Automatic DB backups on exit: `~/.patrimoine/backups/`
 
-## 6. Structure des dossiers importante
-```text
-main.py                      # point d'entree app
-core/                        # bootstrap connexion DB singleton
-services/                    # coeur metier (SSOT logique)
-qt_ui/                       # pages, panels, composants UI
-db/
-  schema.sql                 # schema principal
-  migrations/                # migrations SQL versionnees
-tests/                       # tests unitaires/integration
-docs/
-  ARCHITECTURE.md            # architecture reelle
-  SOURCE_DE_VERITE.md        # verites metier par domaine
-  CONTEXT.md                 # contexte technique detaille
+**Remote database (Turso):**  
+Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in your `.env` file (see `.env.example`).
+
+---
+
+## Running tests
+
+```bash
+pytest
 ```
 
-## 7. Regles de developpement
-- Respecter la chaine `UI -> services -> DB`.
-- Toute formule metier (finance, agregation, KPI, projection) doit vivre dans `services/`.
-- Eviter d'ajouter du SQL metier dans `qt_ui/`.
-- Ne pas dupliquer un calcul deja expose par un service canonique.
-- Toute nouvelle API metier doit etre referencee dans `docs/SOURCE_DE_VERITE.md`.
-- Avant merge: tests pertinents + mise a jour docs racine.
+211 tests covering the service layer: snapshots, cash flow, credits, imports, projections, portfolios, FX.
 
-## 8. Emplacement des documents de reference
-- [ARCHITECTURE.md](./docs/ARCHITECTURE.md)
-- [SOURCE_DE_VERITE.md](./docs/SOURCE_DE_VERITE.md)
-- [CONTEXT.md](./docs/CONTEXT.md)
-- [AUDIT_GLOBAL.md](./AUDIT_GLOBAL.md)
-- [BACKLOG_GLOBAL.md](./BACKLOG_GLOBAL.md)
+---
 
-## 9. Workflow conseille pour ajouter une feature
-1. Cadrer le besoin metier et identifier la source de verite concernee.
-2. Verifier l'existant dans `services/` pour reutiliser avant de creer.
-3. Implementer la logique dans `services/` (API claire, testable).
-4. Brancher l'UI sur cette API sans recoder les calculs.
-5. Ajouter/adapter les tests (cas nominal + cas limites).
-6. Mettre a jour `docs/SOURCE_DE_VERITE.md` si nouvelle autorite metier.
-7. Mettre a jour `docs/ARCHITECTURE.md` si impact structurel.
+## Project structure
 
-## 10. Workflow conseille pour corriger un bug
-1. Reproduire le bug (scenario minimal + donnees).
-2. Localiser la couche responsable (UI, service, DB).
-3. Corriger a la source (preferer service plutot que patch UI).
-4. Ajouter un test de non-regression cible.
-5. Verifier les impacts collateraux sur les KPI/projections.
-6. Documenter le correctif si la regle metier evolue.
+```text
+patrimoine-desktop/
+│
+├── main.py                     Entry point — logging, DB backup, Qt bootstrap
+├── core/
+│   └── db_connection.py        Thread-safe DB connection singleton
+│
+├── db/
+│   ├── schema.sql              SQLite schema
+│   └── migrations/             Versioned SQL migrations (001 → 005)
+│
+├── qt_ui/
+│   ├── main_window.py          Application shell and navigation
+│   ├── theme.py                Color palette and stylesheet constants
+│   ├── pages/                  Top-level pages (famille, personnes, import, projection, settings)
+│   ├── panels/                 Domain-specific panels (bourse, credit, PE, immobilier…)
+│   ├── widgets/                Reusable UI components (DataTable, KpiCard, PlotlyView…)
+│   └── components/             Animated containers and skeleton handlers
+│
+├── services/                   Business logic layer — all KPIs live here
+│   ├── bourse_analytics.py     Live positions, FX PnL, weekly performance
+│   ├── bourse_advanced_analytics.py  Sharpe, VaR, ES, beta, correlations
+│   ├── efficient_frontier.py   Portfolio optimization (scipy)
+│   ├── cashflow.py             Savings rate, passive income, cash flow KPIs
+│   ├── credits.py              Amortization schedules and real cost KPIs
+│   ├── snapshots*.py           Weekly wealth snapshot computation and rebuild
+│   ├── family_snapshots.py     Family-wide consolidated snapshots
+│   ├── projections.py          Goal-based projection engine (V1)
+│   ├── prevision*.py           Advanced projection engine (Monte Carlo, stress)
+│   ├── projection_service.py   Facade routing UI requests to the right engine
+│   ├── imports.py              CSV import pipeline
+│   ├── tr_import.py            Trade Republic import pipeline
+│   ├── repositories.py         Generic CRUD data access
+│   └── db.py                   DB initialization, migrations, sqlite/libsql compat
+│
+├── utils/                      Shared formatting and validation helpers
+├── tests/                      30 test files (pytest)
+│
+├── docs/
+│   ├── ARCHITECTURE.md         Architecture reference (layering, data flows, debt)
+│   ├── SOURCE_DE_VERITE.md     Canonical KPI definitions by domain
+│   └── CONTEXT.md              Technical context and known deviations
+│
+├── scripts/
+│   └── patrimoine.spec         PyInstaller build spec
+│
+└── assets/
+    └── screenshots/            UI screenshots (see below)
+```
 
-## 11. Pieges connus / dette technique connue
-- Double moteur de projection actif:
-  - `services/projections.py` (legacy),
-  - `services/prevision.py` (nouveau).
-- Conversions FX non totalement unifiees (historique weekly vs live/spot + helper local liquidites).
-- SQL direct encore present dans plusieurs ecrans UI (`main_window`, `import_page`, certains panels).
-- Quelques modules volumineux et multi-responsabilites:
-  - `services/snapshots.py`,
-  - `qt_ui/pages/import_page.py`,
-  - `qt_ui/pages/goals_projection_page.py`,
-  - `services/vue_ensemble_metrics.py`.
+---
 
-## 12. Priorites actuelles du projet
-1. Unifier la source de verite des projections (facade unique puis migration UI).
-2. Recentrer la logique metier hors UI (suppression progressive du SQL direct UI).
-3. Unifier la politique FX/valorisation entre modules.
-4. Decouper les gros modules critiques pour ameliorer testabilite et maintenabilite.
-5. Stabiliser la documentation racine comme reference vivante apres chaque changement.
+## Screenshots
 
-## Informations encore incertaines
-- Le niveau de couverture de tests cible par domaine n'est pas encore formalise dans un standard unique.
-- La date de retrait definitive du moteur `services/projections.py` n'est pas fixee.
-- Le perimetre exact des dependances runtime minimales (vs dependances historiques) reste a nettoyer.
+> Screenshots coming soon.
+>
+> The app includes: family net worth dashboard, individual account panels (bank, brokerage, credit, real estate, private equity), projection charts, and a Sankey cash flow view.
+
+---
+
+## Known limitations
+
+- **Two projection engines coexist.** `services/projections.py` (goal-based, V1) and `services/prevision*.py` (Monte Carlo / stress, V2) are both active. `projection_service.py` routes between them. Consolidation is planned but not yet scheduled.
+- **FX conversion is not fully unified.** Weekly historical rates, live spot rates, and local helpers use slightly different sources in some panels.
+- **Some UI panels still perform pandas aggregations directly.** These are being progressively migrated to service functions.
+- **No mobile or web interface.** This is a local desktop application only.
+- **Trade Republic import requires manual 2FA.** The `pytr` integration prompts for authentication on first use.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for branch conventions, commit message format, and architecture rules.
+
+The core rule: **all business logic lives in `services/` — the UI layer only handles display and interaction.**
+
+---
+
+## Contributors
+
+| Name | GitHub |
+|---|---|
+| Maxime Farre | [@MaximeFARRE](https://github.com/MaximeFARRE) |
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
