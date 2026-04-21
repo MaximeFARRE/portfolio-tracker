@@ -45,6 +45,9 @@ build/
 # Runtime local
 .patrimoine/
 
+# Environnement local (ne jamais commiter)
+.env
+
 # Outils personnels / config locale
 .agents/
 .claude/
