@@ -177,8 +177,14 @@ Zone floue / sensible:
 
 ### Flux E - Projections
 1. UI objectifs/scénarios lit base patrimoniale.
-2. `projection_service.py` route vers `projections.py` (legacy) ou `prevision*.py` selon l'écran/usage.
+2. `projection_service.py` route les requêtes vers le bon moteur selon le mode demandé.
 3. UI affiche courbes/scénarios/milestones.
+
+**Note sur les deux moteurs coexistants :**
+- `services/projections.py` — moteur déterministe original (FIRE, milestones simples). Conservé car encore utilisé par `goals_projection_page`.
+- `services/prevision*.py` + `services/prevision_engines/` — moteur avancé (Monte Carlo, stress, scénarios multicouches). Utilisé par `prevision_avancee_panel`.
+- `services/projection_service.py` — façade qui isole l'UI des deux moteurs.
+- **Pour tout nouveau code** : utiliser `projection_service.py` comme point d'entrée. Ne pas appeler `projections.py` ou `prevision*.py` directement depuis l'UI.
 
 ## 5. Règles de dépendances entre couches (état actuel)
 Règle souhaitée dans le code:
@@ -214,7 +220,7 @@ Règles pratiques actuellement suivies:
 - Les préférences runtime principales ont été branchées; garder des tests si ce domaine rebouge.
 
 5. Legacy ambigu conservé dans le repo actif
-- `legacy/3_Import_streamlit.py` reste présent mais isolé; aucun import `streamlit` hors dossier `legacy/`.
+- Résolu : `legacy/3_Import_streamlit.py` et `pages/3_Import.py` supprimés (code Streamlit orphelin, jamais importé).
 
 ## 7. Règles de refactor à respecter pour l'avenir
 
@@ -244,7 +250,7 @@ Sensibles = impact fort + risque de régression:
 - dette élevée dans `goals_projection_page.py`, `bourse_global_panel.py` et `prevision_avancee_panel.py` à cause de leur taille et de leurs flux asynchrones.
 
 2. Projection et modèles coexistants
-- `projection_service.py` isole l'UI, mais `projections.py` et `prevision*.py` restent deux moteurs à clarifier côté produit.
+- `projection_service.py` isole l'UI des deux moteurs. `projections.py` (moteur simple, goals) et `prevision*.py` (moteur avancé, Monte Carlo/stress) coexistent intentionnellement — voir Flux E pour le détail et les règles d'usage.
 
 3. Tests UI / smoke tests
 - bonne couverture services, mais couverture UI-end-to-end limitée.
