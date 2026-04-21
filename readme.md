@@ -96,11 +96,10 @@ db/
   schema.sql                 # schema principal
   migrations/                # migrations SQL versionnees
 tests/                       # tests unitaires/integration
-ARCHITECTURE.md              # architecture reelle
-SOURCE_DE_VERITE.md          # verites metier par domaine
-AUDIT_GLOBAL.md              # constats transverses
-BACKLOG_GLOBAL.md            # plan d'ameliorations priorise
-CHECKLIST_QUALITE.md         # garde-fous qualite
+docs/
+  ARCHITECTURE.md            # architecture reelle
+  SOURCE_DE_VERITE.md        # verites metier par domaine
+  CONTEXT.md                 # contexte technique detaille
 ```
 
 ## 7. Regles de developpement
@@ -108,12 +107,13 @@ CHECKLIST_QUALITE.md         # garde-fous qualite
 - Toute formule metier (finance, agregation, KPI, projection) doit vivre dans `services/`.
 - Eviter d'ajouter du SQL metier dans `qt_ui/`.
 - Ne pas dupliquer un calcul deja expose par un service canonique.
-- Toute nouvelle API metier doit etre referencee dans `SOURCE_DE_VERITE.md`.
+- Toute nouvelle API metier doit etre referencee dans `docs/SOURCE_DE_VERITE.md`.
 - Avant merge: tests pertinents + mise a jour docs racine.
 
 ## 8. Emplacement des documents de reference
-- [ARCHITECTURE.md](./ARCHITECTURE.md)
-- [SOURCE_DE_VERITE.md](./SOURCE_DE_VERITE.md)
+- [ARCHITECTURE.md](./docs/ARCHITECTURE.md)
+- [SOURCE_DE_VERITE.md](./docs/SOURCE_DE_VERITE.md)
+- [CONTEXT.md](./docs/CONTEXT.md)
 - [AUDIT_GLOBAL.md](./AUDIT_GLOBAL.md)
 - [BACKLOG_GLOBAL.md](./BACKLOG_GLOBAL.md)
 
@@ -123,8 +123,8 @@ CHECKLIST_QUALITE.md         # garde-fous qualite
 3. Implementer la logique dans `services/` (API claire, testable).
 4. Brancher l'UI sur cette API sans recoder les calculs.
 5. Ajouter/adapter les tests (cas nominal + cas limites).
-6. Mettre a jour `SOURCE_DE_VERITE.md` si nouvelle autorite metier.
-7. Mettre a jour `ARCHITECTURE.md`/`BACKLOG_GLOBAL.md` si impact structurel.
+6. Mettre a jour `docs/SOURCE_DE_VERITE.md` si nouvelle autorite metier.
+7. Mettre a jour `docs/ARCHITECTURE.md` si impact structurel.
 
 ## 10. Workflow conseille pour corriger un bug
 1. Reproduire le bug (scenario minimal + donnees).

@@ -12,11 +12,11 @@ Ta priorité absolue est :
 
 Avant toute modification, lire :
 
-* `CONTEXT.md`
-* `ARCHITECTURE_SOURCES_DE_VERITE.md`
-* éventuellement `AUDIT_GLOBAL_APPLICATION.md`
+* `docs/CONTEXT.md`
+* `docs/ARCHITECTURE.md`
+* `docs/SOURCE_DE_VERITE.md`
 
-Le document `ARCHITECTURE_SOURCES_DE_VERITE.md` fait foi si plusieurs implémentations existent.
+Le document `docs/SOURCE_DE_VERITE.md` fait foi si plusieurs implémentations existent.
 
 ---
 
