@@ -163,3 +163,21 @@ def test_compute_savings_metrics_uses_data_months_for_avg_and_recent_streak(conn
     assert out["savings_rate_12m"] == pytest.approx(0.0)
     assert out["positive_savings_streak"] == 0
 
+
+def test_vue_ensemble_metrics_include_passive_income_in_revenus(conn_with_person):
+    conn = conn_with_person
+
+    _insert_snapshot(conn, 1, "2026-01-05", net=1000.0)
+    conn.execute(
+        "INSERT INTO accounts(id, person_id, name, account_type, currency) VALUES (2, 1, 'CTO', 'CTO', 'EUR')"
+    )
+    conn.execute(
+        "INSERT INTO transactions(date, person_id, account_id, type, amount, fees) VALUES ('2025-12-10', 1, 2, 'DIVIDENDE', 120, 0)"
+    )
+    conn.commit()
+
+    m = get_vue_ensemble_metrics(conn, 1)
+    assert m["epargne_12m"] == pytest.approx(120.0)
+    assert m["capacite_epargne_avg"] == pytest.approx(10.0)
+    assert m["taux_epargne_avg"] == pytest.approx(100.0)
+

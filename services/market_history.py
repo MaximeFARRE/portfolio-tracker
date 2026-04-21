@@ -222,6 +222,16 @@ def get_price_asof(conn, symbol: str, week_date: str) -> float | None:
     # SELECT symbol(0), week_date(1), adj_close(2), currency(3), source(4)
     return float(_row_val(row, "adj_close", 2))
 
+
+def get_price_and_currency_asof(conn, symbol: str, week_date: str) -> tuple[float, str] | None:
+    """Retourne (adj_close, currency) pour un symbole à une date donnée, ou None si introuvable."""
+    row = mrepo.get_asset_price_asof(conn, symbol, week_date)
+    if not row:
+        return None
+    price = float(_row_val(row, "adj_close", 2))
+    ccy = _row_val(row, "currency", 3)
+    return price, str(ccy).upper() if ccy else None
+
 def get_fx_asof(conn, base_ccy: str, quote_ccy: str, week_date: str,
                 _depth: int = 0) -> float | None:
     """

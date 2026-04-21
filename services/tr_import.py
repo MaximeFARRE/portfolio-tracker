@@ -28,6 +28,7 @@ import threading
 from pathlib import Path
 
 import pandas as pd
+from services import import_aliases_service
 
 _logger = logging.getLogger(__name__)
 
@@ -217,13 +218,18 @@ def check_pytr_installed() -> tuple[bool, str]:
 
 class PytrProcess:
     """
-    Lance un processus pytr et lit stdout/stderr ligne par ligne.
-    Permet d'envoyer une réponse (code) sur stdin.
+    Lance un processus pytr et lit stdout/stderr caractère par caractère.
+    Nécessaire car pytr émet des prompts sans saut de ligne (ex: "Reset device? (y)")
+    via input() — un lecteur ligne-par-ligne resterait bloqué indéfiniment.
+
+    PYTHONUNBUFFERED=1 force pytr à flusher immédiatement même quand stdout
+    est un pipe (non-tty), ce qui garantit la réception des prompts.
+
     Thread-safe via une queue de lignes.
     """
 
     def __init__(self, args: list[str], waf_token: str = ""):
-        extra = ["--waf_token", waf_token] if waf_token else []
+        extra = ["--waf-token", waf_token] if waf_token else []
         self._args = _find_pytr_cmd() + args + extra
         self._proc: subprocess.Popen | None = None
         self._line_queue: queue.Queue[str | None] = queue.Queue()
@@ -231,22 +237,38 @@ class PytrProcess:
         self.returncode: int | None = None
 
     def start(self) -> None:
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         self._proc = subprocess.Popen(
             self._args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,   # fusion stdout+stderr
+            stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=env,
         )
         t = threading.Thread(target=self._reader, daemon=True)
         t.start()
         self._threads.append(t)
 
     def _reader(self) -> None:
+        """
+        Lit caractère par caractère pour détecter les prompts sans newline.
+        Envoie chaque ligne complète (ou chaque prompt partiel) dans la queue.
+        """
         assert self._proc and self._proc.stdout
-        for line in self._proc.stdout:
-            self._line_queue.put(line.rstrip("\n"))
+        buf = ""
+        while True:
+            ch = self._proc.stdout.read(1)
+            if not ch:          # EOF → processus terminé
+                break
+            if ch == "\n":
+                self._line_queue.put(buf.rstrip("\r"))
+                buf = ""
+            else:
+                buf += ch
+        if buf:                 # Ligne partielle restante (prompt sans newline)
+            self._line_queue.put(buf)
         self._proc.wait()
         self.returncode = self._proc.returncode
         self._line_queue.put(None)  # sentinelle de fin
@@ -289,12 +311,7 @@ def run_pytr_export(
     waf_token: str = "",
 ) -> tuple[int, str]:
     """
-    Lance pytr export_transactions avec les credentials sauvegardés
-    (ou phone/pin si fournis).
-    waf_token : jeton WAF obligatoire pour la 1ère connexion depuis pytr 0.5+
-                (TR bloque l'initialisation d'appareil sans ce token).
-                Obtenu sur https://app.traderepublic.com → F12 → réseau → chercher
-                le header « x-zeta-waf-token » dans une requête vers l'API TR.
+    Lance pytr export_transactions (web login) avec les credentials sauvegardés.
     Retourne (returncode, output_text).
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -309,7 +326,7 @@ def run_pytr_export(
     if phone:
         args += ["--store_credentials"]
     if waf_token:
-        args += ["--waf_token", waf_token]
+        args += ["--waf-token", waf_token]
 
     try:
         result = subprocess.run(
@@ -389,6 +406,9 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "stück": "shares",
         # isin
         "isin": "isin",
+        # ticker/symbol brut (quand présent dans le CSV TR)
+        "ticker": "symbol",
+        "symbol": "symbol",
         # type
         "type": "type", "transaction_type": "type", "event_type": "type",
         "status": "type", "typ": "type",
@@ -461,6 +481,76 @@ def parse_tr_csv(filepath: str) -> pd.DataFrame:
     return df
 
 
+def _upsert_asset_meta_isin(conn, asset_id: int, isin: str | None) -> None:
+    isin_u = (isin or "").strip().upper()
+    if not asset_id or not isin_u:
+        return
+    conn.execute(
+        """
+        INSERT INTO asset_meta(asset_id, isin, status)
+        VALUES (?, ?, 'OK')
+        ON CONFLICT(asset_id) DO UPDATE SET
+            isin = CASE
+                     WHEN COALESCE(asset_meta.isin, '') = '' THEN excluded.isin
+                     ELSE asset_meta.isin
+                   END
+        """,
+        (int(asset_id), isin_u),
+    )
+
+
+def _find_asset_by_symbol(conn, symbol: str | None) -> dict | None:
+    symbol_u = (symbol or "").strip().upper()
+    if not symbol_u:
+        return None
+    row = conn.execute(
+        "SELECT id AS asset_id, symbol, name FROM assets WHERE UPPER(symbol) = ? LIMIT 1",
+        (symbol_u,),
+    ).fetchone()
+    if row is None:
+        return None
+    asset_id = int(row[0] if not hasattr(row, "keys") else row["asset_id"])
+    sym = str(row[1] if not hasattr(row, "keys") else row["symbol"])
+    name = str(row[2] if not hasattr(row, "keys") else row["name"])
+    return {"asset_id": asset_id, "symbol": sym, "name": name}
+
+
+def _get_or_create_asset_by_symbol(
+    conn,
+    symbol: str | None,
+    title: str,
+    *,
+    isin: str | None = None,
+) -> int | None:
+    symbol_u = (symbol or "").strip().upper()
+    if not symbol_u:
+        return None
+
+    existing = _find_asset_by_symbol(conn, symbol_u)
+    if existing is not None:
+        _upsert_asset_meta_isin(conn, int(existing["asset_id"]), isin)
+        conn.commit()
+        return int(existing["asset_id"])
+
+    isin_u = (isin or "").strip().upper()
+    # Heuristique simple: les symboles avec suffixe marché sont souvent ETF/actions cotées.
+    asset_type = "etf" if "." in symbol_u else "action"
+    if isin_u[:2] in ("IE", "LU", "FR", "DE", "NL", "BE"):
+        asset_type = "etf"
+
+    conn.execute(
+        "INSERT INTO assets(symbol, name, asset_type, currency) VALUES (?, ?, ?, 'EUR')",
+        (symbol_u, (title or symbol_u)[:128], asset_type),
+    )
+    row = conn.execute("SELECT id FROM assets WHERE symbol = ?", (symbol_u,)).fetchone()
+    if row is None:
+        return None
+    asset_id = int(row[0] if not hasattr(row, "keys") else row["id"])
+    _upsert_asset_meta_isin(conn, asset_id, isin_u)
+    conn.commit()
+    return asset_id
+
+
 # ---------------------------------------------------------------------------
 # Asset : get or create
 # ---------------------------------------------------------------------------
@@ -485,7 +575,10 @@ def _get_or_create_asset(
     # 1. Cherche par symbol effectif (ticker ou ISIN)
     row = conn.execute("SELECT id FROM assets WHERE symbol = ?", (effective_symbol,)).fetchone()
     if row:
-        return int(row[0] if not hasattr(row, "keys") else row["id"])
+        asset_id = int(row[0] if not hasattr(row, "keys") else row["id"])
+        _upsert_asset_meta_isin(conn, asset_id, isin)
+        conn.commit()
+        return asset_id
 
     # 2. Si on a un ticker, cherche un asset existant encore stocké avec l'ISIN comme symbol
     #    (import précédent avant la résolution des tickers) → on migre son symbol
@@ -494,6 +587,7 @@ def _get_or_create_asset(
         if row:
             asset_id = int(row[0] if not hasattr(row, "keys") else row["id"])
             conn.execute("UPDATE assets SET symbol = ? WHERE id = ?", (effective_symbol, asset_id))
+            _upsert_asset_meta_isin(conn, asset_id, isin)
             conn.commit()
             return asset_id
 
@@ -503,9 +597,11 @@ def _get_or_create_asset(
         "INSERT INTO assets(symbol, name, asset_type, currency) VALUES (?, ?, ?, 'EUR')",
         (effective_symbol, (title or effective_symbol)[:128], asset_type),
     )
-    conn.commit()
     row = conn.execute("SELECT id FROM assets WHERE symbol = ?", (effective_symbol,)).fetchone()
-    return int(row[0] if not hasattr(row, "keys") else row["id"])
+    asset_id = int(row[0] if not hasattr(row, "keys") else row["id"])
+    _upsert_asset_meta_isin(conn, asset_id, isin)
+    conn.commit()
+    return asset_id
 
 
 # ---------------------------------------------------------------------------
@@ -532,30 +628,45 @@ def extract_tr_tickers_with_predictions(conn, filepath: str, person_id: int) -> 
     processed_symbols = set()
     for isin, title in unique_assets.items():
         ticker = isin_ticker_map.get(isin)
-        symbol = ticker or isin
-        if symbol in processed_symbols:
+        raw_symbol = ticker or isin
+        if raw_symbol in processed_symbols:
             continue
-        processed_symbols.add(symbol)
-        
-        asset_id = None
-        row = conn.execute("SELECT id FROM assets WHERE symbol = ?", (symbol,)).fetchone()
-        if row:
-            asset_id = int(row[0] if not hasattr(row, "keys") else row["id"])
-            
+        processed_symbols.add(raw_symbol)
+
+        canonical = import_aliases_service.find_canonical_asset_for_import(
+            conn,
+            import_aliases_service.IMPORT_SOURCE_TRADE_REPUBLIC,
+            raw_symbol=raw_symbol,
+            raw_isin=isin,
+        )
+
+        if canonical:
+            canonical_symbol = canonical["symbol"]
+            canonical_asset_id = int(canonical["asset_id"])
+            match_source = canonical.get("match_source", "alias")
+        else:
+            canonical_symbol = raw_symbol
+            existing = _find_asset_by_symbol(conn, canonical_symbol)
+            canonical_asset_id = int(existing["asset_id"]) if existing else None
+            match_source = "fallback"
+
         predicted_account_id = None
-        if asset_id:
+        if canonical_asset_id:
             tx_row = conn.execute(
                 "SELECT account_id FROM transactions WHERE asset_id = ? AND person_id = ? ORDER BY date DESC LIMIT 1",
-                (asset_id, person_id)
+                (canonical_asset_id, person_id)
             ).fetchone()
             if tx_row:
                 predicted_account_id = int(tx_row[0] if not hasattr(tx_row, "keys") else tx_row["account_id"])
 
         results.append({
             "isin": isin,
-            "symbol": symbol,
+            "raw_symbol": raw_symbol,
+            "symbol": canonical_symbol,
+            "canonical_symbol": canonical_symbol,
             "title": title,
-            "predicted_account_id": predicted_account_id
+            "predicted_account_id": predicted_account_id,
+            "match_source": match_source,
         })
     return results
 
@@ -570,6 +681,7 @@ def import_tr_transactions(
     account_id: int,
     dry_run: bool = True,
     ticker_account_map: dict[str, int] | None = None,
+    canonical_symbol_map: dict[str, str] | None = None,
     import_batch_id: int | None = None,
 ) -> dict:
     """
@@ -578,15 +690,23 @@ def import_tr_transactions(
     dry_run=False → insertion réelle + déduplication.
 
     Chaque entrée du preview contient :
-      - "symbol"  : ticker boursier résolu (ex: "EUNL.DE") ou ISIN en fallback
+      - "raw_symbol" : ticker brut issu de la résolution TR (ou ISIN fallback)
+      - "symbol"  : ticker canonique retenu pour l'app
       - "isin"    : ISIN brut tel que fourni par pytr
       - "effective_account_id" : le compte final qui a été attribué (via map ou fallback)
     """
     df = parse_tr_csv(filepath)
+    ticker_account_map_norm = {
+        str(k or "").strip().upper(): int(v)
+        for k, v in (ticker_account_map or {}).items()
+        if str(k or "").strip() and v
+    }
+    canonical_symbol_map_norm = {
+        str(k or "").strip().upper(): str(v or "").strip().upper()
+        for k, v in (canonical_symbol_map or {}).items()
+        if str(k or "").strip() and str(v or "").strip()
+    }
 
-    # ── Résolution ISIN → ticker (batch, avec cache DB) ───────────────────────
-    # On collecte tous les ISINs uniques du fichier et on les résout en une seule
-    # passe pour limiter les appels API.
     unique_isins: list[str] = []
     if "isin" in df.columns:
         for raw in df["isin"].dropna():
@@ -601,11 +721,11 @@ def import_tr_transactions(
 
     preview: list[dict] = []
     rows_to_insert: list[tuple] = []
+    rows_meta: list[dict] = []
     skipped = 0
     seen_in_batch: set[tuple] = set()
 
     for _, r in df.iterrows():
-        # Date
         date_raw = str(r.get("date", "")).strip()
         d = pd.to_datetime(date_raw, errors="coerce", utc=True)
         if pd.isna(d):
@@ -613,7 +733,6 @@ def import_tr_transactions(
             continue
         date_str = d.strftime("%Y-%m-%d")
 
-        # Montant
         amount = _parse_amount(r.get("amount"))
         if amount is None:
             skipped += 1
@@ -622,9 +741,11 @@ def import_tr_transactions(
         tr_type = str(r.get("type", "trade")).strip() if "type" in df.columns else "trade"
         title = str(r.get("title", "")).strip() if "title" in df.columns else ""
         isin_raw = r.get("isin", "") if "isin" in df.columns else ""
-        isin = (str(isin_raw).strip().upper()
-                if isin_raw and not (isinstance(isin_raw, float) and pd.isna(isin_raw))
-                else "")
+        isin = (
+            str(isin_raw).strip().upper()
+            if isin_raw and not (isinstance(isin_raw, float) and pd.isna(isin_raw))
+            else ""
+        )
 
         shares_raw = r.get("shares") if "shares" in df.columns else None
         shares = None
@@ -652,32 +773,83 @@ def import_tr_transactions(
 
         tx_type = _map_tr_type(tr_type, amount)
         tx_amount = abs(amount)
-
         unit_price = price_col
         if not unit_price and shares and shares > 0 and tx_type in ("ACHAT", "VENTE"):
             unit_price = tx_amount / shares
 
-        # Ticker résolu (ou ISIN en fallback pour les transactions sans actif)
+        csv_raw_symbol = ""
+        if "symbol" in df.columns:
+            symbol_raw = r.get("symbol")
+            if symbol_raw is not None and not (isinstance(symbol_raw, float) and pd.isna(symbol_raw)):
+                csv_raw_symbol = str(symbol_raw).strip().upper()
+
         ticker = isin_ticker_map.get(isin) if isin else None
-        symbol = ticker or isin  # ticker si résolu, ISIN sinon
+        raw_symbol = csv_raw_symbol or ticker or isin
+
+        canonical_override_symbol = canonical_symbol_map_norm.get(raw_symbol, "")
+        canonical_match = None
+        match_source = "fallback"
+
+        if canonical_override_symbol:
+            canonical_match = _find_asset_by_symbol(conn, canonical_override_symbol)
+            if canonical_match:
+                match_source = "user_override_existing"
+        else:
+            # Priorité auto: ISIN existant -> alias mémorisé.
+            canonical_match = import_aliases_service.find_canonical_asset_for_import(
+                conn,
+                import_aliases_service.IMPORT_SOURCE_TRADE_REPUBLIC,
+                raw_symbol=raw_symbol,
+                raw_isin=isin,
+            )
+            if canonical_match:
+                match_source = str(canonical_match.get("match_source") or "alias")
+
+        symbol = canonical_override_symbol or raw_symbol
+        asset_id = None
+        if canonical_match:
+            asset_id = int(canonical_match["asset_id"])
+            symbol = str(canonical_match.get("symbol") or symbol)
 
         effective_account_id = account_id
-        if ticker_account_map and symbol in ticker_account_map:
-            effective_account_id = ticker_account_map[symbol]
-            if effective_account_id != account_id:
-                _logger.info("ticker_account_map: %s redirige vers account_id=%s (defaut=%s)",
-                             symbol, effective_account_id, account_id)
+        map_lookup_symbol = raw_symbol or symbol
+        if map_lookup_symbol and map_lookup_symbol in ticker_account_map_norm:
+            effective_account_id = ticker_account_map_norm[map_lookup_symbol]
+        elif symbol and symbol in ticker_account_map_norm:
+            effective_account_id = ticker_account_map_norm[symbol]
+        if effective_account_id != account_id:
+            _logger.info(
+                "ticker_account_map: %s redirige vers account_id=%s (defaut=%s)",
+                map_lookup_symbol or symbol,
+                effective_account_id,
+                account_id,
+            )
 
-        # Déduplication In-Memory
-        mem_fingerprint = (date_raw, effective_account_id, tx_type, tx_amount, isin, shares, fees_val)
+        mem_fingerprint = (
+            date_raw,
+            effective_account_id,
+            tx_type,
+            tx_amount,
+            raw_symbol,
+            isin,
+            shares,
+            fees_val,
+        )
         if mem_fingerprint in seen_in_batch:
             _logger.info("Skipping duplicate trade in batch: %s", mem_fingerprint)
             skipped += 1
             continue
         seen_in_batch.add(mem_fingerprint)
 
-        # Déduplication (inclut l'ISIN via assets pour éviter les faux positifs)
-        if isin:
+        if asset_id:
+            existing = conn.execute(
+                """SELECT id FROM transactions
+                   WHERE date = ? AND account_id = ? AND type = ?
+                     AND ABS(amount - ?) < 0.01
+                     AND asset_id = ?""",
+                (date_str, effective_account_id, tx_type, tx_amount, asset_id),
+            ).fetchone()
+        elif isin:
             existing = conn.execute(
                 """SELECT t.id FROM transactions t
                    LEFT JOIN assets a ON t.asset_id = a.id
@@ -696,14 +868,23 @@ def import_tr_transactions(
             ).fetchone()
         is_duplicate = existing is not None
 
-        asset_id = None
-        if not dry_run and isin:
-            asset_id = _get_or_create_asset(conn, isin, title, ticker=ticker)
+        if not dry_run and asset_id is None:
+            if canonical_override_symbol:
+                asset_id = _get_or_create_asset_by_symbol(
+                    conn, canonical_override_symbol, title, isin=isin
+                )
+                symbol = canonical_override_symbol
+                if asset_id:
+                    match_source = "user_override_new"
+            elif isin:
+                asset_id = _get_or_create_asset(conn, isin, title, ticker=ticker)
+                symbol = ticker or isin
 
         preview.append({
             "date": date_str,
             "type": tx_type,
-            "symbol": symbol,          # ticker résolu ou ISIN
+            "raw_symbol": raw_symbol,
+            "symbol": symbol,
             "title": title,
             "isin": isin,
             "shares": shares,
@@ -712,6 +893,7 @@ def import_tr_transactions(
             "fees": round(fees_val, 2),
             "tr_type": tr_type,
             "duplicate": is_duplicate,
+            "match_source": match_source,
             "effective_account_id": effective_account_id,
         })
 
@@ -722,17 +904,56 @@ def import_tr_transactions(
                 None,
                 f"TR: {tr_type} | {title}" if title else f"TR: {tr_type}",
             ))
+            rows_meta.append({
+                "raw_symbol": raw_symbol,
+                "isin": isin,
+                "title": title,
+                "ticker": ticker,
+                "symbol": symbol,
+                "asset_id": asset_id,
+            })
 
     if not dry_run:
-        # Résolution des assets manquants (cas où asset_id est encore None)
-        non_dup_previews = [p for p in preview if not p["duplicate"]]
-        for i, (rd, pv) in enumerate(zip(rows_to_insert, non_dup_previews)):
-            if rd[4] is None and pv.get("isin"):
-                ticker_for_asset = isin_ticker_map.get(pv["isin"].upper())
-                aid = _get_or_create_asset(
-                    conn, pv["isin"], pv.get("title", ""), ticker=ticker_for_asset
-                )
+        for i, rd in enumerate(rows_to_insert):
+            meta = rows_meta[i]
+            aid = rd[4]
+
+            if aid is None:
+                if meta.get("symbol"):
+                    # Si symbole canonique explicite, on privilégie une création/recherche par symbole.
+                    if meta.get("isin"):
+                        resolved_ticker = isin_ticker_map.get(str(meta["isin"]).upper()) or ""
+                        if str(meta["symbol"]).upper() != str(resolved_ticker or meta["isin"]).upper():
+                            aid = _get_or_create_asset_by_symbol(
+                                conn, meta["symbol"], meta.get("title", ""), isin=meta.get("isin")
+                            )
+                        else:
+                            aid = _get_or_create_asset(
+                                conn,
+                                str(meta["isin"]),
+                                meta.get("title", ""),
+                                ticker=resolved_ticker or None,
+                            )
+                    else:
+                        aid = _get_or_create_asset_by_symbol(
+                            conn, meta["symbol"], meta.get("title", "")
+                        )
+                elif meta.get("isin"):
+                    resolved_ticker = isin_ticker_map.get(str(meta["isin"]).upper())
+                    aid = _get_or_create_asset(
+                        conn, str(meta["isin"]), meta.get("title", ""), ticker=resolved_ticker
+                    )
                 rows_to_insert[i] = rd[:4] + (aid,) + rd[5:]
+
+            rows_meta[i]["asset_id"] = aid
+            if aid:
+                import_aliases_service.upsert_import_alias(
+                    conn,
+                    import_aliases_service.IMPORT_SOURCE_TRADE_REPUBLIC,
+                    canonical_asset_id=int(aid),
+                    raw_symbol=str(meta.get("raw_symbol") or ""),
+                    raw_isin=str(meta.get("isin") or ""),
+                )
 
         conn.executemany(
             """INSERT INTO transactions

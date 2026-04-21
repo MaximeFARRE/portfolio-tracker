@@ -22,14 +22,6 @@ logger = logging.getLogger(__name__)
 CATEGORIES_REVENUS = ["Salaire", "Prime", "Freelance", "Loyers perçus", "Dividendes", "Intérêts", "Autres"]
 MOIS_FR = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"]
 
-
-def _finite_sum(series: pd.Series) -> float | None:
-    vals = pd.to_numeric(series, errors="coerce").dropna()
-    if vals.empty:
-        return None
-    return float(vals.sum())
-
-
 class RevenusPanel(QWidget):
     def __init__(self, conn, person_id: int, parent=None):
         super().__init__(parent)
@@ -110,9 +102,15 @@ class RevenusPanel(QWidget):
         # KPI
         kpi_row = QHBoxLayout()
         self._kpi_total = KpiCard("Total revenus", "—", tone="green")
-        self._kpi_count = KpiCard("Nombre d'entrées", "—", tone="neutral")
+        self._kpi_count = KpiCard("Entrées saisies", "—", tone="neutral")
+        self._kpi_div = KpiCard("Dividendes", "—", tone="success")
+        self._kpi_int = KpiCard("Intérêts", "—", tone="primary")
+        self._kpi_div.setToolTip("Dividendes bourse intégrés aux revenus du mois.")
+        self._kpi_int.setToolTip("Intérêts bourse intégrés aux revenus du mois.")
         kpi_row.addWidget(self._kpi_total)
         kpi_row.addWidget(self._kpi_count)
+        kpi_row.addWidget(self._kpi_div)
+        kpi_row.addWidget(self._kpi_int)
         kpi_row.addStretch()
         layout.addLayout(kpi_row)
 
@@ -177,9 +175,9 @@ class RevenusPanel(QWidget):
         self._refresh_view()
 
     def _on_undo(self) -> None:
-        from services.revenus_repository import derniere_revenu, supprimer_revenu_par_id
+        from services.revenus_repository import derniere_revenue, supprimer_revenu_par_id
         mois = self._get_mois()
-        last = derniere_revenu(self._conn, self._person_id, mois)
+        last = derniere_revenue(self._conn, self._person_id, mois)
         if last is None:
             self._saisie_result.setStyleSheet(STYLE_STATUS_WARNING)
             self._saisie_result.setText("Rien à annuler pour ce mois.")
@@ -193,42 +191,52 @@ class RevenusPanel(QWidget):
     def _refresh_view(self) -> None:
         self._overlay.start("Chargement des revenus…")
         try:
-            from services.revenus_repository import revenus_du_mois, revenus_par_mois
+            from services.revenus_repository import (
+                revenus_du_mois_consolides,
+                revenus_kpis_mois,
+                revenus_par_mois_consolides,
+            )
             mois = self._get_mois()
+            kpis = revenus_kpis_mois(self._conn, self._person_id, mois)
+            df_mois = revenus_du_mois_consolides(self._conn, self._person_id, mois)
 
-            df_mois = revenus_du_mois(self._conn, self._person_id, mois)
+            total = float(kpis.get("total_revenus", 0.0))
+            total_txt = f"{total:,.2f} €".replace(",", " ")
+            self._kpi_total.set_content("Total revenus", total_txt, tone="green")
+            self._kpi_count.set_content("Entrées saisies", str(int(kpis.get("entries_count", 0))), tone="neutral")
+            self._kpi_div.set_content(
+                "Dividendes",
+                f"{float(kpis.get('dividendes', 0.0)):,.2f} €".replace(",", " "),
+                tone="success",
+            )
+            self._kpi_int.set_content(
+                "Intérêts",
+                f"{float(kpis.get('interets', 0.0)):,.2f} €".replace(",", " "),
+                tone="primary",
+            )
+
             if df_mois is None or df_mois.empty:
-                self._kpi_total.set_content("Total revenus", "—", tone="green")
-                self._kpi_count.set_content("Entrées", "0", tone="neutral")
                 self._table_mois.set_dataframe(pd.DataFrame())
                 self._chart_cat.clear_figure()
-                self._chart_hist.clear_figure()
-                return
-
-            total = _finite_sum(df_mois["montant"]) if "montant" in df_mois.columns else None
-            total_txt = "—" if total is None else f"{total:,.2f} €".replace(",", " ")
-            self._kpi_total.set_content("Total revenus", total_txt, tone="green")
-            self._kpi_count.set_content("Entrées", str(len(df_mois)), tone="neutral")
-            self._table_mois.set_dataframe(df_mois)
-
-            if "categorie" in df_mois.columns and "montant" in df_mois.columns:
-                df_cat = df_mois.groupby("categorie", as_index=False)["montant"].sum()
-                fig_cat = px.bar(df_cat, x="categorie", y="montant", template="plotly_dark",
-                                 color="montant", color_continuous_scale="Greens",
-                                 labels={"categorie": "Catégorie", "montant": "Montant (€)"})
-                fig_cat.update_layout(**plotly_layout(showlegend=False))
-                self._chart_cat.set_figure(fig_cat)
             else:
-                self._chart_cat.clear_figure()
+                self._table_mois.set_dataframe(df_mois)
+
+                if "categorie" in df_mois.columns and "montant" in df_mois.columns:
+                    df_cat = df_mois.groupby("categorie", as_index=False)["montant"].sum()
+                    fig_cat = px.bar(df_cat, x="categorie", y="montant", template="plotly_dark",
+                                     color="montant", color_continuous_scale="Greens",
+                                     labels={"categorie": "Catégorie", "montant": "Montant (€)"})
+                    fig_cat.update_layout(**plotly_layout(showlegend=False))
+                    self._chart_cat.set_figure(fig_cat)
+                else:
+                    self._chart_cat.clear_figure()
 
             try:
-                df_hist = revenus_par_mois(self._conn, self._person_id)
+                df_hist = revenus_par_mois_consolides(self._conn, self._person_id)
                 if df_hist is not None and not df_hist.empty and "mois" in df_hist.columns:
                     df_hist["mois"] = pd.to_datetime(df_hist["mois"], errors="coerce")
                     df_hist = df_hist.dropna(subset=["mois"]).sort_values("mois")
-                    total_col = [c for c in df_hist.columns if c not in ("mois", "person_id", "person_name")]
-                    if total_col:
-                        df_hist["total"] = df_hist[total_col].sum(axis=1)
+                    if "total" in df_hist.columns:
                         fig_h = px.bar(df_hist, x="mois", y="total", template="plotly_dark",
                                        labels={"mois": "Mois", "total": "Total revenus (€)"},
                                        color_discrete_sequence=[CHART_GREEN])

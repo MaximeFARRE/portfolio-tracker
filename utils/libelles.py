@@ -2,13 +2,14 @@
 
 # Types de compte en base
 TYPES_COMPTE = [
-    "BANQUE", "PEA", "PEA_PME", "CTO", "CRYPTO",
+    "BANQUE", "LIVRET", "PEA", "PEA_PME", "CTO", "CRYPTO",
     "ASSURANCE_VIE", "PER", "PEE",
     "IMMOBILIER", "CREDIT", "PE",
 ]
 
 LIBELLES_TYPE_COMPTE = {
     "BANQUE":        "Banque",
+    "LIVRET":        "Livret",
     "PEA":           "PEA",
     "PEA_PME":       "PEA-PME",
     "CTO":           "Compte-titres",
@@ -19,6 +20,16 @@ LIBELLES_TYPE_COMPTE = {
     "IMMOBILIER":    "Immobilier",
     "CREDIT":        "Crédit",
     "PE":            "Private equity",
+}
+
+# Sous-types de livrets réglementés
+SOUS_TYPES_LIVRET = {
+    "LIVRET_A":     "Livret A",
+    "LDDS":         "LDDS",
+    "LEP":          "LEP",
+    "LIVRET_JEUNE": "Livret Jeune",
+    "CSL":          "CSL",
+    "AUTRE":        "Autre livret",
 }
 
 # Types d'opération en base
@@ -54,6 +65,10 @@ CATEGORIES_DEPENSES = [
 
 def afficher_type_compte(code: str) -> str:
     return LIBELLES_TYPE_COMPTE.get(code, code)
+
+
+def afficher_sous_type_livret(code: str) -> str:
+    return SOUS_TYPES_LIVRET.get(code, code)
 
 
 def afficher_type_operation(code: str) -> str:

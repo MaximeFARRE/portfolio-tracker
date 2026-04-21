@@ -23,7 +23,10 @@ import numpy as np
 import pandas as pd
 
 from services import bourse_analytics
+from services import efficient_frontier
 from services import market_history
+from services import repositories as repo
+from services.asset_panel_mapping import INVESTMENT_ACCOUNT_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -39,28 +42,143 @@ MAX_ASSETS_CORRELATION = 15 # Nombre max d'actifs dans la matrice de corrélatio
 # FONCTIONS INTERNES (données brutes)
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _portfolio_weekly_net_flows_eur(
+    conn,
+    person_id: int,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> pd.DataFrame:
+    """
+    Flux hebdomadaires vers les holdings bourse (EUR), alignés sur les week_date (lundi).
+
+    Convention de signe:
+    - ACHAT  -> flux positif (capital injecté dans les holdings)
+    - VENTE  -> flux négatif (capital retiré des holdings)
+    """
+    accounts = repo.list_accounts(conn, person_id=person_id)
+    if accounts is None or accounts.empty:
+        return pd.DataFrame(columns=["date", "net_flow"])
+
+    bourse_acc = accounts[
+        accounts["account_type"].astype(str).str.upper().isin(INVESTMENT_ACCOUNT_TYPES)
+    ].copy()
+    if bourse_acc.empty:
+        return pd.DataFrame(columns=["date", "net_flow"])
+
+    rows: list[dict[str, Any]] = []
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+
+    for _, acc in bourse_acc.iterrows():
+        acc_id = int(acc["id"])
+        acc_ccy = str(acc.get("currency") or "EUR").upper()
+
+        tx = repo.list_transactions(conn, person_id=person_id, account_id=acc_id, limit=200000)
+        if tx is None or tx.empty:
+            continue
+
+        df = tx.copy()
+        df["date"] = pd.to_datetime(df.get("date"), errors="coerce")
+        df = df.dropna(subset=["date"])
+        df = df[(df["date"] >= start_ts) & (df["date"] <= end_ts)].copy()
+        if df.empty:
+            continue
+
+        df["type"] = df.get("type", "").astype(str).str.upper()
+        df = df[df["type"].isin(["ACHAT", "VENTE"])].copy()
+        if df.empty:
+            continue
+
+        # Garde uniquement les ordres sur actifs du panel bourse.
+        df = bourse_analytics._filter_tx_buy_sell_to_bourse_assets(conn, df)
+        if df.empty:
+            continue
+
+        df["amount"] = pd.to_numeric(df.get("amount", 0.0), errors="coerce").fillna(0.0)
+        df["fees"] = pd.to_numeric(df.get("fees", 0.0), errors="coerce").fillna(0.0)
+        df["flow_native"] = np.where(
+            df["type"] == "ACHAT",
+            df["amount"] + df["fees"],
+            -(df["amount"] - df["fees"]),
+        )
+
+        for _, tr in df.iterrows():
+            flow_native = float(tr["flow_native"])
+            if not math.isfinite(flow_native) or flow_native == 0.0:
+                continue
+            date_str = pd.Timestamp(tr["date"]).strftime("%Y-%m-%d")
+            flow_eur = (
+                flow_native
+                if acc_ccy == "EUR"
+                else market_history.convert_weekly(conn, flow_native, acc_ccy, "EUR", date_str)
+            )
+            if flow_eur is None:
+                logger.warning(
+                    "_portfolio_weekly_net_flows_eur: FX %s→EUR manquant pour tx compte=%s date=%s",
+                    acc_ccy, acc_id, date_str,
+                )
+                continue
+            week_date = pd.Timestamp(tr["date"]).to_period("W-MON").end_time.normalize()
+            rows.append({"date": week_date, "net_flow": float(flow_eur)})
+
+    if not rows:
+        return pd.DataFrame(columns=["date", "net_flow"])
+
+    out = pd.DataFrame(rows)
+    out = out.groupby("date", as_index=False)["net_flow"].sum()
+    out = out.sort_values("date").reset_index(drop=True)
+    return out
+
+
 def _portfolio_weekly_returns(conn, person_id: int) -> pd.DataFrame:
     """
-    Série des rendements log-hebdomadaires du portefeuille.
+    Série des rendements log-hebdomadaires cashflow-adjusted du portefeuille.
 
-    Retourne un DataFrame avec colonnes ['date', 'value', 'log_return'].
-    Source : snapshots weekly (bourse_holdings).
+    Retourne un DataFrame avec colonnes:
+    ['date', 'value', 'net_flow', 'simple_return', 'log_return'].
     """
     series = bourse_analytics.get_bourse_weekly_series(conn, person_id)
     if series.empty or len(series) < 2:
-        return pd.DataFrame(columns=["date", "value", "log_return"])
+        return pd.DataFrame(columns=["date", "value", "net_flow", "simple_return", "log_return"])
 
     df = series.sort_values("date").copy()
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
     df = df[df["holdings_eur"] > 0].copy()
     if len(df) < 2:
-        return pd.DataFrame(columns=["date", "value", "log_return"])
+        return pd.DataFrame(columns=["date", "value", "net_flow", "simple_return", "log_return"])
 
-    df["value"] = df["holdings_eur"].astype(float)
-    df["log_return"] = np.log(df["value"] / df["value"].shift(1))
+    df["date"] = df["date"].dt.normalize()
+    df["value"] = pd.to_numeric(df["holdings_eur"], errors="coerce")
+    df = df.dropna(subset=["value"])
+    if len(df) < 2:
+        return pd.DataFrame(columns=["date", "value", "net_flow", "simple_return", "log_return"])
+
+    flows = _portfolio_weekly_net_flows_eur(
+        conn,
+        person_id,
+        start_date=pd.Timestamp(df["date"].min()),
+        end_date=pd.Timestamp(df["date"].max()),
+    )
+    if flows.empty:
+        df["net_flow"] = 0.0
+    else:
+        df = df.merge(flows, on="date", how="left")
+        df["net_flow"] = pd.to_numeric(df["net_flow"], errors="coerce").fillna(0.0)
+
+    prev_value = df["value"].shift(1)
+    valid = prev_value > 0
+    df["simple_return"] = np.where(
+        valid,
+        (df["value"] - prev_value - df["net_flow"]) / prev_value,
+        np.nan,
+    )
+    # Rendement log défini uniquement pour (1 + r) > 0.
+    df.loc[df["simple_return"] <= -0.999999999, "simple_return"] = np.nan
+    df["log_return"] = np.log1p(df["simple_return"])
     df = df.dropna(subset=["log_return"])
 
-    return df[["date", "value", "log_return"]].reset_index(drop=True)
+    return df[["date", "value", "net_flow", "simple_return", "log_return"]].reset_index(drop=True)
 
 
 def _get_asset_weekly_returns(
@@ -176,8 +294,7 @@ def get_risk_return_payload(conn, person_id: int) -> dict[str, Any]:
             f"Historique insuffisant ({n_points} semaines, minimum {MIN_WEEKS_FOR_RISK})"
         )
 
-    log_returns = returns_df["log_return"].values
-    values = returns_df["value"].values
+    log_returns = returns_df["log_return"].astype(float).values
     dates = returns_df["date"].values
 
     # Rendement moyen annualisé
@@ -188,17 +305,18 @@ def get_risk_return_payload(conn, person_id: int) -> dict[str, Any]:
     vol_weekly = float(np.std(log_returns, ddof=1))
     vol_annual = vol_weekly * math.sqrt(WEEKS_PER_YEAR) * 100.0
 
-    # CAGR
-    cagr = _compute_cagr_from_series(values, dates)
+    # CAGR (annualisation du TWR)
+    cagr = _compute_cagr_from_log_returns(log_returns, dates)
 
     # Ratio de Sharpe
     sharpe = _compute_sharpe(mean_weekly, vol_weekly)
 
-    # Max drawdown
-    dd_result = _compute_max_drawdown(values, dates)
+    # Max drawdown sur l'indice de performance cashflow-adjusted
+    twr_index = np.exp(np.cumsum(log_returns))
+    dd_result = _compute_max_drawdown(twr_index, dates)
 
     # Beta vs benchmark
-    beta = _compute_beta(conn, log_returns, dates)
+    beta = _compute_beta(conn, returns_df[["date", "log_return"]])
 
     period_start = str(pd.Timestamp(dates[0]).date())
     period_end = str(pd.Timestamp(dates[-1]).date())
@@ -220,13 +338,9 @@ def get_risk_return_payload(conn, person_id: int) -> dict[str, Any]:
     }
 
 
-def _compute_cagr_from_series(values: np.ndarray, dates: np.ndarray) -> float | None:
-    """CAGR à partir de valeurs et dates numpy."""
-    if len(values) < 2:
-        return None
-    first_val = float(values[0])
-    last_val = float(values[-1])
-    if first_val <= 0 or last_val <= 0:
+def _compute_cagr_from_log_returns(log_returns: np.ndarray, dates: np.ndarray) -> float | None:
+    """CAGR annualisé à partir d'une série de rendements log cashflow-adjusted."""
+    if len(log_returns) < 2:
         return None
 
     d0 = pd.Timestamp(dates[0])
@@ -236,7 +350,8 @@ def _compute_cagr_from_series(values: np.ndarray, dates: np.ndarray) -> float | 
         return None
 
     years = days / 365.25
-    return (pow(last_val / first_val, 1.0 / years) - 1.0) * 100.0
+    cum_log = float(np.sum(log_returns))
+    return (math.exp(cum_log / years) - 1.0) * 100.0
 
 
 def _compute_sharpe(mean_weekly_log: float, vol_weekly: float) -> float | None:
@@ -286,19 +401,27 @@ def _compute_max_drawdown(values: np.ndarray, dates: np.ndarray) -> dict:
     return result
 
 
-def _compute_beta(
-    conn, portfolio_returns: np.ndarray, dates: np.ndarray
-) -> float | None:
+def _compute_beta(conn, portfolio_returns_df: pd.DataFrame) -> float | None:
     """
     Beta du portefeuille vs benchmark (URTH).
 
     β = Cov(R_portfolio, R_benchmark) / Var(R_benchmark)
     """
-    if len(dates) < MIN_WEEKS_FOR_RISK:
+    if portfolio_returns_df is None or portfolio_returns_df.empty:
         return None
 
-    start_date = str(pd.Timestamp(dates[0]).date())
-    end_date = str(pd.Timestamp(dates[-1]).date())
+    df = portfolio_returns_df.copy()
+    if "date" not in df.columns or "log_return" not in df.columns:
+        return None
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["log_return"] = pd.to_numeric(df["log_return"], errors="coerce")
+    df = df.dropna(subset=["date", "log_return"])
+    if len(df) < MIN_WEEKS_FOR_RISK:
+        return None
+
+    start_date = str(df["date"].min().date())
+    end_date = str(df["date"].max().date())
 
     benchmark_returns = _get_asset_weekly_returns(
         conn, [DEFAULT_BENCHMARK], start_date, end_date
@@ -310,15 +433,15 @@ def _compute_beta(
         )
         return None
 
-    bench_ret = benchmark_returns[DEFAULT_BENCHMARK].dropna().values
-
-    # Aligner les longueurs
-    min_len = min(len(portfolio_returns), len(bench_ret))
-    if min_len < MIN_WEEKS_FOR_RISK:
+    aligned = pd.DataFrame({
+        "portfolio": df.set_index("date")["log_return"],
+        "benchmark": benchmark_returns[DEFAULT_BENCHMARK],
+    }).dropna()
+    if len(aligned) < MIN_WEEKS_FOR_RISK:
         return None
 
-    p_ret = portfolio_returns[-min_len:]
-    b_ret = bench_ret[-min_len:]
+    p_ret = aligned["portfolio"].values
+    b_ret = aligned["benchmark"].values
 
     var_bench = float(np.var(b_ret, ddof=1))
     if var_bench <= 0:
@@ -568,15 +691,25 @@ def get_var_es_payload(conn, person_id: int) -> dict[str, Any]:
 # 5. FRONTIÈRE EFFICIENTE
 # ═════════════════════════════════════════════════════════════════════════════
 
-def get_efficient_frontier_payload(conn, person_id: int) -> dict[str, Any]:
+def get_efficient_frontier_presets_payload() -> dict[str, Any]:
+    """Expose les presets de diversification pour l'UI."""
+    return {"presets": efficient_frontier.list_frontier_presets()}
+
+
+def get_efficient_frontier_payload(
+    conn,
+    person_id: int,
+    settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
-    Calcule la frontière efficiente via optimisation scipy (SLSQP).
+    Calcule la frontière efficiente avec contraintes de diversification.
 
     Retourne :
     - Points de la frontière (vol, ret)
     - Position du portefeuille actuel
     - Portefeuille de variance minimale
     - Portefeuille de Sharpe maximal
+    - Métriques de diversification/concentration
     """
     weights_df = _get_positions_weights(conn, person_id)
     if weights_df.empty or len(weights_df) < 2:
@@ -602,125 +735,65 @@ def get_efficient_frontier_payload(conn, person_id: int) -> dict[str, Any]:
     ret_data = returns_df[common].dropna()
     n_assets = len(common)
 
+    if n_assets < 2:
+        return _error_payload("Pas assez d'actifs exploitables pour l'optimisation")
+
     # Rendements et covariance annualisés
-    mean_returns = ret_data.mean().values * WEEKS_PER_YEAR
-    cov_matrix = ret_data.cov().values * WEEKS_PER_YEAR
+    mean_returns = ret_data.mean().values.astype(float) * WEEKS_PER_YEAR
+    cov_matrix = ret_data.cov().values.astype(float) * WEEKS_PER_YEAR
 
     # Poids actuels (renormalisés sur les actifs disponibles)
     w_df = weights_df[weights_df["ticker"].isin(common)].copy()
     w_df = w_df.set_index("ticker").loc[common]
-    current_weights = w_df["weight"].values
+    current_weights = w_df["weight"].values.astype(float)
     current_weights = current_weights / current_weights.sum()
 
     # Position du portefeuille actuel
     current_ret = float(current_weights @ mean_returns) * 100
     current_vol = float(math.sqrt(current_weights @ cov_matrix @ current_weights)) * 100
 
-    # Optimisation via scipy
-    from scipy.optimize import minimize
+    constraints, warnings, errors = efficient_frontier.build_constraints_from_settings(
+        settings=settings,
+        n_assets=n_assets,
+    )
+    if errors:
+        return _error_payload(" ".join(errors))
 
-    # Contraintes : somme des poids = 1
-    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
-    # Bornes : long-only (pas de vente à découvert)
-    bounds = [(0.0, 1.0)] * n_assets
-    initial_weights = np.ones(n_assets) / n_assets
-
-    # Portefeuille de variance minimale
-    min_var_result = minimize(
-        lambda w: float(w @ cov_matrix @ w),
-        initial_weights,
-        method="SLSQP",
-        bounds=bounds,
+    optimized = efficient_frontier.optimize_efficient_frontier(
+        mean_returns=mean_returns,
+        cov_matrix=cov_matrix,
+        tickers=common,
+        risk_free_rate=RISK_FREE_RATE,
         constraints=constraints,
+        current_weights=current_weights,
     )
-    min_var_weights = min_var_result.x if min_var_result.success else initial_weights
-    min_var_ret = float(min_var_weights @ mean_returns) * 100
-    min_var_vol = float(math.sqrt(min_var_weights @ cov_matrix @ min_var_weights)) * 100
-
-    # Portefeuille de Sharpe maximal (tangent portfolio)
-    def neg_sharpe(w):
-        ret_ann = float(w @ mean_returns)
-        vol_ann = float(math.sqrt(w @ cov_matrix @ w))
-        if vol_ann <= 0:
-            return 1e6
-        return -(ret_ann - RISK_FREE_RATE) / vol_ann
-
-    max_sharpe_result = minimize(
-        neg_sharpe,
-        initial_weights,
-        method="SLSQP",
-        bounds=bounds,
-        constraints=constraints,
-    )
-    max_sharpe_weights = max_sharpe_result.x if max_sharpe_result.success else initial_weights
-    max_sharpe_ret = float(max_sharpe_weights @ mean_returns) * 100
-    max_sharpe_vol = float(math.sqrt(max_sharpe_weights @ cov_matrix @ max_sharpe_weights)) * 100
-
-    # Points de la frontière (optimisation pour chaque niveau de rendement cible)
-    frontier_points = _compute_frontier_points(
-        mean_returns, cov_matrix, n_assets, bounds, n_points=40
-    )
+    if "error" in optimized:
+        return _error_payload(optimized["error"])
 
     return {
-        "frontier_points": frontier_points,
+        "frontier_points": optimized.get("frontier_points", []),
         "current_portfolio": {
             "vol": round(current_vol, 2),
             "ret": round(current_ret, 2),
         },
         "min_variance": {
-            "vol": round(min_var_vol, 2),
-            "ret": round(min_var_ret, 2),
-            "weights": {common[i]: round(float(min_var_weights[i]) * 100, 1) for i in range(n_assets)},
+            "vol": optimized["min_variance"]["volatility_ann_pct"],
+            "ret": optimized["min_variance"]["return_ann_pct"],
+            "sharpe": optimized["min_variance"]["sharpe"],
+            "weights": optimized["min_variance"]["weights"],
+            "diversification": optimized["min_variance"]["diversification"],
         },
         "max_sharpe": {
-            "vol": round(max_sharpe_vol, 2),
-            "ret": round(max_sharpe_ret, 2),
-            "weights": {common[i]: round(float(max_sharpe_weights[i]) * 100, 1) for i in range(n_assets)},
+            "vol": optimized["max_sharpe"]["volatility_ann_pct"],
+            "ret": optimized["max_sharpe"]["return_ann_pct"],
+            "sharpe": optimized["max_sharpe"]["sharpe"],
+            "weights": optimized["max_sharpe"]["weights"],
+            "diversification": optimized["max_sharpe"]["diversification"],
         },
+        "constraints_applied": optimized.get("constraints_applied", {}),
+        "warnings": warnings + optimized.get("warnings", []),
         "tickers": common,
     }
-
-
-def _compute_frontier_points(
-    mean_returns: np.ndarray,
-    cov_matrix: np.ndarray,
-    n_assets: int,
-    bounds: list[tuple[float, float]],
-    n_points: int = 40,
-) -> list[dict[str, float]]:
-    """
-    Calcule les points de la frontière efficiente par optimisation.
-
-    Pour chaque rendement cible entre min et max, on minimise la variance
-    sous contrainte de rendement = cible et somme des poids = 1.
-    """
-    from scipy.optimize import minimize
-
-    min_ret = float(np.min(mean_returns))
-    max_ret = float(np.max(mean_returns))
-    target_returns = np.linspace(min_ret, max_ret, n_points)
-
-    points = []
-    initial_weights = np.ones(n_assets) / n_assets
-
-    for target_ret in target_returns:
-        constraints = [
-            {"type": "eq", "fun": lambda w: np.sum(w) - 1.0},
-            {"type": "eq", "fun": lambda w, tr=target_ret: float(w @ mean_returns) - tr},
-        ]
-        result = minimize(
-            lambda w: float(w @ cov_matrix @ w),
-            initial_weights,
-            method="SLSQP",
-            bounds=bounds,
-            constraints=constraints,
-        )
-        if result.success:
-            vol = float(math.sqrt(result.x @ cov_matrix @ result.x)) * 100
-            ret = float(result.x @ mean_returns) * 100
-            points.append({"vol": round(vol, 2), "ret": round(ret, 2)})
-
-    return points
 
 
 # ═════════════════════════════════════════════════════════════════════════════
