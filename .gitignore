@@ -45,6 +45,9 @@ build/
 # Runtime local
 .patrimoine/
 
+# Environnement local (ne jamais commiter)
+.env
+
 # Outils personnels / config locale
 .agents/
 .claude/
@@ -53,6 +56,7 @@ build/
 # Fichiers de travail personnels
 plan_prevision.md
 prevision.md
+TODO.md
 
 # Audits, rapports et docs de pilotage
 AUDIT_*.md
@@ -67,3 +71,8 @@ BACKLOG_GLOBAL.md
 .mypy_cache/
 pytest-cache-files-*/
 test_results.txt
+
+# Coverage
+htmlcov/
+.coverage
+coverage.xml

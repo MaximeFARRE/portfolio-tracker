@@ -1,6 +1,7 @@
 """
 Tests DB pour le module services/credits.py.
-Couvre : upsert_credit, replace_amortissement, get_credit_kpis.
+Couvre : upsert_credit, replace_amortissement, get_credit_kpis,
+         get_crd_a_date, cout_reel_mois_credit_via_bankin.
 """
 import pytest
 from services.credits import (
@@ -9,6 +10,8 @@ from services.credits import (
     replace_amortissement,
     get_amortissements,
     get_credit_kpis,
+    get_crd_a_date,
+    cout_reel_mois_credit_via_bankin,
 )
 
 
@@ -182,3 +185,146 @@ def test_get_credit_kpis_sans_amortissement(conn_credit):
     kpis = get_credit_kpis(conn_credit, credit_id)
     assert kpis["crd_estime"] == pytest.approx(0.0)
     assert kpis["interets_restants"] == pytest.approx(0.0)
+
+
+# ─── get_crd_a_date ────────────────────────────────────────────────────────
+
+def _insert_amortissement_2_mois(conn, credit_id: int) -> None:
+    """Insere deux échéances pour les tests de CRD."""
+    rows = [
+        {
+            "date_echeance": "2025-01-01",
+            "mensualite": 1025.0,
+            "capital_amorti": 700.0,
+            "interets": 285.0,
+            "assurance": 40.0,
+            "crd": 99_300.0,
+            "annee": 2025,
+            "mois": 1,
+        },
+        {
+            "date_echeance": "2025-02-01",
+            "mensualite": 1025.0,
+            "capital_amorti": 706.0,
+            "interets": 279.0,
+            "assurance": 40.0,
+            "crd": 98_594.0,
+            "annee": 2025,
+            "mois": 2,
+        },
+    ]
+    replace_amortissement(conn, credit_id, rows)
+
+
+def test_get_crd_a_date_retourne_derniere_echeance_passee(conn_credit):
+    """get_crd_a_date renvoie le CRD de la dernière échéance <= date_ref."""
+    credit_id = upsert_credit(conn_credit, _base_credit_data())
+    _insert_amortissement_2_mois(conn_credit, credit_id)
+
+    crd = get_crd_a_date(conn_credit, credit_id=credit_id, date_ref="2025-01-15")
+    assert crd == pytest.approx(99_300.0)
+
+
+def test_get_crd_a_date_apres_toutes_echeances(conn_credit):
+    """get_crd_a_date après la dernière échéance renvoie le CRD de la dernière ligne."""
+    credit_id = upsert_credit(conn_credit, _base_credit_data())
+    _insert_amortissement_2_mois(conn_credit, credit_id)
+
+    crd = get_crd_a_date(conn_credit, credit_id=credit_id, date_ref="2030-01-01")
+    assert crd == pytest.approx(98_594.0)
+
+
+def test_get_crd_a_date_avant_premiere_echeance_renvoie_premier_crd(conn_credit):
+    """get_crd_a_date avant toute échéance renvoie le CRD de la première ligne (fallback)."""
+    credit_id = upsert_credit(conn_credit, _base_credit_data())
+    _insert_amortissement_2_mois(conn_credit, credit_id)
+
+    crd = get_crd_a_date(conn_credit, credit_id=credit_id, date_ref="2024-01-01")
+    # Fallback : première échéance disponible
+    assert crd == pytest.approx(99_300.0)
+
+
+def test_get_crd_a_date_sans_amortissement_retourne_zero(conn_credit):
+    """Aucune échéance en base : get_crd_a_date retourne 0.0 sans planter."""
+    credit_id = upsert_credit(conn_credit, _base_credit_data())
+    crd = get_crd_a_date(conn_credit, credit_id=credit_id, date_ref="2025-06-01")
+    assert crd == pytest.approx(0.0)
+
+
+# ─── cout_reel_mois_credit_via_bankin ──────────────────────────────────────
+
+@pytest.fixture
+def conn_credit_avec_payer(conn_credit):
+    """Ajoute un compte payeur et le lie au crédit."""
+    conn_credit.execute(
+        "INSERT INTO accounts(person_id, name, account_type, currency) "
+        "VALUES (1, 'Compte courant', 'BANQUE', 'EUR')"
+    )
+    conn_credit.commit()
+    payer_id = conn_credit.execute(
+        "SELECT id FROM accounts WHERE name = 'Compte courant'"
+    ).fetchone()[0]
+
+    data = _base_credit_data()
+    data["payer_account_id"] = payer_id
+    upsert_credit(conn_credit, data)
+
+    credit_id = conn_credit.execute(
+        "SELECT id FROM credits WHERE account_id = 1"
+    ).fetchone()[0]
+
+    return conn_credit, credit_id, payer_id
+
+
+def test_cout_reel_sans_payer_account_retourne_0(conn_credit):
+    """Si payer_account_id est NULL, le coût réel est 0.0."""
+    credit_id = upsert_credit(conn_credit, _base_credit_data())  # payer_account_id=None
+    cout = cout_reel_mois_credit_via_bankin(
+        conn_credit, credit_id=credit_id, mois_yyyy_mm_01="2025-01-01"
+    )
+    assert cout == pytest.approx(0.0)
+
+
+def test_cout_reel_sans_transaction_retourne_0(conn_credit_avec_payer):
+    """Aucune transaction pour ce mois : coût = 0.0."""
+    conn, credit_id, _ = conn_credit_avec_payer
+    cout = cout_reel_mois_credit_via_bankin(
+        conn, credit_id=credit_id, mois_yyyy_mm_01="2025-01-01"
+    )
+    assert cout == pytest.approx(0.0)
+
+
+def test_cout_reel_avec_transaction_echeance_pret(conn_credit_avec_payer):
+    """Une transaction catégorie 'echeance pret' de type DEPENSE est comptée."""
+    conn, credit_id, payer_id = conn_credit_avec_payer
+
+    # Insérer une transaction correspondant à une échéance de crédit
+    conn.execute(
+        "INSERT INTO transactions(person_id, account_id, date, type, amount, category) "
+        "VALUES (1, ?, '2025-01-15', 'DEPENSE', 1025.0, 'echeance pret immobilier')",
+        (payer_id,)
+    )
+    conn.commit()
+
+    cout = cout_reel_mois_credit_via_bankin(
+        conn, credit_id=credit_id, mois_yyyy_mm_01="2025-01-01"
+    )
+    assert cout == pytest.approx(1025.0)
+
+
+def test_cout_reel_ignore_transactions_hors_mois(conn_credit_avec_payer):
+    """Les transactions hors du mois demandé ne sont pas comptées."""
+    conn, credit_id, payer_id = conn_credit_avec_payer
+
+    # Transaction en février : ne doit pas apparaitre dans janvier
+    conn.execute(
+        "INSERT INTO transactions(person_id, account_id, date, type, amount, category) "
+        "VALUES (1, ?, '2025-02-15', 'DEPENSE', 1025.0, 'echeance pret immobilier')",
+        (payer_id,)
+    )
+    conn.commit()
+
+    cout = cout_reel_mois_credit_via_bankin(
+        conn, credit_id=credit_id, mois_yyyy_mm_01="2025-01-01"
+    )
+    assert cout == pytest.approx(0.0)

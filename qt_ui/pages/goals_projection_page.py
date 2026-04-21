@@ -68,6 +68,7 @@ from services.native_milestones import (
     get_scope_milestone_metrics,
 )
 from qt_ui.panels.prevision_avancee_panel import PrevisionAvanceePanel
+from qt_ui.panels.backtest_portfolio_panel import BacktestPortefeuillePanel
 from utils.format_monnaie import money
 
 logger = logging.getLogger(__name__)
@@ -345,11 +346,13 @@ class GoalsProjectionPage(QWidget):
         self._panel_goals = self._build_goals_tab()
         self._panel_scenarios = self._build_scenarios_tab()
         self._panel_prevision = PrevisionAvanceePanel(self._conn)
+        self._panel_backtest = BacktestPortefeuillePanel(self._conn)
 
         self._tabs.addTab(self._panel_projection, "Projection standard")
         self._tabs.addTab(self._panel_goals, "Objectifs")
         self._tabs.addTab(self._panel_scenarios, "Scénarios")
         self._tabs.addTab(self._panel_prevision, "Prévision avancée")
+        self._tabs.addTab(self._panel_backtest, "Backtest portefeuille")
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -397,6 +400,8 @@ class GoalsProjectionPage(QWidget):
         self._scope_type = str(data[0])
         self._scope_id = None if data[1] is None else int(data[1])
         self._load_scope_data()
+        if self._tabs.currentIndex() in (3, 4):
+            self._refresh_active_tab()
 
     def _on_tab_changed(self, _index: int) -> None:
         self._refresh_active_tab()
@@ -412,6 +417,9 @@ class GoalsProjectionPage(QWidget):
         elif idx == 3:
             self._panel_prevision.set_scope(self._scope_type, self._scope_id)
             self._panel_prevision.refresh()
+        elif idx == 4:
+            self._panel_backtest.set_scope(self._scope_type, self._scope_id)
+            self._panel_backtest.refresh()
 
     def _build_projection_tab(self) -> QWidget:
         w = QWidget()

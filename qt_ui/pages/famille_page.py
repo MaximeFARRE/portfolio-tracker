@@ -8,20 +8,19 @@ import plotly.express as px
 import plotly.graph_objects as go
 from time import monotonic
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QLabel,
-    QPushButton, QScrollArea, QGroupBox, QComboBox, QSizePolicy,
-    QMessageBox, QFrame, QProgressBar
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QScrollArea, QGroupBox, QComboBox, QProgressBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from qt_ui.components.animated_tab import AnimatedTabWidget
 
 from qt_ui.widgets import PlotlyView, DataTableWidget, KpiCard, MetricLabel
 from qt_ui.theme import (
-    BG_PRIMARY, BG_SIDEBAR, BORDER_SUBTLE, TEXT_PRIMARY, TEXT_SECONDARY,
-    TEXT_MUTED, ACCENT_BLUE, STYLE_BTN_PRIMARY, STYLE_TAB, STYLE_GROUP,
+    BG_PRIMARY, BG_SIDEBAR, BORDER_SUBTLE, TEXT_PRIMARY,
+    STYLE_BTN_PRIMARY, STYLE_TAB, STYLE_GROUP,
     STYLE_INPUT, STYLE_SCROLLAREA, STYLE_PROGRESS, STYLE_TITLE_LARGE,
     STYLE_TITLE, STYLE_SECTION, STYLE_SECTION_MARGIN, STYLE_STATUS,
-    STYLE_STATUS_SUCCESS, STYLE_STATUS_WARNING, STYLE_STATUS_ERROR, COLOR_SUCCESS,
+    STYLE_STATUS_SUCCESS, STYLE_STATUS_WARNING, STYLE_STATUS_ERROR,
     plotly_layout,
 )
 from utils.format_monnaie import money

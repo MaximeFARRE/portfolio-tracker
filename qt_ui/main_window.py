@@ -1,16 +1,16 @@
 """
 Fenêtre principale de l'application Patrimoine.
-Contient la barre de navigation latérale + le QStackedWidget central.
+Contient la barre de navigation latérale + l'AnimatedStackedWidget central.
 """
 import logging
 import time
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QPushButton, QLabel, QStackedWidget, QFrame, QSizePolicy, QStatusBar,
+    QPushButton, QLabel, QFrame, QSizePolicy, QStatusBar,
     QComboBox
 )
-from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QFont
 
 from services.common_utils import fmt_amount, row_get
 from services.global_search_service import query_global_search
@@ -20,9 +20,9 @@ from qt_ui.pages.import_page import ImportPage
 from qt_ui.pages.goals_projection_page import GoalsProjectionPage
 from qt_ui.pages.settings_page import SettingsPage
 from qt_ui.theme import (
-    BG_PRIMARY, BG_SIDEBAR, BG_CARD, BG_HOVER, BG_ACTIVE, BORDER_SUBTLE, BORDER_DEFAULT,
+    BG_PRIMARY, BG_SIDEBAR, BG_CARD, BG_ACTIVE, BORDER_SUBTLE, BORDER_DEFAULT,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, TEXT_DARK, TEXT_DISABLED,
-    ACCENT_BLUE, STYLE_NAV_BTN,
+    STYLE_NAV_BTN,
 )
 from qt_ui.components.animated_stack import AnimatedStackedWidget
 

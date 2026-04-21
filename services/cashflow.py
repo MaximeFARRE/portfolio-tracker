@@ -14,6 +14,20 @@ def _to_float(value, default: float = 0.0) -> float:
         return float(default)
 
 
+def _compute_savings_streak(savings_series: pd.Series) -> int:
+    """
+    Nombre de mois consécutifs les plus récents avec une épargne strictement positive.
+    Itère à rebours et s'arrête au premier mois non positif.
+    """
+    streak = 0
+    for value in savings_series.iloc[::-1]:
+        if _to_float(value) > 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
 def _empty_passive_income_df() -> pd.DataFrame:
     return pd.DataFrame(
         columns=["mois", "dividendes", "interets", "revenus_passifs"]
@@ -112,6 +126,7 @@ def get_passive_income_monthly_for_scope(
     return piv[["mois", "dividendes", "interets", "revenus_passifs"]].sort_values("mois").reset_index(drop=True)
 
 
+
 def get_cashflow_for_scope(
     conn,
     scope_type: str,
@@ -150,13 +165,15 @@ def get_cashflow_for_scope(
     try:
         rows_inc = conn.execute(income_sql.format(where_clause=where_clause), params).fetchall()
         income_df = pd.DataFrame(rows_inc, columns=["mois", "amount"]) if rows_inc else pd.DataFrame(columns=["mois", "amount"])
-    except Exception:
+    except Exception as exc:
+        logger.exception("get_cashflow_for_scope: échec requête revenus (scope=%s id=%s)", scope, scope_id, exc_info=exc)
         income_df = pd.DataFrame(columns=["mois", "amount"])
 
     try:
         rows_exp = conn.execute(expense_sql.format(where_clause=where_clause), params).fetchall()
         expense_df = pd.DataFrame(rows_exp, columns=["mois", "amount"]) if rows_exp else pd.DataFrame(columns=["mois", "amount"])
-    except Exception:
+    except Exception as exc:
+        logger.exception("get_cashflow_for_scope: échec requête dépenses (scope=%s id=%s)", scope, scope_id, exc_info=exc)
         expense_df = pd.DataFrame(columns=["mois", "amount"])
 
     try:
@@ -360,12 +377,7 @@ def compute_savings_metrics(conn_or_df, person_id: Optional[int] = None,
     avg_expenses = float(base_avg["depenses"].mean()) if not base_avg.empty else 0.0
 
     # Streak de mois consécutifs avec épargne positive (depuis le plus récent)
-    streak = 0
-    for ep in df["epargne"].iloc[::-1]:
-        if _to_float(ep) > 0:
-            streak += 1
-        else:
-            break
+    streak = _compute_savings_streak(df["epargne"])
 
     return {
         # KPIs agrégés (rétrocompatibles)
@@ -558,18 +570,14 @@ def _compute_savings_kpis_from_cashflow(monthly_df: pd.DataFrame) -> dict:
         savings_rate = _to_float(monthly_rates.mean()) if not monthly_rates.empty else 0.0
 
     # Streak : série continue de mois avec épargne positive.
+    # On reconstruit la série sur tous les mois (y compris les mois sans données = 0)
+    # avant de calculer le streak, pour ne pas ignorer les trous.
     first_month = monthly_df["mois_dt"].min()
     last_month = monthly_df["mois_dt"].max()
-    idx = pd.date_range(start=first_month, end=last_month, freq="MS")
-    full_df = monthly_df.set_index("mois_dt").reindex(idx, fill_value=0.0)
+    full_index = pd.date_range(start=first_month, end=last_month, freq="MS")
+    full_df = monthly_df.set_index("mois_dt").reindex(full_index, fill_value=0.0)
     full_df["savings"] = full_df["income"] - full_df["expenses"]
-
-    streak = 0
-    for value in full_df["savings"].iloc[::-1]:
-        if _to_float(value) > 0:
-            streak += 1
-        else:
-            break
+    streak = _compute_savings_streak(full_df["savings"])
 
     return {
         "avg_monthly_income": avg_income,

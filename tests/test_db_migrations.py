@@ -4,6 +4,7 @@ from services.db import (
     MIG_VER_ADD_ASSET_IMPORT_ALIASES,
     MIG_VER_ADD_CREDITS_PAYER_ACCOUNT,
     MIG_VER_ADD_IMMO_COLUMNS,
+    MIG_VER_ADD_TX_ANALYSIS_FLAGS,
     MIG_VER_ADD_TR_PHONE,
     MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX,
     MIG_VER_IMPORT_BATCHES,
@@ -64,10 +65,14 @@ def test_apply_code_migrations_adds_missing_structural_elements():
     assert MIG_VER_ADD_CREDITS_PAYER_ACCOUNT in applied
     assert MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX in applied
     assert MIG_VER_ADD_ASSET_IMPORT_ALIASES in applied
+    assert MIG_VER_ADD_TX_ANALYSIS_FLAGS in applied
 
     assert "tr_phone" in _colnames(conn, "people")
     assert "payer_account_id" in _colnames(conn, "credits")
     assert "import_batch_id" in _colnames(conn, "transactions")
+    assert "is_hidden_from_cashflow" in _colnames(conn, "transactions")
+    assert "is_internal_transfer" in _colnames(conn, "transactions")
+    assert "deleted_at" in _colnames(conn, "transactions")
     assert "import_batch_id" in _colnames(conn, "depenses")
     assert "import_batch_id" in _colnames(conn, "revenus")
     assert "immobilier_value" in _colnames(conn, "patrimoine_snapshots")
@@ -92,6 +97,7 @@ def test_apply_code_migrations_adds_missing_structural_elements():
     assert MIG_VER_ADD_CREDITS_PAYER_ACCOUNT in versions
     assert MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX in versions
     assert MIG_VER_ADD_ASSET_IMPORT_ALIASES in versions
+    assert MIG_VER_ADD_TX_ANALYSIS_FLAGS in versions
 
     conn.close()
 
@@ -136,6 +142,7 @@ def test_run_migrations_applies_sql_and_code_versions(conn):
     assert MIG_VER_ADD_CREDITS_PAYER_ACCOUNT in versions
     assert MIG_VER_ADD_TX_PERSON_ACCOUNT_INDEX in versions
     assert MIG_VER_ADD_ASSET_IMPORT_ALIASES in versions
+    assert MIG_VER_ADD_TX_ANALYSIS_FLAGS in versions
     assert 5 in versions
 
     # Idempotence complète

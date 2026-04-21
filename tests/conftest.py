@@ -19,7 +19,7 @@ def conn():
         if stmt and not stmt.upper().startswith("PRAGMA"):
             try:
                 c.execute(stmt)
-            except Exception:
+            except sqlite3.OperationalError:
                 pass  # index ou table déjà présents
 
     yield c

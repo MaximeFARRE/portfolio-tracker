@@ -194,6 +194,7 @@ class TestGoalsProjectionPage:
         stack = ExitStack()
         stack.enter_context(patch("qt_ui.pages.goals_projection_page.PlotlyView", dummy_plotly))
         stack.enter_context(patch("qt_ui.panels.prevision_avancee_panel.PlotlyView", dummy_plotly))
+        stack.enter_context(patch("qt_ui.panels.backtest_portfolio_panel.PlotlyView", dummy_plotly))
         return stack
 
     @pytest.mark.skipif(not _GOALS_PAGE_AVAILABLE, reason="GoalsProjectionPage non importable (WebEngine manquant)")
